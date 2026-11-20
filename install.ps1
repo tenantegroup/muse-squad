@@ -4,17 +4,20 @@
 
 $ErrorActionPreference = 'Stop'
 
-$Version = '0.1.0'
+$Version = '0.2.0'
 $configDir = if ($env:MUSE_CONFIG_DIR) { $env:MUSE_CONFIG_DIR } else { Join-Path $HOME '.config/muse' }
 $mode = 'install'
 $help = $false
 $skipMcp = $false
+$backupChoice = 'auto'
 if ($null -eq $args) { $args = @() }
 
 for ($i = 0; $i -lt $args.Count; $i++) {
   switch -CaseSensitive ($args[$i]) {
     '--uninstall' { $mode = 'uninstall' }
     '--no-mcp' { $skipMcp = $true }
+    '--backup' { $backupChoice = 'yes' }
+    '--no-backup' { $backupChoice = 'no' }
     '--dir' {
       if (($i + 1) -ge $args.Count) { throw '--dir requires a value' }
       $configDir = $args[++$i]
@@ -23,6 +26,15 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     '--help' { $help = $true }
     default { throw "Unknown option: $($args[$i])" }
   }
+}
+
+$configDir = [IO.Path]::GetFullPath($configDir)
+if ($configDir -notmatch '^[A-Za-z]:[\\/]?$') {
+  $trimChars = [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+  $configDir = $configDir.TrimEnd($trimChars)
+}
+if ($backupChoice -eq 'auto' -and $env:MUSE_SQUAD_NO_BACKUP -eq '1') {
+  $backupChoice = 'no'
 }
 
 if ($help) {
@@ -37,11 +49,14 @@ Options:
   --dir PATH       Install into PATH instead of ~/.config/muse
   --uninstall      Remove managed files and unregister custom-coder
   --no-mcp         Skip custom-coder MCP registration
+  --backup         Force a backup prompt/backup
+  --no-backup      Skip the backup prompt and backup
   --help, -h       Show this help
 
 Environment:
   MUSE_CONFIG_DIR     Equivalent to --dir (useful with irm | iex)
   MUSE_SQUAD_SKIP_MCP Set to 1 to skip MCP registration
+  MUSE_SQUAD_NO_BACKUP Set to 1 to skip backup unless --backup is passed
 
 Endpoints are configured in endpoints.json inside the config directory.
 
@@ -54,6 +69,54 @@ Note: Windows PowerShell 5.1 has no `irm` alias. Use:
 function Get-Dest([string]$rel) {
   $parts = $rel -replace '/', [IO.Path]::DirectorySeparatorChar
   return [IO.Path]::GetFullPath((Join-Path $configDir $parts))
+}
+
+function Backup-Config {
+  if (-not (Test-Path -LiteralPath $configDir -PathType Container)) {
+    Write-Host '  skip backup  no existing config dir'
+    return
+  }
+  if ($backupChoice -eq 'no') {
+    Write-Host '  skipped      backup (--no-backup)'
+    return
+  }
+
+  $answer = 'Y'
+  $interactive = $false
+  try {
+    $interactive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+  } catch {
+    $interactive = $false
+  }
+  if ($interactive) {
+    $answer = Read-Host 'Back up current Muse config before continuing? [Y/n]'
+    if ([string]::IsNullOrWhiteSpace($answer)) { $answer = 'Y' }
+  } else {
+    Write-Host '  no interactive input detected; backing up by default'
+  }
+
+  if ($answer -match '^[Yy]([Ee][Ss])?$') {
+    # continue with the backup
+  } elseif ($answer -match '^[Nn]([Oo])?$') {
+    Write-Host '  skipped      backup (user chose no)'
+    return
+  } else {
+    throw 'Expected Y or n for backup prompt'
+  }
+
+  $stamp = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + $PID
+  $parent = Split-Path -Parent $configDir
+  $leaf = Split-Path -Leaf $configDir
+  if ([string]::IsNullOrEmpty($parent)) { $parent = '.' }
+  if ([string]::IsNullOrEmpty($leaf)) { $leaf = 'muse-config' }
+  $backup = Join-Path $parent ($leaf + '.backup.' + $stamp)
+
+  New-Item -ItemType Directory -Path $backup -Force | Out-Null
+  Get-ChildItem -LiteralPath $configDir -Force | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination $backup -Recurse -Force
+  }
+  Write-Host "  backed up    $configDir -> $backup"
+  Write-Host "  restore      copy the contents of $backup back into $configDir"
 }
 
 function Install-File([string]$rel, [string]$content) {
@@ -133,6 +196,8 @@ function Register-Mcp([string]$action) {
 
 Write-Host "muse-squad v$Version - $mode"
 Write-Host "config dir: $configDir"
+
+Backup-Config
 
 if ($mode -eq 'uninstall') {
   Register-Mcp 'unregister'
@@ -225,9 +290,35 @@ description: Multi-agent explore-first planning mode that writes a decision-comp
 ---
 You are in SQUAD-PLAN mode. Do NOT edit product code yet.
 
+## Subagent Task Labeling (TUI Visibility)
+
+When spawning any subagent, set its short task title / description to:
+
+`[<agent-role> | <short-model-name>] <concise action>`
+
+- `<agent-role>` is the role, plus an index when there are peers: `scout-1`, `plan-reviewer`, `worker-2`.
+- `<short-model-name>` is lowercase and stable: `ember` for `muse-ember-1.0`, `spark` for `muse-spark-1.3`, `wonder` for `muse-wonder-*` if configured, or the `custom-coder` endpoint alias (`local-coder`, `grill-reviewer`) when the work goes through that endpoint. Combine with `+` when a native agent delegates to `custom-coder`, e.g. `ember+local-coder`.
+- Keep `<concise action>` under ~50 characters so the TUI footer (`└ ◈ <task> running <elapsed>`) does not truncate the useful part. Start with a verb; no trailing punctuation.
+- Use exactly `[role | tag] action`: lowercase tags, one space on each side of `|`, no extra prefix or wrapper.
+
+Examples:
+
+```text
+[scout-1 | ember] Map mcp/bridge.js and endpoints.json
+[plan-reviewer | spark] Audit .muse/PLAN.md for edge cases
+[worker-1 | ember] Implement FIFO semaphore queue
+[worker-2 | ember+local-coder] Generate unit tests for fallback
+```
+
+Use this format as the default for every spawn. If a one-off subagent truly has no meaningful role or model, keep the bracketed prefix with a plain tag such as `[helper | ember]` rather than leaving the title unlabeled.
+
 ## Concurrency Budget (read first)
 
 Before spawning anything, read `~/.config/muse/endpoints.json` (or call `custom-coder:list_endpoints`) and note the `muse_models` limits and each endpoint's `max_concurrency`. The orchestrator must never spawn more simultaneous native subagents of a given model than that model's `muse_models` limit — for example at most 4 `muse-ember-1.0` or 2 `muse-spark-1.3` subagents at once. Batch any larger exploration into successive waves. Parallel workers may safely call `custom-coder` MCP tools at the same time: the router queues requests FIFO and serializes them per endpoint's `max_concurrency`.
+
+## Context Size (custom-coder)
+
+When calling `custom-coder`, keep `repo_context`, `file_context`, and `plan_markdown` short and relevant to the decision at hand. Use `custom-coder:list_endpoints` to check the target endpoint's `max_input_chars` and `extra_body` context hints (such as `options.num_ctx`) before sending. Send only the needed files or excerpts — never dump whole unrelated files. If a reply starts with the input-truncated warning, the model saw less context than you intended: shorten the context and re-ask instead of trusting the critique.
 
 1. Spawn parallel read-only subagents (`explore` / `general-purpose`) to map the relevant files, dependencies, and existing patterns.
 2. Ask the user clarifying questions ONLY if an architectural fork cannot be resolved from the codebase.
@@ -242,9 +333,36 @@ Install-File 'skills/squad-execute/SKILL.md' @'
 name: squad-execute
 description: Executes the approved `.muse/PLAN.md` using parallel subagents in isolated worktrees, with a verification gate that blocks premature completion.
 ---
+
+## Subagent Task Labeling (TUI Visibility)
+
+When spawning any subagent, set its short task title / description to:
+
+`[<agent-role> | <short-model-name>] <concise action>`
+
+- `<agent-role>` is the role, plus an index when there are peers: `worker-1`, `worker-2`, `scout-1`, `verifier-1`.
+- `<short-model-name>` is lowercase and stable: `ember` for `muse-ember-1.0`, `spark` for `muse-spark-1.3`, `wonder` for `muse-wonder-*` if configured, or the `custom-coder` endpoint alias (`local-coder`, `grill-reviewer`) when the work goes through that endpoint. Combine with `+` when a native agent delegates to `custom-coder`, e.g. `ember+local-coder`.
+- Keep `<concise action>` under ~50 characters so the TUI footer (`└ ◈ <task> running <elapsed>`) does not truncate the useful part. Start with a verb; no trailing punctuation.
+- Use exactly `[role | tag] action`: lowercase tags, one space on each side of `|`, no extra prefix or wrapper.
+
+Examples:
+
+```text
+[scout-1 | ember] Map mcp/bridge.js and endpoints.json
+[plan-reviewer | spark] Audit .muse/PLAN.md for edge cases
+[worker-1 | ember] Implement FIFO semaphore queue
+[worker-2 | ember+local-coder] Generate unit tests for fallback
+```
+
+Use this format as the default for every spawn. If a one-off subagent truly has no meaningful role or model, keep the bracketed prefix with a plain tag such as `[helper | ember]` rather than leaving the title unlabeled.
+
 Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` section — that section is the durable handoff record when resuming a long or interrupted session. Group independent tasks into parallel waves and delegate each bounded task to `worker` subagents using isolated Git worktrees (`--subagent-worktree-isolation` behavior).
 
 Use the `custom-coder` MCP tool (`generate_code`) with `endpoint: "local-coder"` for heavy code generation: pass a bounded prompt plus the relevant file context, then apply and verify the returned diff locally.
+
+## Context Size (custom-coder)
+
+Before each `generate_code` call, use `custom-coder:list_endpoints` to check the target endpoint's `max_input_chars` and `extra_body` context hints (such as `options.num_ctx`). Keep `file_context` (and any `repo_context`) to the smallest excerpts that explain the change — no whole-file dumps, logs, or unrelated tests. If the reply starts with the input-truncated warning, shorten the context and re-ask; do not apply a diff generated from cut-off context.
 
 ## Concurrency Budget (read first)
 
@@ -384,7 +502,7 @@ const TOOLS = [
   },
   {
     name: 'list_endpoints',
-    description: 'Report every endpoint alias with its model and max_concurrency, plus the muse_models native-subagent limits and queue settings.',
+    description: 'Report every endpoint alias with its model, max_concurrency, max_tokens, max_input_chars, and extra_body keys, plus the muse_models native-subagent limits and queue settings. Keys are redacted.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -451,6 +569,28 @@ function loadConfig() {
     if (endpoint.temperature !== undefined && typeof endpoint.temperature !== 'number') {
       throw new Error(`${CONFIG_FILE}: endpoint "${name}" temperature must be a number`);
     }
+    if (endpoint.max_tokens !== undefined &&
+        (!Number.isInteger(endpoint.max_tokens) || endpoint.max_tokens < 1)) {
+      throw new Error(`${CONFIG_FILE}: endpoint "${name}" max_tokens must be a positive integer`);
+    }
+    if (endpoint.max_input_chars !== undefined &&
+        (!Number.isInteger(endpoint.max_input_chars) || endpoint.max_input_chars < 1)) {
+      throw new Error(`${CONFIG_FILE}: endpoint "${name}" max_input_chars must be a positive integer`);
+    }
+    if (endpoint.extra_body !== undefined &&
+        (!endpoint.extra_body || typeof endpoint.extra_body !== 'object' ||
+         Array.isArray(endpoint.extra_body))) {
+      throw new Error(`${CONFIG_FILE}: endpoint "${name}" extra_body must be an object`);
+    }
+    const onContextExceeded = endpoint.on_context_exceeded === undefined
+      ? 'truncate'
+      : endpoint.on_context_exceeded;
+    if (onContextExceeded !== 'truncate' && onContextExceeded !== 'fallback') {
+      throw new Error(
+        `${CONFIG_FILE}: endpoint "${name}" on_context_exceeded must be "truncate" or "fallback"`
+      );
+    }
+    endpoint.on_context_exceeded = onContextExceeded; // normalize default for callers
     const maxConcurrency = endpoint.max_concurrency === undefined
       ? DEFAULT_MAX_CONCURRENCY
       : endpoint.max_concurrency;
@@ -670,7 +810,78 @@ async function chatWithRetries(endpoint, payload, config) {
   }
 }
 
-async function queryWithFallback(primaryName, endpointConfig, payload, config) {
+function redactExtra(extra) {
+  if (!extra || typeof extra !== 'object') return extra;
+  const copy = Array.isArray(extra) ? [] : {};
+  for (const [key, value] of Object.entries(extra)) {
+    if (/^(api[_-]?key|authorization|secret|password|token)$/i.test(key)) {
+      copy[key] = '<redacted>';
+    } else if (value && typeof value === 'object') {
+      copy[key] = redactExtra(value);
+    } else {
+      copy[key] = value;
+    }
+  }
+  return copy;
+}
+
+function buildPayload(endpoint, requestTemplate) {
+  const { params } = requestTemplate;
+  let system = requestTemplate.systemPrompt;
+  let user = requestTemplate.userPrompt;
+  let warning = '';
+
+  // KV-cache guard: keep oversized prompts away from small local contexts.
+  if (typeof endpoint.max_input_chars === 'number') {
+    const limit = endpoint.max_input_chars;
+    const total = system.length + user.length;
+    if (total > limit) {
+      if (endpoint.on_context_exceeded === 'fallback') {
+        const error = new Error(
+          `input size ${total} exceeds max_input_chars ${limit} for endpoint "${endpoint.name}"`
+        );
+        error.contextExceeded = true;
+        error.retryable = false; // let fallback try another endpoint, not a retry
+        throw error;
+      }
+      if (system.length > limit) {
+        system = system.slice(0, limit);
+        user = '';
+      } else {
+        user = user.slice(0, Math.max(0, limit - system.length));
+      }
+      warning = `> *[Warning: Input truncated to max_input_chars for '${endpoint.name}']*\n\n`;
+    }
+  }
+
+  const extra = endpoint.extra_body && typeof endpoint.extra_body === 'object'
+    ? endpoint.extra_body
+    : {};
+  const temperature = params.temperature === undefined
+    ? endpoint.temperature
+    : params.temperature;
+  const maxTokens = params.max_tokens !== undefined
+    ? params.max_tokens
+    : (Object.prototype.hasOwnProperty.call(extra, 'max_tokens') ? undefined : endpoint.max_tokens);
+
+  return {
+    warning,
+    payload: {
+      ...extra, // backend-specific knobs first
+      // Core fields are written last so a malformed extra_body cannot clobber them.
+      model: endpoint.model,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user }
+      ],
+      stream: false,
+      ...(temperature === undefined ? {} : { temperature }),
+      ...(maxTokens === undefined ? {} : { max_tokens: maxTokens })
+    }
+  };
+}
+
+async function queryWithFallback(primaryName, requestTemplate, config) {
   const candidates = [];
   for (const name of [primaryName, ...config.fallbackOrder]) {
     if (name && !candidates.includes(name)) candidates.push(name);
@@ -684,9 +895,12 @@ async function queryWithFallback(primaryName, endpointConfig, payload, config) {
       continue;
     }
     try {
+      // Build per endpoint: each fallback may have its own context limit,
+      // temperature, max_tokens, and extra_body.
+      const { payload, warning } = buildPayload({ ...endpoint, name }, requestTemplate);
       const text = await chatWithRetries({ ...endpoint, name }, payload, config);
       return {
-        text,
+        text: `${warning}${text}`,
         meta: {
           primary: primaryName,
           servedBy: name,
@@ -699,22 +913,6 @@ async function queryWithFallback(primaryName, endpointConfig, payload, config) {
     }
   }
   throw new Error(`All endpoints failed:\n- ${attempts.map((item) => `${item.endpoint}: ${item.error}`).join('\n- ')}`);
-}
-
-function buildPayload(parsed, systemPrompt, userPrompt, params) {
-  const temperature = params.temperature === undefined
-    ? parsed.temperature
-    : params.temperature;
-  return {
-    model: parsed.model,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
-    ],
-    stream: false,
-    ...(temperature === undefined ? {} : { temperature }),
-    ...(params.max_tokens === undefined ? {} : { max_tokens: params.max_tokens })
-  };
 }
 
 async function callTool(name, args) {
@@ -732,6 +930,14 @@ async function callTool(name, args) {
         temperature: endpoint.temperature,
         maxConcurrency: endpoint.max_concurrency,
         max_concurrency: endpoint.max_concurrency,
+        maxTokens: endpoint.max_tokens,
+        max_tokens: endpoint.max_tokens,
+        maxInputChars: endpoint.max_input_chars,
+        max_input_chars: endpoint.max_input_chars,
+        onContextExceeded: endpoint.on_context_exceeded,
+        on_context_exceeded: endpoint.on_context_exceeded,
+        extraBody: redactExtra(endpoint.extra_body),
+        extra_body: redactExtra(endpoint.extra_body),
         apiKeyConfigured: Boolean(endpoint.api_key),
         ...queueSnapshot(endpointName)
       };
@@ -781,8 +987,7 @@ async function callTool(name, args) {
     ].join('\n');
     const result = await queryWithFallback(
       primary,
-      config.endpoints[primary],
-      buildPayload(config.endpoints[primary], CRITIQUE_SYSTEM, user, params),
+      { systemPrompt: CRITIQUE_SYSTEM, userPrompt: user, params },
       config
     );
     return { content: [{ type: 'text', text: result.text }], meta: result.meta };
@@ -801,8 +1006,7 @@ async function callTool(name, args) {
       : `TASK:\n${prompt}`;
     const result = await queryWithFallback(
       primary,
-      config.endpoints[primary],
-      buildPayload(config.endpoints[primary], system, user, params),
+      { systemPrompt: system, userPrompt: user, params },
       config
     );
     return { content: [{ type: 'text', text: result.text }], meta: result.meta };
@@ -1003,14 +1207,22 @@ Install-Endpoints-Config @'
       "api_key": "local-key",
       "model": "local-llama/Ornith-1.5-35B-A3B-MLX-4bit",
       "temperature": 0.2,
-      "max_concurrency": 1
+      "max_concurrency": 1,
+      "max_tokens": 8192,
+      "max_input_chars": 96000,
+      "extra_body": { "top_p": 0.9 },
+      "on_context_exceeded": "truncate"
     },
     "grill-reviewer": {
       "base_url": "http://127.0.0.1:8000/v1",
       "api_key": "local-key",
       "model": "ornith-1.5-35b",
       "temperature": 0.3,
-      "max_concurrency": 1
+      "max_concurrency": 1,
+      "max_tokens": 4096,
+      "max_input_chars": 96000,
+      "extra_body": { "top_p": 0.9 },
+      "on_context_exceeded": "truncate"
     }
   }
 }

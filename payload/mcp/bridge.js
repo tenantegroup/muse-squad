@@ -93,7 +93,7 @@ const TOOLS = [
   },
   {
     name: 'list_endpoints',
-    description: 'Report every endpoint alias with its model and max_concurrency, plus the muse_models native-subagent limits and queue settings.',
+    description: 'Report every endpoint alias with its model, max_concurrency, max_tokens, max_input_chars, and extra_body keys, plus the muse_models native-subagent limits and queue settings. Keys are redacted.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -160,6 +160,28 @@ function loadConfig() {
     if (endpoint.temperature !== undefined && typeof endpoint.temperature !== 'number') {
       throw new Error(`${CONFIG_FILE}: endpoint "${name}" temperature must be a number`);
     }
+    if (endpoint.max_tokens !== undefined &&
+        (!Number.isInteger(endpoint.max_tokens) || endpoint.max_tokens < 1)) {
+      throw new Error(`${CONFIG_FILE}: endpoint "${name}" max_tokens must be a positive integer`);
+    }
+    if (endpoint.max_input_chars !== undefined &&
+        (!Number.isInteger(endpoint.max_input_chars) || endpoint.max_input_chars < 1)) {
+      throw new Error(`${CONFIG_FILE}: endpoint "${name}" max_input_chars must be a positive integer`);
+    }
+    if (endpoint.extra_body !== undefined &&
+        (!endpoint.extra_body || typeof endpoint.extra_body !== 'object' ||
+         Array.isArray(endpoint.extra_body))) {
+      throw new Error(`${CONFIG_FILE}: endpoint "${name}" extra_body must be an object`);
+    }
+    const onContextExceeded = endpoint.on_context_exceeded === undefined
+      ? 'truncate'
+      : endpoint.on_context_exceeded;
+    if (onContextExceeded !== 'truncate' && onContextExceeded !== 'fallback') {
+      throw new Error(
+        `${CONFIG_FILE}: endpoint "${name}" on_context_exceeded must be "truncate" or "fallback"`
+      );
+    }
+    endpoint.on_context_exceeded = onContextExceeded; // normalize default for callers
     const maxConcurrency = endpoint.max_concurrency === undefined
       ? DEFAULT_MAX_CONCURRENCY
       : endpoint.max_concurrency;
@@ -379,7 +401,78 @@ async function chatWithRetries(endpoint, payload, config) {
   }
 }
 
-async function queryWithFallback(primaryName, endpointConfig, payload, config) {
+function redactExtra(extra) {
+  if (!extra || typeof extra !== 'object') return extra;
+  const copy = Array.isArray(extra) ? [] : {};
+  for (const [key, value] of Object.entries(extra)) {
+    if (/^(api[_-]?key|authorization|secret|password|token)$/i.test(key)) {
+      copy[key] = '<redacted>';
+    } else if (value && typeof value === 'object') {
+      copy[key] = redactExtra(value);
+    } else {
+      copy[key] = value;
+    }
+  }
+  return copy;
+}
+
+function buildPayload(endpoint, requestTemplate) {
+  const { params } = requestTemplate;
+  let system = requestTemplate.systemPrompt;
+  let user = requestTemplate.userPrompt;
+  let warning = '';
+
+  // KV-cache guard: keep oversized prompts away from small local contexts.
+  if (typeof endpoint.max_input_chars === 'number') {
+    const limit = endpoint.max_input_chars;
+    const total = system.length + user.length;
+    if (total > limit) {
+      if (endpoint.on_context_exceeded === 'fallback') {
+        const error = new Error(
+          `input size ${total} exceeds max_input_chars ${limit} for endpoint "${endpoint.name}"`
+        );
+        error.contextExceeded = true;
+        error.retryable = false; // let fallback try another endpoint, not a retry
+        throw error;
+      }
+      if (system.length > limit) {
+        system = system.slice(0, limit);
+        user = '';
+      } else {
+        user = user.slice(0, Math.max(0, limit - system.length));
+      }
+      warning = `> *[Warning: Input truncated to max_input_chars for '${endpoint.name}']*\n\n`;
+    }
+  }
+
+  const extra = endpoint.extra_body && typeof endpoint.extra_body === 'object'
+    ? endpoint.extra_body
+    : {};
+  const temperature = params.temperature === undefined
+    ? endpoint.temperature
+    : params.temperature;
+  const maxTokens = params.max_tokens !== undefined
+    ? params.max_tokens
+    : (Object.prototype.hasOwnProperty.call(extra, 'max_tokens') ? undefined : endpoint.max_tokens);
+
+  return {
+    warning,
+    payload: {
+      ...extra, // backend-specific knobs first
+      // Core fields are written last so a malformed extra_body cannot clobber them.
+      model: endpoint.model,
+      messages: [
+        { role: 'system', content: system },
+        { role: 'user', content: user }
+      ],
+      stream: false,
+      ...(temperature === undefined ? {} : { temperature }),
+      ...(maxTokens === undefined ? {} : { max_tokens: maxTokens })
+    }
+  };
+}
+
+async function queryWithFallback(primaryName, requestTemplate, config) {
   const candidates = [];
   for (const name of [primaryName, ...config.fallbackOrder]) {
     if (name && !candidates.includes(name)) candidates.push(name);
@@ -393,9 +486,12 @@ async function queryWithFallback(primaryName, endpointConfig, payload, config) {
       continue;
     }
     try {
+      // Build per endpoint: each fallback may have its own context limit,
+      // temperature, max_tokens, and extra_body.
+      const { payload, warning } = buildPayload({ ...endpoint, name }, requestTemplate);
       const text = await chatWithRetries({ ...endpoint, name }, payload, config);
       return {
-        text,
+        text: `${warning}${text}`,
         meta: {
           primary: primaryName,
           servedBy: name,
@@ -408,22 +504,6 @@ async function queryWithFallback(primaryName, endpointConfig, payload, config) {
     }
   }
   throw new Error(`All endpoints failed:\n- ${attempts.map((item) => `${item.endpoint}: ${item.error}`).join('\n- ')}`);
-}
-
-function buildPayload(parsed, systemPrompt, userPrompt, params) {
-  const temperature = params.temperature === undefined
-    ? parsed.temperature
-    : params.temperature;
-  return {
-    model: parsed.model,
-    messages: [
-      { role: 'system', content: systemPrompt },
-      { role: 'user', content: userPrompt }
-    ],
-    stream: false,
-    ...(temperature === undefined ? {} : { temperature }),
-    ...(params.max_tokens === undefined ? {} : { max_tokens: params.max_tokens })
-  };
 }
 
 async function callTool(name, args) {
@@ -441,6 +521,14 @@ async function callTool(name, args) {
         temperature: endpoint.temperature,
         maxConcurrency: endpoint.max_concurrency,
         max_concurrency: endpoint.max_concurrency,
+        maxTokens: endpoint.max_tokens,
+        max_tokens: endpoint.max_tokens,
+        maxInputChars: endpoint.max_input_chars,
+        max_input_chars: endpoint.max_input_chars,
+        onContextExceeded: endpoint.on_context_exceeded,
+        on_context_exceeded: endpoint.on_context_exceeded,
+        extraBody: redactExtra(endpoint.extra_body),
+        extra_body: redactExtra(endpoint.extra_body),
         apiKeyConfigured: Boolean(endpoint.api_key),
         ...queueSnapshot(endpointName)
       };
@@ -490,8 +578,7 @@ async function callTool(name, args) {
     ].join('\n');
     const result = await queryWithFallback(
       primary,
-      config.endpoints[primary],
-      buildPayload(config.endpoints[primary], CRITIQUE_SYSTEM, user, params),
+      { systemPrompt: CRITIQUE_SYSTEM, userPrompt: user, params },
       config
     );
     return { content: [{ type: 'text', text: result.text }], meta: result.meta };
@@ -510,8 +597,7 @@ async function callTool(name, args) {
       : `TASK:\n${prompt}`;
     const result = await queryWithFallback(
       primary,
-      config.endpoints[primary],
-      buildPayload(config.endpoints[primary], system, user, params),
+      { systemPrompt: system, userPrompt: user, params },
       config
     );
     return { content: [{ type: 'text', text: result.text }], meta: result.meta };

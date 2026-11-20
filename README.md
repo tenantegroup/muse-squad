@@ -51,6 +51,9 @@ These URLs point straight at the files in this public repo. The installers are s
 | --- | --- |
 | `--dir PATH` | Install somewhere else instead of `~/.config/muse`. |
 | `--uninstall` | Remove only the files this installer added. Your other stuff stays. |
+| `--no-mcp` | Skip adding the `custom-coder` MCP server. |
+| `--backup` | Force the backup prompt, even if backup was disabled by environment. |
+| `--no-backup` | Skip the backup prompt and backup. |
 | `--help` or `-h` | Show help. |
 
 If you are piping the script straight into bash, use an environment variable instead of `--dir`:
@@ -60,6 +63,26 @@ MUSE_CONFIG_DIR=/tmp/muse-test bash <(curl -fsSL https://raw.githubusercontent.c
 ```
 
 Running the installer again is safe. Unchanged files are skipped. Files you edited are saved as `<file>.bak.<timestamp>` first.
+
+### Backups
+
+Before **install** or **uninstall**, the script asks:
+
+```text
+Back up current Muse config before continuing? [Y/n]
+```
+
+Press Enter (or type `Y`) to make a backup. Type `n` to skip. The backup is a plain folder next to your config, like:
+
+```text
+~/.config/muse.backup.20261120-143022-12345
+```
+
+It copies the **whole** Muse config folder — `endpoints.json`, `settings.json`, agents, skills, MCP files, and any custom files you added. The installer prints the exact path and a restore reminder when it is done.
+
+With `curl | bash` there is no keyboard to read, so it backs up automatically. Use `--no-backup` or `MUSE_SQUAD_NO_BACKUP=1` if you really want to skip that. `--backup` forces it back on.
+
+Backups contain your plaintext API keys from `endpoints.json`. Keep them private. To restore, copy the contents of the backup folder back into `~/.config/muse`.
 
 ---
 
@@ -101,6 +124,16 @@ That log is the point: if your chat gets long or you come back tomorrow, the "wh
 
 You do not have to do anything special. Just keep answering its questions until it says it is done.
 
+### Seeing what is running
+
+Subagent titles use a short label so the Muse TUI footer stays readable:
+
+```text
+[worker-1 | ember] Implement FIFO semaphore queue
+```
+
+The first part is the role. The tag is the model (`ember`, `spark`, `wonder`) or a `custom-coder` endpoint alias (`local-coder`, `grill-reviewer`). Mixed work uses `ember+local-coder`. That whole title is what appears after `└ ◈` in the footer.
+
 ---
 
 ## The `custom-coder` helper
@@ -136,18 +169,28 @@ The bridge reads `endpoints.json` on **every tool call**. Edit the file and the 
       "api_key": "local-key",
       "model": "local-llama/Ornith-1.5-35B-A3B-MLX-4bit",
       "temperature": 0.2,
-      "max_concurrency": 1
+      "max_concurrency": 1,
+      "max_tokens": 8192,
+      "max_input_chars": 96000,
+      "extra_body": { "top_p": 0.9, "options": { "num_ctx": 32768 } },
+      "on_context_exceeded": "truncate"
     },
     "grill-reviewer": {
       "base_url": "http://model-host:8000/v1",
       "api_key": "local-key",
       "model": "ornith-1.5-35b",
       "temperature": 0.3,
-      "max_concurrency": 1
+      "max_concurrency": 1,
+      "max_tokens": 4096,
+      "max_input_chars": 96000,
+      "extra_body": { "top_p": 0.9 },
+      "on_context_exceeded": "truncate"
     }
   }
 }
 ```
+
+If you already have an `endpoints.json`, the installer leaves it alone. Add the new fields to your existing endpoint entries by hand; every setting is optional.
 
 | Setting | What it means |
 | --- | --- |
@@ -160,6 +203,12 @@ The bridge reads `endpoints.json` on **every tool call**. Edit the file and the 
 | `muse_models` | Max native Muse subagents per model at the same time. The skills obey this. |
 | `max_concurrency` | Max calls to that one endpoint at the same time. Keep local ones at `1` so you do not run out of GPU memory. |
 | `temperature` | How "creative" the model is. The tool call can override it. |
+| `max_tokens` | Max output tokens to ask for. A tool call can override it with `max_tokens`. If `extra_body.max_tokens` is set, that value wins over this one. |
+| `max_input_chars` | Safety cap on the combined system + user prompt length. Keeps oversized contexts out of a small local KV-cache. |
+| `extra_body` | Extra JSON sent straight to `/chat/completions`, e.g. `top_p`, `min_p`, `reasoning_effort`, or `options.num_ctx`. Core fields (`model`, `messages`, `stream`, and a defined `temperature`) cannot be overwritten by it. |
+| `on_context_exceeded` | What to do when `max_input_chars` is exceeded: `"truncate"` (default) cuts the input and prepends a warning, or `"fallback"` skips this endpoint and tries the next one in `fallback_order`. |
+
+**About context limits:** `/squad-plan` and `/squad-execute` call `list_endpoints` first and keep `file_context` / `repo_context` small enough for the target endpoint. If you see a `> *[Warning: Input truncated ...]*` line, the model did not see the full input — shorten the context and try again. Normal fallback replies stay clean so diffs still apply; the `meta` field says who answered.
 
 **About waiting in line:** if `local-coder` is busy, new calls wait their turn (first come, first served). They do not jump to a backup just because the main model is busy. The backup is only used if the call actually fails or waits too long.
 
@@ -178,11 +227,11 @@ Uninstalling removes the managed files and unregisters `custom-coder`, but **kee
 | `generate_code` | Get a small unified diff (or one function). It is told never to return a whole file. `/squad-execute` uses `local-coder` for this. |
 | `critique_plan` | Get a grumpy second opinion on the plan. `/squad-plan` uses `grill-reviewer`. |
 | `coder_status` | See one endpoint's settings, current queue length, and limits. Keys are hidden. |
-| `list_endpoints` | See all endpoints, their `max_concurrency`, `muse_models`, and queue settings. The skills read this at startup. |
+| `list_endpoints` | See each endpoint's `max_concurrency`, `max_tokens`, `max_input_chars`, and `extra_body` keys (secrets hidden), plus `muse_models` and queue settings. The skills read this at startup. |
 
-`generate_code` also accepts `task_spec` instead of `prompt`, and `file_context` instead of `context`.
+`generate_code` and `critique_plan` also accept an optional `max_tokens` override. `generate_code` accepts `task_spec` instead of `prompt`, and `file_context` instead of `context`.
 
-When a fallback answers, the reply stays clean (so diffs still apply). The `meta` field tells you who really answered and what failed.
+Normal fallback replies stay clean (so diffs still apply). The `meta` field tells you who really answered and what failed; only an actual context truncation adds a warning line to the reply text.
 
 Optional environment variables: `MODELS_CONFIG_FILE` (config path), `MUSE_CODER_TIMEOUT_MS` (default timeout), and `MUSE_SQUAD_SKIP_MCP=1` (skip registration).
 

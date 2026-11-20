@@ -114,21 +114,31 @@ function writeConfig(configFile, baseUrl, overrides = {}) {
     endpoints: {
       'local-coder': {
         base_url: baseUrl, api_key: 'local-key', model: 'local-model',
-        temperature: 0.2, max_concurrency: 1
+        temperature: 0.2, max_concurrency: 1,
+        max_tokens: 8192, max_input_chars: 5000,
+        extra_body: { top_p: 0.9, options: { num_ctx: 32768 } },
+        on_context_exceeded: 'truncate'
       },
       'grill-reviewer': {
         base_url: baseUrl, api_key: 'grill-key', model: 'grill-model',
-        temperature: 0.3, max_concurrency: 1
+        temperature: 0.3, max_concurrency: 1,
+        max_tokens: 4096, max_input_chars: 5000,
+        extra_body: { top_p: 0.9 },
+        on_context_exceeded: 'truncate'
       }
     },
     ...overrides
   }, null, 2));
 }
 
-function setEndpointConcurrency(configFile, name, limit) {
+function patchEndpoint(configFile, name, patch) {
   const config = JSON.parse(fs.readFileSync(configFile, 'utf8'));
-  config.endpoints[name].max_concurrency = limit;
+  Object.assign(config.endpoints[name], patch);
   fs.writeFileSync(configFile, JSON.stringify(config, null, 2));
+}
+
+function setEndpointConcurrency(configFile, name, limit) {
+  patchEndpoint(configFile, name, { max_concurrency: limit });
 }
 
 function run(port, tempDir, configFile) {
@@ -371,6 +381,72 @@ function run(port, tempDir, configFile) {
     writeConfig(configFile, baseUrl, { default: 'grill-reviewer' });
     const reloaded = await tool(23, 'coder_status', {});
     assert(reloaded.result.content[0].text.includes('"defaultEndpoint": "grill-reviewer"'), 'config hot reload');
+
+    // --- Payload merging: max_tokens + extra_body, core fields protected ---
+    writeConfig(configFile, baseUrl, { default: 'local-coder' });
+    resetStats();
+    setMode('ok');
+    const merged = await tool(24, 'generate_code', { prompt: 'merge test' });
+    assert(merged.result.content[0].text === CANNED, 'request with inference settings succeeds');
+    assert(lastRequest.max_tokens === 8192, 'endpoint max_tokens is sent');
+    assert(lastRequest.top_p === 0.9, 'extra_body top-level key is sent');
+    assert(lastRequest.options && lastRequest.options.num_ctx === 32768, 'nested extra_body key is sent');
+    assert(lastRequest.model === 'local-model', 'model is preserved');
+    assert(lastRequest.messages.length === 2, 'messages are preserved');
+
+    patchEndpoint(configFile, 'local-coder', {
+      extra_body: { model: 'evil-model', messages: [], temperature: 99, stream: true, max_tokens: 123 }
+    });
+    await tool(25, 'generate_code', { prompt: 'protect core fields', temperature: 0.5 });
+    assert(lastRequest.model === 'local-model', 'malformed extra_body cannot overwrite model');
+    assert(lastRequest.messages.length === 2, 'malformed extra_body cannot overwrite messages');
+    assert(lastRequest.temperature === 0.5, 'call temperature wins over extra_body');
+    assert(lastRequest.stream === false, 'malformed extra_body cannot overwrite stream');
+    assert(lastRequest.max_tokens === 123, 'extra_body max_tokens wins over endpoint max_tokens');
+
+    // --- Input-size guard: truncate by default, with a visible warning ---
+    writeConfig(configFile, baseUrl, { default: 'local-coder' });
+    patchEndpoint(configFile, 'local-coder', { max_input_chars: 700, on_context_exceeded: 'truncate' });
+    const longContext = `${'A'.repeat(500)}TAILMARKER`;
+    const truncated = await tool(26, 'generate_code', { prompt: 'short', context: longContext });
+    const warning = "> *[Warning: Input truncated to max_input_chars for 'local-coder']*\n\n";
+    assert(truncated.result.content[0].text.startsWith(warning), 'truncation warning is prepended');
+    assert(truncated.result.content[0].text.endsWith(CANNED), 'model output is still returned');
+    assert(!lastRequest.messages[1].content.includes('TAILMARKER'), 'oversized tail is cut off');
+    assert(
+      lastRequest.messages[0].content.length + lastRequest.messages[1].content.length <= 700,
+      'combined prompt fits inside max_input_chars'
+    );
+
+    // --- Input-size guard: "fallback" hands off to the next endpoint ---
+    writeConfig(configFile, baseUrl, { default: 'local-coder' });
+    patchEndpoint(configFile, 'local-coder', { max_input_chars: 200, on_context_exceeded: 'fallback' });
+    const overflow = await tool(27, 'generate_code', { prompt: 'x', context: 'B'.repeat(2000) });
+    assert(overflow.result.meta.servedBy === 'grill-reviewer', 'context overflow falls back');
+    assert(overflow.result.meta.fallbackUsed === true, 'fallback is reported in meta');
+    assert(
+      overflow.result.meta.attempts.some((item) =>
+        item.endpoint === 'local-coder' && /max_input_chars/.test(item.error)
+      ),
+      'context overflow reason is recorded'
+    );
+    assert(!overflow.result.content[0].text.startsWith('>'), 'fallback output has no truncation warning');
+
+    // --- list_endpoints exposes limits/knobs but never keys ---
+    writeConfig(configFile, baseUrl, { default: 'local-coder' });
+    const infoText = (await tool(28, 'list_endpoints', {})).result.content[0].text;
+    const info = JSON.parse(infoText);
+    const localInfo = info.endpoints['local-coder'];
+    assert(localInfo.max_tokens === 8192, 'list_endpoints reports max_tokens');
+    assert(localInfo.max_input_chars === 5000, 'list_endpoints reports max_input_chars');
+    assert(localInfo.extra_body.options.num_ctx === 32768, 'list_endpoints reports extra_body keys');
+    assert(localInfo.on_context_exceeded === 'truncate', 'list_endpoints reports on_context_exceeded');
+    assert(!infoText.includes('local-key') && !infoText.includes('grill-key'), 'api keys stay hidden');
+
+    patchEndpoint(configFile, 'local-coder', { extra_body: { api_key: 'do-not-leak', top_p: 0.9 } });
+    const redactedText = (await tool(29, 'list_endpoints', {})).result.content[0].text;
+    assert(!redactedText.includes('do-not-leak'), 'secret inside extra_body is redacted');
+    assert(redactedText.includes('<redacted>'), 'redaction is visible');
 
     finish();
   })().catch((error) => {

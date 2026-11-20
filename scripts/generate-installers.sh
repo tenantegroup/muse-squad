@@ -50,6 +50,7 @@ HDR
 CONFIG_DIR="${MUSE_CONFIG_DIR:-${HOME}/.config/muse}"
 MODE="install"
 SKIP_MCP=0
+BACKUP_CHOICE="auto"
 
 usage() {
   cat <<'USAGE'
@@ -63,11 +64,14 @@ Options:
   --dir PATH       Install into PATH instead of $HOME/.config/muse
   --uninstall      Remove managed files and unregister custom-coder
   --no-mcp         Skip custom-coder MCP registration
+  --backup         Force a backup prompt/backup
+  --no-backup      Skip the backup prompt and backup
   --help, -h       Show this help
 
 Environment:
   MUSE_CONFIG_DIR     Equivalent to --dir (useful with curl | bash)
   MUSE_SQUAD_SKIP_MCP Set to 1 to skip MCP registration
+  MUSE_SQUAD_NO_BACKUP Set to 1 to skip backup unless --backup is passed
 
 Endpoints are configured in endpoints.json inside the config directory.
 USAGE
@@ -83,10 +87,55 @@ while (( $# > 0 )); do
       CONFIG_DIR="$2"; shift 2 ;;
     --uninstall) MODE="uninstall"; shift ;;
     --no-mcp) SKIP_MCP=1; shift ;;
+    --backup) BACKUP_CHOICE="yes"; shift ;;
+    --no-backup) BACKUP_CHOICE="no"; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown option: $1" ;;
   esac
 done
+
+if [[ "$BACKUP_CHOICE" == "auto" && "${MUSE_SQUAD_NO_BACKUP:-0}" == "1" ]]; then
+  BACKUP_CHOICE="no"
+fi
+while [[ "$CONFIG_DIR" == */ && "$CONFIG_DIR" != "/" ]]; do
+  CONFIG_DIR="${CONFIG_DIR%/}"
+done
+
+backup_config() {
+  [[ -d "$CONFIG_DIR" ]] || { log "  skip backup  no existing config dir"; return 0; }
+
+  if [[ "$BACKUP_CHOICE" == "no" ]]; then
+    log "  skipped      backup (--no-backup)"
+    return 0
+  fi
+
+  local answer="Y"
+  if [[ -t 0 ]]; then
+    printf 'Back up current Muse config before continuing? [Y/n] '
+    if ! read -r answer; then answer="Y"; fi
+    [[ -n "$answer" ]] || answer="Y"
+  else
+    log "  no TTY detected; backing up by default"
+  fi
+
+  case "$answer" in
+    ''|[Yy]|[Yy][Ee][Ss]) ;;
+    [Nn]|[Nn][Oo])
+      log "  skipped      backup (user chose no)"
+      return 0 ;;
+    *)
+      fail "expected Y or n for backup prompt" ;;
+  esac
+
+  local stamp backup
+  stamp="$(date +%Y%m%d-%H%M%S)-$$"
+  backup="${CONFIG_DIR}.backup.${stamp}"
+  mkdir -p "$backup" || fail "cannot create backup dir $backup"
+  chmod 700 "$backup" || fail "cannot secure backup dir $backup"
+  cp -a "$CONFIG_DIR/." "$backup/" || fail "cannot back up $CONFIG_DIR to $backup"
+  log "  backed up    $CONFIG_DIR -> $backup"
+  log "  restore      copy the contents of $backup back into $CONFIG_DIR"
+}
 
 install_file() {
   local rel="$1" dest="$CONFIG_DIR/$1" tmp bak
@@ -158,6 +207,8 @@ register_mcp() {
 log "muse-squad v$VERSION - $MODE"
 log "config dir: $CONFIG_DIR"
 
+backup_config
+
 if [[ "$MODE" == "uninstall" ]]; then
   register_mcp unregister
 BODY
@@ -215,12 +266,15 @@ $configDir = if ($env:MUSE_CONFIG_DIR) { $env:MUSE_CONFIG_DIR } else { Join-Path
 $mode = 'install'
 $help = $false
 $skipMcp = $false
+$backupChoice = 'auto'
 if ($null -eq $args) { $args = @() }
 
 for ($i = 0; $i -lt $args.Count; $i++) {
   switch -CaseSensitive ($args[$i]) {
     '--uninstall' { $mode = 'uninstall' }
     '--no-mcp' { $skipMcp = $true }
+    '--backup' { $backupChoice = 'yes' }
+    '--no-backup' { $backupChoice = 'no' }
     '--dir' {
       if (($i + 1) -ge $args.Count) { throw '--dir requires a value' }
       $configDir = $args[++$i]
@@ -229,6 +283,15 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     '--help' { $help = $true }
     default { throw "Unknown option: $($args[$i])" }
   }
+}
+
+$configDir = [IO.Path]::GetFullPath($configDir)
+if ($configDir -notmatch '^[A-Za-z]:[\\/]?$') {
+  $trimChars = [char[]]@([IO.Path]::DirectorySeparatorChar, [IO.Path]::AltDirectorySeparatorChar)
+  $configDir = $configDir.TrimEnd($trimChars)
+}
+if ($backupChoice -eq 'auto' -and $env:MUSE_SQUAD_NO_BACKUP -eq '1') {
+  $backupChoice = 'no'
 }
 
 if ($help) {
@@ -243,11 +306,14 @@ Options:
   --dir PATH       Install into PATH instead of ~/.config/muse
   --uninstall      Remove managed files and unregister custom-coder
   --no-mcp         Skip custom-coder MCP registration
+  --backup         Force a backup prompt/backup
+  --no-backup      Skip the backup prompt and backup
   --help, -h       Show this help
 
 Environment:
   MUSE_CONFIG_DIR     Equivalent to --dir (useful with irm | iex)
   MUSE_SQUAD_SKIP_MCP Set to 1 to skip MCP registration
+  MUSE_SQUAD_NO_BACKUP Set to 1 to skip backup unless --backup is passed
 
 Endpoints are configured in endpoints.json inside the config directory.
 
@@ -260,6 +326,54 @@ Note: Windows PowerShell 5.1 has no `irm` alias. Use:
 function Get-Dest([string]$rel) {
   $parts = $rel -replace '/', [IO.Path]::DirectorySeparatorChar
   return [IO.Path]::GetFullPath((Join-Path $configDir $parts))
+}
+
+function Backup-Config {
+  if (-not (Test-Path -LiteralPath $configDir -PathType Container)) {
+    Write-Host '  skip backup  no existing config dir'
+    return
+  }
+  if ($backupChoice -eq 'no') {
+    Write-Host '  skipped      backup (--no-backup)'
+    return
+  }
+
+  $answer = 'Y'
+  $interactive = $false
+  try {
+    $interactive = [Environment]::UserInteractive -and -not [Console]::IsInputRedirected
+  } catch {
+    $interactive = $false
+  }
+  if ($interactive) {
+    $answer = Read-Host 'Back up current Muse config before continuing? [Y/n]'
+    if ([string]::IsNullOrWhiteSpace($answer)) { $answer = 'Y' }
+  } else {
+    Write-Host '  no interactive input detected; backing up by default'
+  }
+
+  if ($answer -match '^[Yy]([Ee][Ss])?$') {
+    # continue with the backup
+  } elseif ($answer -match '^[Nn]([Oo])?$') {
+    Write-Host '  skipped      backup (user chose no)'
+    return
+  } else {
+    throw 'Expected Y or n for backup prompt'
+  }
+
+  $stamp = (Get-Date -Format 'yyyyMMdd-HHmmss') + '-' + $PID
+  $parent = Split-Path -Parent $configDir
+  $leaf = Split-Path -Leaf $configDir
+  if ([string]::IsNullOrEmpty($parent)) { $parent = '.' }
+  if ([string]::IsNullOrEmpty($leaf)) { $leaf = 'muse-config' }
+  $backup = Join-Path $parent ($leaf + '.backup.' + $stamp)
+
+  New-Item -ItemType Directory -Path $backup -Force | Out-Null
+  Get-ChildItem -LiteralPath $configDir -Force | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination $backup -Recurse -Force
+  }
+  Write-Host "  backed up    $configDir -> $backup"
+  Write-Host "  restore      copy the contents of $backup back into $configDir"
 }
 
 function Install-File([string]$rel, [string]$content) {
@@ -339,6 +453,8 @@ function Register-Mcp([string]$action) {
 
 Write-Host "muse-squad v$Version - $mode"
 Write-Host "config dir: $configDir"
+
+Backup-Config
 
 if ($mode -eq 'uninstall') {
   Register-Mcp 'unregister'
