@@ -28,22 +28,22 @@ You need **Node 18 or newer** for the helper server. No npm install, no packages
 **Mac / Linux**
 
 ```bash
-curl -fsSL <url>/v1/install | bash
+curl -fsSL https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install | bash
 ```
 
 **Windows (PowerShell 7)**
 
 ```powershell
-irm <url>/v1/install.ps1 | iex
+irm https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install.ps1 | iex
 ```
 
 **Windows (older PowerShell 5.1)**
 
 ```powershell
-Invoke-RestMethod '<url>/v1/install.ps1' | iex
+Invoke-RestMethod 'https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install.ps1' | iex
 ```
 
-`<url>` is a placeholder until we pick a host. The installers are standalone — they carry all the files inside them.
+These URLs point straight at the files in this public repo. The installers are standalone — they carry all the files inside them, so nothing else is downloaded.
 
 ### Options
 
@@ -56,7 +56,7 @@ Invoke-RestMethod '<url>/v1/install.ps1' | iex
 If you are piping the script straight into bash, use an environment variable instead of `--dir`:
 
 ```bash
-MUSE_CONFIG_DIR=/tmp/muse-test bash <(curl -fsSL <url>/v1/install)
+MUSE_CONFIG_DIR=/tmp/muse-test bash <(curl -fsSL https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install)
 ```
 
 Running the installer again is safe. Unchanged files are skipped. Files you edited are saved as `<file>.bak.<timestamp>` first.
@@ -214,9 +214,9 @@ If `pwsh` is installed, the test also checks the Windows installer.
 
 ## Publishing
 
-Host the generated files at:
+The install URLs are just the raw files on `main`:
 
-- `install` → `<url>/v1/install`
-- `install.ps1` → `<url>/v1/install.ps1`
+- `install` → `https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install`
+- `install.ps1` → `https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install.ps1`
 
-To release: bump `VERSION`, regenerate, run the tests, commit, push.
+Pushing to `main` makes the new version live immediately. To release: bump `VERSION`, regenerate, run the tests, commit, push.

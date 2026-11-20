@@ -56,7 +56,7 @@ usage() {
 muse-squad installer
 
 Usage:
-  curl -fsSL <url>/v1/install | bash
+  curl -fsSL https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install | bash
   bash install [--dir PATH] [--uninstall] [--no-mcp] [--help]
 
 Options:
@@ -236,7 +236,7 @@ if ($help) {
 muse-squad installer
 
 Usage:
-  irm <url>/v1/install.ps1 | iex
+  irm https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install.ps1 | iex
   powershell -File install.ps1 [--dir PATH] [--uninstall] [--no-mcp]
 
 Options:
@@ -252,7 +252,7 @@ Environment:
 Endpoints are configured in endpoints.json inside the config directory.
 
 Note: Windows PowerShell 5.1 has no `irm` alias. Use:
-  Invoke-RestMethod '<url>/v1/install.ps1' | iex
+  Invoke-RestMethod 'https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install.ps1' | iex
 '@ | Write-Host
   return
 }
