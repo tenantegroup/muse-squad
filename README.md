@@ -139,7 +139,7 @@ The bridge reads `endpoints.json` on **every tool call**. Edit the file and the 
       "max_concurrency": 1
     },
     "grill-reviewer": {
-      "base_url": "http://192.168.1.50:8000/v1",
+      "base_url": "http://model-host:8000/v1",
       "api_key": "local-key",
       "model": "ornith-1.5-35b",
       "temperature": 0.3,
