@@ -62,6 +62,7 @@ These URLs point straight at the files in this public repo. The installers are s
 | `--no-backup` | Skip the backup prompt and backup. |
 | `--reconfigure-team` | Rerun the interactive team wizard on an existing install. |
 | `--defaults` | Skip the team wizard and use the default roster. |
+| `--skip-muse-check` | Skip the Muse install/config discovery preflight. |
 | `--help` or `-h` | Show help. |
 
 If you are piping the script straight into bash, use an environment variable instead of `--dir`:
@@ -71,6 +72,19 @@ MUSE_CONFIG_DIR=/tmp/muse-test bash <(curl -fsSL https://raw.githubusercontent.c
 ```
 
 Running the installer again is safe. Unchanged files are skipped. Files you edited are saved as `<file>.bak.<timestamp>` first.
+
+### Muse preflight
+
+On install and update (not uninstall), the installer first checks that Muse Code is available by looking for `muse --version` on `PATH` and in the standard install locations. If it is missing and you are in a terminal, it offers to run the official installer for you:
+
+```text
+curl -fsSL https://dev.meta.ai/install.sh | bash   # macOS / Linux
+irm https://dev.meta.ai/install.ps1 | iex          # Windows
+```
+
+It then finds the Muse config directory: a path you supplied previously, `$XDG_CONFIG_HOME/muse` when set, otherwise `~/.config/muse`, plus a few platform fallbacks. A directory is accepted when it exists and contains `settings.json`, `auth.json`, `trust.json`, `agents/`, `skills/`, or `mcp/`. If none is found in a terminal, you are prompted for the path; the answer is saved to `~/.config/muse-squad/config-dir`. An explicit `--dir` or `MUSE_CONFIG_DIR` always wins and is never overridden.
+
+Without a TTY, a failed preflight stops before writing anything and prints the install command or `--dir` guidance. Use `--skip-muse-check` or `MUSE_SQUAD_SKIP_MUSE_CHECK=1` to bypass it entirely.
 
 The installer also manages one marked section in `~/.config/muse/AGENTS.md`. If you already use `~/.config/muse/MUSE.md` instead, it appends the section there. Anything you wrote outside the markers is left alone. Uninstall removes only the marked section.
 

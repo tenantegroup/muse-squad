@@ -61,12 +61,16 @@ HDR
     printf 'VERSION=%q\n' "$VERSION"
     cat <<'BODY'
 CONFIG_DIR="${MUSE_CONFIG_DIR:-${HOME}/.config/muse}"
+CONFIG_DIR_EXPLICIT=0
+[[ -n "${MUSE_CONFIG_DIR:-}" ]] && CONFIG_DIR_EXPLICIT=1
 MODE="install"
 SKIP_MCP=0
+SKIP_MUSE_CHECK=0
 BACKUP_CHOICE="auto"
 RECONFIGURE_TEAM=0
 USE_DEFAULTS=0
 REPO_RAW_BASE="https://raw.githubusercontent.com/tenantegroup/muse-squad/main"
+MUSE_SQUAD_STATE_FILE="${HOME}/.config/muse-squad/config-dir"
 
 usage() {
   cat <<'USAGE'
@@ -75,7 +79,7 @@ muse-squad installer
 Usage:
   curl -fsSL https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install | bash
   bash install [--dir PATH] [--update] [--uninstall] [--no-mcp] [--help]
-  bash install [--reconfigure-team] [--defaults]
+  bash install [--reconfigure-team] [--defaults] [--skip-muse-check]
 
 Options:
   --dir PATH          Install into PATH instead of $HOME/.config/muse
@@ -86,12 +90,14 @@ Options:
   --no-backup         Skip the backup prompt and backup
   --reconfigure-team  Rerun the interactive team wizard on an existing install
   --defaults          Skip the team wizard and use the default roster
+  --skip-muse-check   Skip Muse install/config discovery
   --help, -h          Show this help
 
 Environment:
-  MUSE_CONFIG_DIR     Equivalent to --dir (useful with curl | bash)
-  MUSE_SQUAD_SKIP_MCP Set to 1 to skip MCP registration
-  MUSE_SQUAD_NO_BACKUP Set to 1 to skip backup unless --backup is passed
+  MUSE_CONFIG_DIR          Equivalent to --dir (useful with curl | bash)
+  MUSE_SQUAD_SKIP_MCP      Set to 1 to skip MCP registration
+  MUSE_SQUAD_NO_BACKUP     Set to 1 to skip backup unless --backup is passed
+  MUSE_SQUAD_SKIP_MUSE_CHECK Set to 1 to skip Muse install/config discovery
 
 Endpoints are configured in endpoints.json inside the config directory.
 USAGE
@@ -104,7 +110,7 @@ while (( $# > 0 )); do
   case "$1" in
     --dir)
       (( $# >= 2 )) || fail "--dir requires a value"
-      CONFIG_DIR="$2"; shift 2 ;;
+      CONFIG_DIR="$2"; CONFIG_DIR_EXPLICIT=1; shift 2 ;;
     --update) MODE="update"; shift ;;
     --uninstall) MODE="uninstall"; shift ;;
     --no-mcp) SKIP_MCP=1; shift ;;
@@ -112,6 +118,7 @@ while (( $# > 0 )); do
     --no-backup) BACKUP_CHOICE="no"; shift ;;
     --reconfigure-team) RECONFIGURE_TEAM=1; shift ;;
     --defaults) USE_DEFAULTS=1; shift ;;
+    --skip-muse-check) SKIP_MUSE_CHECK=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown option: $1" ;;
   esac
@@ -120,9 +127,146 @@ done
 if [[ "$BACKUP_CHOICE" == "auto" && "${MUSE_SQUAD_NO_BACKUP:-0}" == "1" ]]; then
   BACKUP_CHOICE="no"
 fi
+if [[ "${MUSE_SQUAD_SKIP_MUSE_CHECK:-0}" == "1" ]]; then
+  SKIP_MUSE_CHECK=1
+fi
 while [[ "$CONFIG_DIR" == */ && "$CONFIG_DIR" != "/" ]]; do
   CONFIG_DIR="${CONFIG_DIR%/}"
 done
+
+preflight_interactive() {
+  [[ "${MUSE_SQUAD_FORCE_INTERACTIVE:-0}" == "1" ]] && return 0
+  [[ -t 0 ]]
+}
+
+muse_missing_error() {
+  fail "Muse Code was not found. Install it with 'curl -fsSL https://dev.meta.ai/install.sh | bash' (macOS/Linux) or 'irm https://dev.meta.ai/install.ps1 | iex' (Windows), then re-run. Pass --skip-muse-check to bypass."
+}
+
+muse_installed() {
+  if command -v muse >/dev/null 2>&1 && muse --version >/dev/null 2>&1; then
+    return 0
+  fi
+  local candidate
+  for candidate in \
+    "$HOME/.local/bin/muse" \
+    "/usr/local/bin/muse" \
+    "/opt/homebrew/bin/muse" \
+    "/Applications/Muse Code.app/Contents/MacOS/muse"; do
+    [[ -x "$candidate" ]] || continue
+    if "$candidate" --version >/dev/null 2>&1; then
+      return 0
+    fi
+  done
+  return 1
+}
+
+install_muse() {
+  command -v curl >/dev/null 2>&1 || fail "curl is required to run the official Muse Code installer"
+  log "  installing  Muse Code via the official installer"
+  if ! curl -fsSL https://dev.meta.ai/install.sh | bash; then
+    fail "the Muse Code installer failed; see https://dev.meta.ai/docs/muse-code"
+  fi
+}
+
+read_saved_config_dir() {
+  local saved=""
+  [[ -f "$MUSE_SQUAD_STATE_FILE" ]] || return 0
+  IFS= read -r saved < "$MUSE_SQUAD_STATE_FILE" || true
+  saved="${saved%$'\r'}"
+  [[ -n "$saved" ]] && printf '%s' "$saved"
+}
+
+save_config_dir() {
+  local dest="$MUSE_SQUAD_STATE_FILE"
+  mkdir -p "$(dirname "$dest")" || fail "cannot create directory for $dest"
+  printf '%s\n' "$1" > "$dest" || fail "cannot write $dest"
+  chmod 600 "$dest" || fail "cannot set permissions on $dest"
+}
+
+valid_muse_config_dir() {
+  local dir="$1" marker
+  [[ -d "$dir" ]] || return 1
+  for marker in settings.json auth.json trust.json agents skills mcp; do
+    [[ -e "$dir/$marker" ]] && return 0
+  done
+  return 1
+}
+
+expand_user_path() {
+  local value="$1"
+  case "$value" in
+    "~"|"~/"*) value="$HOME${value#\~}" ;;
+  esac
+  printf '%s' "$value"
+}
+
+preflight() {
+  (( SKIP_MUSE_CHECK )) && { log "  skipped    Muse preflight"; return 0; }
+
+  if ! muse_installed; then
+    if preflight_interactive; then
+      local answer
+      printf 'Muse Code does not appear to be installed. Install it now? [Y/n]: ' >&2
+      if ! IFS= read -r answer; then answer="Y"; fi
+      [[ -n "$answer" ]] || answer="Y"
+      case "$answer" in
+        [Yy]|[Yy][Ee][Ss]) install_muse ;;
+        [Nn]|[Nn][Oo]) muse_missing_error ;;
+        *) fail "expected Y or n for the Muse Code install prompt" ;;
+      esac
+      if ! muse_installed; then
+        fail "Muse Code was still not found after installation. Open a new terminal and re-run this installer."
+      fi
+    else
+      muse_missing_error
+    fi
+  fi
+
+  if (( CONFIG_DIR_EXPLICIT )); then
+    log "  using      $CONFIG_DIR (explicit)"
+    return 0
+  fi
+
+  local -a candidates=()
+  local saved candidate typed
+  saved="$(read_saved_config_dir || true)"
+  [[ -n "$saved" ]] && candidates+=("$saved")
+  if [[ -n "${XDG_CONFIG_HOME:-}" ]]; then
+    candidates+=("$XDG_CONFIG_HOME/muse")
+  fi
+  candidates+=("$HOME/.config/muse" "$HOME/.muse")
+  [[ -n "${APPDATA:-}" ]] && candidates+=("$APPDATA/muse")
+  [[ -n "${LOCALAPPDATA:-}" ]] && candidates+=("$LOCALAPPDATA/muse")
+
+  for candidate in "${candidates[@]}"; do
+    if valid_muse_config_dir "$candidate"; then
+      CONFIG_DIR="$candidate"
+      log "  found      Muse config at $CONFIG_DIR"
+      return 0
+    fi
+  done
+
+  if preflight_interactive; then
+    while :; do
+      printf 'Where is your Muse config directory? ' >&2
+      if ! IFS= read -r typed; then
+        fail "no Muse config directory was supplied"
+      fi
+      typed="$(expand_user_path "$(trim_value "$typed")")"
+      if valid_muse_config_dir "$typed"; then
+        CONFIG_DIR="$typed"
+        save_config_dir "$CONFIG_DIR"
+        log "  using      Muse config at $CONFIG_DIR"
+        log "  saved      $MUSE_SQUAD_STATE_FILE"
+        return 0
+      fi
+      printf '  not a Muse config directory (need settings.json, auth.json, trust.json, agents/, skills/, or mcp/)\n' >&2
+    done
+  fi
+
+  fail "could not find a Muse config directory. Pass --dir PATH, set MUSE_CONFIG_DIR, or re-run in a terminal."
+}
 
 backup_config() {
   [[ -d "$CONFIG_DIR" ]] || { log "  skip backup  no existing config dir"; return 0; }
@@ -628,6 +772,7 @@ self_update() {
   chmod +x "$tmp" || true
   local -a args=(--dir "$CONFIG_DIR" --defaults)
   (( SKIP_MCP )) && args+=(--no-mcp)
+  (( SKIP_MUSE_CHECK )) && args+=(--skip-muse-check)
   [[ "$BACKUP_CHOICE" == "yes" ]] && args+=(--backup)
   [[ "$BACKUP_CHOICE" == "no" ]] && args+=(--no-backup)
   # --update must never trigger a reconfigure on the downloaded installer.
@@ -637,6 +782,10 @@ self_update() {
   rm -f "$tmp"
   exit $rc
 }
+
+if [[ "$MODE" != "uninstall" ]]; then
+  preflight
+fi
 
 log "muse-squad v$VERSION - $MODE"
 log "config dir: $CONFIG_DIR"
@@ -733,13 +882,16 @@ HDR
     printf "\$Version = '%s'\n" "$VERSION"
     cat <<'BODY'
 $configDir = if ($env:MUSE_CONFIG_DIR) { $env:MUSE_CONFIG_DIR } else { Join-Path $HOME '.config/muse' }
+$configDirExplicit = [bool]$env:MUSE_CONFIG_DIR
 $mode = 'install'
 $help = $false
 $skipMcp = $false
+$skipMuseCheck = $false
 $backupChoice = 'auto'
 $reconfigureTeam = $false
 $useDefaults = $false
 $repoRawBase = 'https://raw.githubusercontent.com/tenantegroup/muse-squad/main'
+$stateFile = Join-Path $HOME '.config/muse-squad/config-dir'
 if ($null -eq $args) { $args = @() }
 
 for ($i = 0; $i -lt $args.Count; $i++) {
@@ -751,9 +903,11 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     '--no-backup' { $backupChoice = 'no' }
     '--reconfigure-team' { $reconfigureTeam = $true }
     '--defaults' { $useDefaults = $true }
+    '--skip-muse-check' { $skipMuseCheck = $true }
     '--dir' {
       if (($i + 1) -ge $args.Count) { throw '--dir requires a value' }
       $configDir = $args[++$i]
+      $configDirExplicit = $true
     }
     '-h' { $help = $true }
     '--help' { $help = $true }
@@ -769,6 +923,9 @@ if ($configDir -notmatch '^[A-Za-z]:[\\/]?$') {
 if ($backupChoice -eq 'auto' -and $env:MUSE_SQUAD_NO_BACKUP -eq '1') {
   $backupChoice = 'no'
 }
+if ($env:MUSE_SQUAD_SKIP_MUSE_CHECK -eq '1') {
+  $skipMuseCheck = $true
+}
 
 if ($help) {
   @'
@@ -777,7 +934,7 @@ muse-squad installer
 Usage:
   irm https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install.ps1 | iex
   powershell -File install.ps1 [--dir PATH] [--update] [--uninstall] [--no-mcp]
-  powershell -File install.ps1 [--reconfigure-team] [--defaults]
+  powershell -File install.ps1 [--reconfigure-team] [--defaults] [--skip-muse-check]
 
 Options:
   --dir PATH          Install into PATH instead of ~/.config/muse
@@ -788,12 +945,14 @@ Options:
   --no-backup         Skip the backup prompt and backup
   --reconfigure-team  Rerun the interactive team wizard on an existing install
   --defaults          Skip the team wizard and use the default roster
+  --skip-muse-check   Skip Muse install/config discovery
   --help, -h          Show this help
 
 Environment:
-  MUSE_CONFIG_DIR     Equivalent to --dir (useful with irm | iex)
-  MUSE_SQUAD_SKIP_MCP Set to 1 to skip MCP registration
-  MUSE_SQUAD_NO_BACKUP Set to 1 to skip backup unless --backup is passed
+  MUSE_CONFIG_DIR          Equivalent to --dir (useful with irm | iex)
+  MUSE_SQUAD_SKIP_MCP      Set to 1 to skip MCP registration
+  MUSE_SQUAD_NO_BACKUP     Set to 1 to skip backup unless --backup is passed
+  MUSE_SQUAD_SKIP_MUSE_CHECK Set to 1 to skip Muse install/config discovery
 
 Endpoints are configured in endpoints.json inside the config directory.
 
@@ -806,6 +965,140 @@ Note: Windows PowerShell 5.1 has no `irm` alias. Use:
 function Get-Dest([string]$rel) {
   $parts = $rel -replace '/', [IO.Path]::DirectorySeparatorChar
   return [IO.Path]::GetFullPath((Join-Path $configDir $parts))
+}
+
+function Test-Preflight-Interactive {
+  if ($env:MUSE_SQUAD_FORCE_INTERACTIVE -eq '1') { return $true }
+  try {
+    return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected)
+  } catch {
+    return $false
+  }
+}
+
+function Show-Muse-Missing-Error {
+  throw 'Muse Code was not found. Install it with irm https://dev.meta.ai/install.ps1 | iex (Windows) or curl -fsSL https://dev.meta.ai/install.sh | bash (macOS/Linux), then re-run. Pass --skip-muse-check to bypass.'
+}
+
+function Test-Muse-Installed {
+  $cmd = Get-Command muse -CommandType Application -ErrorAction SilentlyContinue
+  if ($cmd) {
+    try {
+      & $cmd.Source --version *> $null
+      if ($LASTEXITCODE -eq 0 -or $null -eq $LASTEXITCODE) { return $true }
+    } catch {
+      # Try known install paths below.
+    }
+  }
+  $candidates = @()
+  if ($env:LOCALAPPDATA) {
+    $candidates += (Join-Path $env:LOCALAPPDATA 'Programs/muse/muse.cmd')
+    $candidates += (Join-Path $env:LOCALAPPDATA 'Programs/Muse Code/muse.cmd')
+  }
+  if ($env:ProgramFiles) {
+    $candidates += (Join-Path $env:ProgramFiles 'Muse Code/muse.cmd')
+  }
+  $candidates += (Join-Path $HOME '.local/bin/muse')
+  foreach ($candidate in $candidates) {
+    if ($candidate -and (Test-Path -LiteralPath $candidate)) { return $true }
+  }
+  return $false
+}
+
+function Install-Muse {
+  Write-Host '  installing  Muse Code via the official installer'
+  Invoke-RestMethod 'https://dev.meta.ai/install.ps1' | Invoke-Expression
+}
+
+function Read-Saved-Config-Dir {
+  if (-not (Test-Path -LiteralPath $stateFile)) { return '' }
+  return ([string](Get-Content -LiteralPath $stateFile -Raw)).Trim()
+}
+
+function Save-Config-Dir([string]$dir) {
+  $parent = Split-Path -Parent $stateFile
+  if (-not (Test-Path -LiteralPath $parent)) {
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+  }
+  [IO.File]::WriteAllText($stateFile, "$dir`n", [System.Text.UTF8Encoding]::new($false))
+  Write-Host "  saved      $stateFile"
+}
+
+function Test-Muse-Config-Dir([string]$dir) {
+  if ([string]::IsNullOrWhiteSpace($dir)) { return $false }
+  if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return $false }
+  foreach ($marker in @('settings.json', 'auth.json', 'trust.json', 'agents', 'skills', 'mcp')) {
+    if (Test-Path -LiteralPath (Join-Path $dir $marker)) { return $true }
+  }
+  return $false
+}
+
+function Invoke-Preflight {
+  if ($skipMuseCheck) {
+    Write-Host '  skipped    Muse preflight'
+    return
+  }
+
+  if (-not (Test-Muse-Installed)) {
+    if (Test-Preflight-Interactive) {
+      $answer = Read-Host 'Muse Code does not appear to be installed. Install it now? [Y/n]'
+      if ([string]::IsNullOrWhiteSpace($answer)) { $answer = 'Y' }
+      if ($answer -match '^[Yy]([Ee][Ss])?$') {
+        Install-Muse
+      } elseif ($answer -match '^[Nn]([Oo])?$') {
+        Show-Muse-Missing-Error
+      } else {
+        throw 'Expected Y or n for the Muse Code install prompt'
+      }
+      if (-not (Test-Muse-Installed)) {
+        throw 'Muse Code was still not found after installation. Open a new terminal and re-run this installer.'
+      }
+    } else {
+      Show-Muse-Missing-Error
+    }
+  }
+
+  if ($configDirExplicit) {
+    Write-Host "  using      $configDir (explicit)"
+    return
+  }
+
+  $candidates = New-Object 'System.Collections.Generic.List[string]'
+  $saved = Read-Saved-Config-Dir
+  if ($saved) { $candidates.Add($saved) }
+  if ($env:XDG_CONFIG_HOME) { $candidates.Add((Join-Path $env:XDG_CONFIG_HOME 'muse')) }
+  $candidates.Add((Join-Path $HOME '.config/muse'))
+  $candidates.Add((Join-Path $HOME '.muse'))
+  if ($env:APPDATA) { $candidates.Add((Join-Path $env:APPDATA 'muse')) }
+  if ($env:LOCALAPPDATA) { $candidates.Add((Join-Path $env:LOCALAPPDATA 'muse')) }
+
+  foreach ($candidate in $candidates) {
+    if (Test-Muse-Config-Dir $candidate) {
+      $script:configDir = [IO.Path]::GetFullPath($candidate)
+      Write-Host "  found      Muse config at $configDir"
+      return
+    }
+  }
+
+  if (Test-Preflight-Interactive) {
+    while ($true) {
+      $typed = Read-Host 'Where is your Muse config directory?'
+      if ([string]::IsNullOrWhiteSpace($typed)) {
+        Write-Host '  a config directory is required'
+        continue
+      }
+      $resolved = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($typed)
+      if (Test-Muse-Config-Dir $resolved) {
+        $script:configDir = $resolved
+        Save-Config-Dir $configDir
+        Write-Host "  using      Muse config at $configDir"
+        return
+      }
+      Write-Host '  not a Muse config directory (need settings.json, auth.json, trust.json, agents/, skills/, or mcp/)'
+    }
+  }
+
+  throw 'Could not find a Muse config directory. Pass --dir PATH, set MUSE_CONFIG_DIR, or re-run in a terminal.'
 }
 
 function Backup-Config {
@@ -1327,6 +1620,7 @@ function Invoke-SelfUpdate {
   }
   $updateArgs = @('--dir', $configDir, '--defaults')
   if ($skipMcp -or $env:MUSE_SQUAD_SKIP_MCP -eq '1') { $updateArgs += '--no-mcp' }
+  if ($skipMuseCheck) { $updateArgs += '--skip-muse-check' }
   if ($backupChoice -eq 'yes') { $updateArgs += '--backup' }
   if ($backupChoice -eq 'no') { $updateArgs += '--no-backup' }
   # --update must never trigger a reconfigure on the downloaded installer.
@@ -1343,6 +1637,10 @@ function Invoke-SelfUpdate {
   } finally {
     if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
   }
+}
+
+if ($mode -ne 'uninstall') {
+  Invoke-Preflight
 }
 
 Write-Host "muse-squad v$Version - $mode"

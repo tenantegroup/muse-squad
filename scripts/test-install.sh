@@ -5,6 +5,9 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/muse-squad-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
+# Existing behavior tests are not preflight tests; dedicated cases below opt in.
+export MUSE_SQUAD_SKIP_MUSE_CHECK=1
+
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 latest_backup() { ls -1dt "$1".backup.* 2>/dev/null | head -n 1 || true; }
 
@@ -247,6 +250,174 @@ if grep -qF 'Customize Squad team members & models now?' <<<"$defaults_output"; 
 fi
 grep -q 'unchanged.*squad-team.json' <<<"$defaults_output" || \
   fail "--defaults did not report the team config as unchanged"
+echo "  ok"
+
+echo "== preflight: missing Muse hard fails in non-interactive install =="
+preflight_home="$TMP/preflight-home"
+mkdir -p "$preflight_home"
+if missing_output="$(HOME="$preflight_home" PATH="/usr/bin:/bin" \
+  MUSE_CONFIG_DIR="$TMP/preflight-missing-config" MUSE_SQUAD_SKIP_MUSE_CHECK=0 \
+  bash "$ROOT/install" --no-backup 2>&1)"; then
+  printf '%s\n' "$missing_output"
+  fail "install should fail when Muse is missing"
+fi
+grep -qF 'Muse Code was not found' <<<"$missing_output" || \
+  fail "missing Muse error was not shown"
+grep -qF -- '--skip-muse-check' <<<"$missing_output" || \
+  fail "missing Muse error did not mention the skip flag"
+echo "  ok"
+
+echo "== preflight: interactive install offers the official Muse installer =="
+preflight_bin="$TMP/preflight-bin"
+preflight_muse_dir="$TMP/preflight-muse-bin"
+preflight_config="$TMP/preflight-autoinstall-config"
+mkdir -p "$preflight_bin" "$preflight_muse_dir" "$preflight_config"
+cat > "$preflight_bin/curl" <<'FAKE_CURL'
+#!/usr/bin/env bash
+set -euo pipefail
+cat <<'FAKE_INSTALLER'
+#!/usr/bin/env bash
+set -euo pipefail
+mkdir -p "$MUSE_INSTALL_DIR"
+cat > "$MUSE_INSTALL_DIR/muse" <<'FAKE_MUSE'
+#!/usr/bin/env bash
+echo "Fake Muse Code 9.9.9"
+FAKE_MUSE
+chmod +x "$MUSE_INSTALL_DIR/muse"
+FAKE_INSTALLER
+FAKE_CURL
+chmod +x "$preflight_bin/curl"
+auto_output="$(
+  HOME="$preflight_home" PATH="$preflight_bin:$preflight_muse_dir:/usr/bin:/bin" \
+  MUSE_INSTALL_DIR="$preflight_muse_dir" MUSE_CONFIG_DIR="$preflight_config" \
+  MUSE_SQUAD_SKIP_MUSE_CHECK=0 MUSE_SQUAD_FORCE_INTERACTIVE=1 \
+  bash "$ROOT/install" --defaults --no-backup <<< 'Y' 2>&1
+)"
+grep -qF 'Muse Code does not appear to be installed' <<<"$auto_output" || \
+  fail "interactive preflight did not offer to install Muse"
+grep -qF 'installing  Muse Code via the official installer' <<<"$auto_output" || \
+  fail "interactive preflight did not run the official installer"
+[[ -x "$preflight_muse_dir/muse" ]] || fail "official installer did not create a Muse executable"
+diff -q --strip-trailing-cr "$ROOT/payload/mcp/endpoints.default.json" \
+  "$preflight_config/endpoints.json" >/dev/null || \
+  fail "install did not continue after Muse was installed"
+echo "  ok"
+
+echo "== preflight: discovers Muse config from XDG_CONFIG_HOME =="
+xdg_home="$TMP/xdg-home"
+xdg_root="$TMP/xdg-config"
+mkdir -p "$xdg_home/.local/bin" "$xdg_root/muse"
+cat > "$xdg_home/.local/bin/muse" <<'FAKE_MUSE'
+#!/usr/bin/env bash
+echo "Fake Muse Code 9.9.9"
+FAKE_MUSE
+chmod +x "$xdg_home/.local/bin/muse"
+printf '{"schema_version":1}\n' > "$xdg_root/muse/settings.json"
+xdg_output="$(
+  HOME="$xdg_home" XDG_CONFIG_HOME="$xdg_root" PATH="$xdg_home/.local/bin:$PATH" \
+  MUSE_SQUAD_SKIP_MUSE_CHECK=0 bash "$ROOT/install" --defaults --no-backup 2>&1
+)"
+grep -qF "found      Muse config at $xdg_root/muse" <<<"$xdg_output" || \
+  fail "preflight did not discover the XDG Muse config dir"
+[[ -f "$xdg_root/muse/endpoints.json" ]] || \
+  fail "install did not use the discovered XDG config dir"
+[[ ! -e "$xdg_home/.config/muse/endpoints.json" ]] || \
+  fail "install ignored the discovered XDG config dir"
+echo "  ok"
+
+echo "== preflight: explicit config dir is never overridden =="
+explicit_config="$TMP/explicit-preflight-config"
+explicit_output="$(
+  HOME="$xdg_home" XDG_CONFIG_HOME="$xdg_root" PATH="$xdg_home/.local/bin:$PATH" \
+  MUSE_SQUAD_SKIP_MUSE_CHECK=0 \
+  bash "$ROOT/install" --dir "$explicit_config" --defaults --no-backup 2>&1
+)"
+grep -qF 'using      '"$explicit_config"' (explicit)' <<<"$explicit_output" || \
+  fail "explicit --dir was not honored during preflight"
+[[ -f "$explicit_config/endpoints.json" ]] || \
+  fail "install did not use the explicit config dir"
+echo "  ok"
+
+echo "== preflight: missing config hard fails without a TTY =="
+config_home="$TMP/config-home"
+mkdir -p "$config_home/.local/bin"
+cat > "$config_home/.local/bin/muse" <<'FAKE_MUSE'
+#!/usr/bin/env bash
+echo "Fake Muse Code 9.9.9"
+FAKE_MUSE
+chmod +x "$config_home/.local/bin/muse"
+if config_missing_output="$(
+  HOME="$config_home" PATH="$config_home/.local/bin:/usr/bin:/bin" \
+  MUSE_CONFIG_DIR= MUSE_SQUAD_SKIP_MUSE_CHECK=0 \
+  bash "$ROOT/install" --defaults --no-backup 2>&1
+)"; then
+  printf '%s\n' "$config_missing_output"
+  fail "install should fail when no Muse config dir is found"
+fi
+grep -qF 'could not find a Muse config directory' <<<"$config_missing_output" || \
+  fail "missing config error was not shown"
+echo "  ok"
+
+echo "== preflight: typed config path is persisted =="
+typed_home="$TMP/typed-home"
+typed_config="$TMP/typed-config"
+mkdir -p "$typed_home/.local/bin" "$typed_config"
+cat > "$typed_home/.local/bin/muse" <<'FAKE_MUSE'
+#!/usr/bin/env bash
+echo "Fake Muse Code 9.9.9"
+FAKE_MUSE
+chmod +x "$typed_home/.local/bin/muse"
+printf '{"schema_version":1}\n' > "$typed_config/settings.json"
+typed_output="$(
+  HOME="$typed_home" PATH="$typed_home/.local/bin:$PATH" \
+  MUSE_SQUAD_SKIP_MUSE_CHECK=0 MUSE_SQUAD_FORCE_INTERACTIVE=1 \
+  bash "$ROOT/install" --defaults --no-backup \
+    <<< "$(printf '%s\n%s\n' "$TMP/not-a-muse-config" "$typed_config")" 2>&1
+)"
+grep -qF 'Where is your Muse config directory?' <<<"$typed_output" || \
+  fail "preflight did not prompt for the Muse config dir"
+grep -qF 'not a Muse config directory' <<<"$typed_output" || \
+  fail "preflight accepted an invalid config dir without validation"
+grep -qx "$typed_config" "$typed_home/.config/muse-squad/config-dir" || \
+  fail "typed Muse config dir was not persisted"
+[[ -f "$typed_config/endpoints.json" ]] || \
+  fail "install did not use the typed config dir"
+rerun_output="$(
+  HOME="$typed_home" PATH="$typed_home/.local/bin:$PATH" \
+  MUSE_SQUAD_SKIP_MUSE_CHECK=0 bash "$ROOT/install" --defaults --no-backup 2>&1
+)"
+grep -qF "found      Muse config at $typed_config" <<<"$rerun_output" || \
+  fail "persisted Muse config dir was not reused"
+echo "  ok"
+
+echo "== preflight: --skip-muse-check bypasses detection =="
+skip_output="$(
+  HOME="$preflight_home" PATH="/usr/bin:/bin" \
+  MUSE_CONFIG_DIR="$TMP/preflight-skip-config" MUSE_SQUAD_SKIP_MUSE_CHECK=0 \
+  bash "$ROOT/install" --skip-muse-check --defaults --no-backup 2>&1
+)"
+grep -qF 'skipped    Muse preflight' <<<"$skip_output" || \
+  fail "--skip-muse-check did not bypass preflight"
+env_skip_output="$(
+  HOME="$preflight_home" PATH="/usr/bin:/bin" \
+  MUSE_CONFIG_DIR="$TMP/preflight-env-skip-config" MUSE_SQUAD_SKIP_MUSE_CHECK=1 \
+  bash "$ROOT/install" --defaults --no-backup 2>&1
+)"
+grep -qF 'skipped    Muse preflight' <<<"$env_skip_output" || \
+  fail "MUSE_SQUAD_SKIP_MUSE_CHECK=1 did not bypass preflight"
+echo "  ok"
+
+echo "== preflight: uninstall skips Muse detection =="
+uninstall_preflight_output="$(
+  HOME="$preflight_home" PATH="/usr/bin:/bin" \
+  MUSE_CONFIG_DIR="$TMP/preflight-uninstall-config" MUSE_SQUAD_SKIP_MUSE_CHECK=0 \
+  bash "$ROOT/install" --uninstall --no-backup 2>&1
+)"
+if grep -qF 'Muse Code was not found' <<<"$uninstall_preflight_output"; then
+  fail "uninstall should not require Muse to be installed"
+fi
+grep -qF 'muse-squad v' <<<"$uninstall_preflight_output" || \
+  fail "uninstall did not run after skipping preflight"
 echo "  ok"
 
 echo "== payload: subagent task labeling/reporting rule =="
