@@ -89,12 +89,16 @@ for rel in "${EXPECTED[@]}"; do
   echo "  ok  $rel"
 done
 
-echo "== payload: subagent task labeling rule =="
+echo "== payload: subagent task labeling/reporting rule =="
 for skill in skills/squad-plan/SKILL.md skills/squad-execute/SKILL.md; do
-  grep -qF '## Subagent Task Labeling (TUI Visibility)' "$ROOT/payload/$skill" || \
-    fail "missing labeling section in $skill"
-  grep -qF '[<agent-role> | <short-model-name>] <concise action>' "$ROOT/payload/$skill" || \
+  grep -qF '## Subagent Task Labeling and Reporting (TUI Visibility)' "$ROOT/payload/$skill" || \
+    fail "missing labeling/reporting section in $skill"
+  grep -qF '[<agent-role> | <model-tag>] <concise action>' "$ROOT/payload/$skill" || \
     fail "missing label format in $skill"
+  grep -qF 'use `native`' "$ROOT/payload/$skill" || \
+    fail "missing native fallback tag guidance in $skill"
+  grep -qF 'Subagents / Models' "$ROOT/payload/$skill" || \
+    fail "missing Subagents / Models roster requirement in $skill"
   grep -qF 'ember+local-coder' "$ROOT/payload/$skill" || \
     fail "missing combined model tag in $skill"
   grep -qF '└ ◈ <task> running <elapsed>' "$ROOT/payload/$skill" || \

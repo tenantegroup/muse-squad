@@ -328,14 +328,14 @@ description: Multi-agent explore-first planning mode that writes a decision-comp
 ---
 You are in SQUAD-PLAN mode. Do NOT edit product code yet.
 
-## Subagent Task Labeling (TUI Visibility)
+## Subagent Task Labeling and Reporting (TUI Visibility)
 
-When spawning any subagent, set its short task title / description to:
+When spawning any subagent, **always** set its short task title / description to:
 
-`[<agent-role> | <short-model-name>] <concise action>`
+`[<agent-role> | <model-tag>] <concise action>`
 
 - `<agent-role>` is the role, plus an index when there are peers: `scout-1`, `plan-reviewer`, `worker-2`.
-- `<short-model-name>` is lowercase and stable: `ember` for `muse-ember-1.0`, `spark` for `muse-spark-1.3`, `wonder` for `muse-wonder-*` if configured, or the `custom-coder` endpoint alias (`local-coder`, `grill-reviewer`) when the work goes through that endpoint. Combine with `+` when a native agent delegates to `custom-coder`, e.g. `ember+local-coder`.
+- `<model-tag>` is lowercase and stable: `ember` for `muse-ember-1.0`, `spark` for `muse-spark-1.3`, `wonder` for `muse-wonder-*` if configured, or the `custom-coder` endpoint alias (`local-coder`, `grill-reviewer`) when work goes through that endpoint. Combine with `+` when a native agent delegates to `custom-coder`, e.g. `ember+local-coder`. If the specific native model is unknown but it is a native Muse subagent, use `native`; use `unknown` only as a last resort. **Never omit the tag.**
 - Keep `<concise action>` under ~50 characters so the TUI footer (`└ ◈ <task> running <elapsed>`) does not truncate the useful part. Start with a verb; no trailing punctuation.
 - Use exactly `[role | tag] action`: lowercase tags, one space on each side of `|`, no extra prefix or wrapper.
 
@@ -346,9 +346,12 @@ Examples:
 [plan-reviewer | spark] Audit .muse/PLAN.md for edge cases
 [worker-1 | ember] Implement FIFO semaphore queue
 [worker-2 | ember+local-coder] Generate unit tests for fallback
+[scout-2 | native] Inspect git state of repos
 ```
 
-Use this format as the default for every spawn. If a one-off subagent truly has no meaningful role or model, keep the bracketed prefix with a plain tag such as `[helper | ember]` rather than leaving the title unlabeled.
+If work is done **inline** because subagent spawning failed, was rejected, or is unavailable, do not invent a spawn — report it in the summary as `[inline | native] <action>`.
+
+**Always include a "Subagents / Models" roster in your user-facing summaries** (and before asking for sign-off) so the model is visible even if the TUI label omits it. For each helper list: role, model-tag, action, and outcome/status. Also list relevant `custom-coder` tool calls with endpoint (e.g. `custom-coder:critique_plan | grill-reviewer — result`).
 
 ## Concurrency Budget and Endpoint Health (read first)
 
@@ -361,13 +364,13 @@ At the start, call `custom-coder:list_endpoints` (or read `~/.config/muse/endpoi
 
 When calling `custom-coder`, keep `repo_context`, `file_context`, and `plan_markdown` short and relevant to the decision at hand. Use `custom-coder:list_endpoints` to check the target endpoint's `max_input_chars` and `extra_body` context hints (such as `options.num_ctx`) before sending. Send only the needed files or excerpts - never dump whole unrelated files. If a reply starts with the input-truncated warning, the model saw less context than you intended: shorten the context and re-ask instead of trusting the critique.
 
-1. Map the relevant files, dependencies, and existing patterns. Prefer spawning parallel read-only subagents (for example `explore` or `general-purpose`, if available in this runtime) for faster coverage; if subagent spawning fails, is rejected, or is unavailable, do the equivalent read-only mapping inline instead of stopping.
+1. Map the relevant files, dependencies, and existing patterns. Prefer spawning parallel read-only subagents (for example `explore` or `general-purpose`, if available in this runtime) for faster coverage; if subagent spawning fails, is rejected, or is unavailable, do the equivalent read-only mapping inline instead of stopping. Track each helper (spawned or inline) with its role and model-tag for the roster.
 2. Ask the user clarifying questions ONLY if an architectural fork cannot be resolved from the codebase.
 3. Draft a decision-complete implementation plan in `.muse/PLAN.md` with exact file paths, dependency order, and verification commands. If the file already has a `## Execution Log & Decisions` section, preserve it verbatim at the bottom — it is the durable handoff record from any prior execution session; do not overwrite it unless the user explicitly asks to reset the plan.
 4. Plan Grill (degrades gracefully):
    1. Audit `.muse/PLAN.md` against the actual files in the repository. Prefer spawning a read-only `plan-reviewer` subagent if available; if that spawn fails, perform the same critique inline.
    2. If custom-coder is available, call `custom-coder:critique_plan` (endpoint `grill-reviewer` when present) for an independent adversarial review (in parallel with the native review when practical). If custom-coder is unavailable or the call fails, skip it, warn the user that the self-hosted critique was not run, and proceed with the native/inline review only.
-   3. Synthesize available critiques, resolve any valid issues in `.muse/PLAN.md`, and present a summary of what was caught (and any endpoint warning) before asking the user for `/squad-execute` sign-off.
+   3. Synthesize available critiques, resolve any valid issues in `.muse/PLAN.md`, and present a summary of what was caught (and any endpoint warning), including the **Subagents / Models** roster, before asking the user for `/squad-execute` sign-off.
 '@
 Install-File 'skills/squad-execute/SKILL.md' @'
 ---
@@ -375,14 +378,14 @@ name: squad-execute
 description: Executes the approved `.muse/PLAN.md` using parallel subagents in isolated worktrees, with a verification gate that blocks premature completion.
 ---
 
-## Subagent Task Labeling (TUI Visibility)
+## Subagent Task Labeling and Reporting (TUI Visibility)
 
-When spawning any subagent, set its short task title / description to:
+When spawning any subagent, **always** set its short task title / description to:
 
-`[<agent-role> | <short-model-name>] <concise action>`
+`[<agent-role> | <model-tag>] <concise action>`
 
 - `<agent-role>` is the role, plus an index when there are peers: `worker-1`, `worker-2`, `scout-1`, `verifier-1`.
-- `<short-model-name>` is lowercase and stable: `ember` for `muse-ember-1.0`, `spark` for `muse-spark-1.3`, `wonder` for `muse-wonder-*` if configured, or the `custom-coder` endpoint alias (`local-coder`, `grill-reviewer`) when the work goes through that endpoint. Combine with `+` when a native agent delegates to `custom-coder`, e.g. `ember+local-coder`.
+- `<model-tag>` is lowercase and stable: `ember` for `muse-ember-1.0`, `spark` for `muse-spark-1.3`, `wonder` for `muse-wonder-*` if configured, or the `custom-coder` endpoint alias (`local-coder`, `grill-reviewer`) when work goes through that endpoint. Combine with `+` when a native agent delegates to `custom-coder`, e.g. `ember+local-coder`. If the specific native model is unknown but it is a native Muse subagent, use `native`; use `unknown` only as a last resort. **Never omit the tag.**
 - Keep `<concise action>` under ~50 characters so the TUI footer (`└ ◈ <task> running <elapsed>`) does not truncate the useful part. Start with a verb; no trailing punctuation.
 - Use exactly `[role | tag] action`: lowercase tags, one space on each side of `|`, no extra prefix or wrapper.
 
@@ -393,11 +396,14 @@ Examples:
 [plan-reviewer | spark] Audit .muse/PLAN.md for edge cases
 [worker-1 | ember] Implement FIFO semaphore queue
 [worker-2 | ember+local-coder] Generate unit tests for fallback
+[worker-3 | native] Apply scoped fix in api/
 ```
 
-Use this format as the default for every spawn. If a one-off subagent truly has no meaningful role or model, keep the bracketed prefix with a plain tag such as `[helper | ember]` rather than leaving the title unlabeled.
+If work is done **inline** because subagent spawning failed, was rejected, or is unavailable, do not invent a spawn — report it in the summary as `[inline | native] <action>`.
 
-Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` section - that section is the durable handoff record when resuming a long or interrupted session. Group independent tasks into parallel waves and delegate each bounded task to `worker` subagents using isolated Git worktrees (`--subagent-worktree-isolation` behavior).
+**Always include a "Subagents / Models" roster in your user-facing wave/progress and completion summaries** so the model is visible even if the TUI label omits it. For each helper list: role, model-tag, action, and outcome/status. Also list relevant `custom-coder` tool calls with endpoint (e.g. `custom-coder:generate_code | local-coder — result`). When practical, include role|model-tag in execution-log entries.
+
+Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` section - that section is the durable handoff record when resuming a long or interrupted session. Group independent tasks into parallel waves and delegate each bounded task to `worker` subagents using isolated Git worktrees (`--subagent-worktree-isolation` behavior). Track each helper (spawned or inline) with its role and model-tag for the roster.
 
 ## Endpoint Health and Execution Mode (read first)
 
@@ -429,7 +435,7 @@ After every wave — before advancing to the next wave and before reporting comp
 2. Run every verification command listed in `.muse/PLAN.md` from the repository root — for example `npm test`, `cargo check`, `pytest`, or `go test ./...`. If the plan lists none, detect the project's typechecker and test commands from its manifests, add them to `.muse/TODO.md`, and run them.
 3. If any command fails, fix the failure in another bounded wave (delegating to a `worker` where appropriate) and repeat this gate. Never mark an item done or claim success based on a partial pass.
 4. Append a short entry to the `## Execution Log & Decisions` section at the bottom of `.muse/PLAN.md` (create the section if absent). Record the wave number, what landed, architectural decisions and *why*, gotchas discovered, exact verification commands/results, and any remaining work or blockers. Append only — never rewrite or delete earlier entries — so the on-disk record survives compaction and session restarts.
-5. Only when all TODO items are checked and all verification commands pass, summarize what was verified and return control to the user.
+5. Only when all TODO items are checked and all verification commands pass, summarize what was verified and return control to the user, including the **Subagents / Models** roster for the run (per wave where useful).
 
 ## Session Handoff Notes
 

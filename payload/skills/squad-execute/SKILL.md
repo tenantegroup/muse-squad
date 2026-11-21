@@ -3,14 +3,14 @@ name: squad-execute
 description: Executes the approved `.muse/PLAN.md` using parallel subagents in isolated worktrees, with a verification gate that blocks premature completion.
 ---
 
-## Subagent Task Labeling (TUI Visibility)
+## Subagent Task Labeling and Reporting (TUI Visibility)
 
-When spawning any subagent, set its short task title / description to:
+When spawning any subagent, **always** set its short task title / description to:
 
-`[<agent-role> | <short-model-name>] <concise action>`
+`[<agent-role> | <model-tag>] <concise action>`
 
 - `<agent-role>` is the role, plus an index when there are peers: `worker-1`, `worker-2`, `scout-1`, `verifier-1`.
-- `<short-model-name>` is lowercase and stable: `ember` for `muse-ember-1.0`, `spark` for `muse-spark-1.3`, `wonder` for `muse-wonder-*` if configured, or the `custom-coder` endpoint alias (`local-coder`, `grill-reviewer`) when the work goes through that endpoint. Combine with `+` when a native agent delegates to `custom-coder`, e.g. `ember+local-coder`.
+- `<model-tag>` is lowercase and stable: `ember` for `muse-ember-1.0`, `spark` for `muse-spark-1.3`, `wonder` for `muse-wonder-*` if configured, or the `custom-coder` endpoint alias (`local-coder`, `grill-reviewer`) when work goes through that endpoint. Combine with `+` when a native agent delegates to `custom-coder`, e.g. `ember+local-coder`. If the specific native model is unknown but it is a native Muse subagent, use `native`; use `unknown` only as a last resort. **Never omit the tag.** **Do not guess or infer from role defaults** (e.g. do not label a worker/reviewer `ember` or `spark` unless the runtime, spawn result, or session metadata explicitly reports that exact model). If you later learn the actual model, correct the roster/summary and note the correction.
 - Keep `<concise action>` under ~50 characters so the TUI footer (`└ ◈ <task> running <elapsed>`) does not truncate the useful part. Start with a verb; no trailing punctuation.
 - Use exactly `[role | tag] action`: lowercase tags, one space on each side of `|`, no extra prefix or wrapper.
 
@@ -21,11 +21,14 @@ Examples:
 [plan-reviewer | spark] Audit .muse/PLAN.md for edge cases
 [worker-1 | ember] Implement FIFO semaphore queue
 [worker-2 | ember+local-coder] Generate unit tests for fallback
+[worker-3 | native] Apply scoped fix in api/
 ```
 
-Use this format as the default for every spawn. If a one-off subagent truly has no meaningful role or model, keep the bracketed prefix with a plain tag such as `[helper | ember]` rather than leaving the title unlabeled.
+If work is done **inline** because subagent spawning failed, was rejected, or is unavailable, do not invent a spawn — report it in the summary as `[inline | native] <action>`.
 
-Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` section - that section is the durable handoff record when resuming a long or interrupted session. Group independent tasks into parallel waves and delegate each bounded task to `worker` subagents using isolated Git worktrees (`--subagent-worktree-isolation` behavior).
+**Always include a "Subagents / Models" roster in your user-facing wave/progress and completion summaries** so the model is visible even if the TUI label omits it. For each helper list: role, model-tag, action, and outcome/status. For `custom-coder` tool calls, report the actual `servedBy` endpoint/model and `fallbackUsed` from the tool result meta (not inferred from config/default) and the outcome (e.g. `custom-coder:generate_code | servedBy local-coder (<model>) — ok`). If result meta is unavailable, state that explicitly. When practical, include role|model-tag in execution-log entries.
+
+Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` section - that section is the durable handoff record when resuming a long or interrupted session. Group independent tasks into parallel waves and delegate each bounded task to `worker` subagents using isolated Git worktrees (`--subagent-worktree-isolation` behavior). Track each helper (spawned or inline) with its role and model-tag for the roster.
 
 ## Endpoint Health and Execution Mode (read first)
 
@@ -57,7 +60,7 @@ After every wave — before advancing to the next wave and before reporting comp
 2. Run every verification command listed in `.muse/PLAN.md` from the repository root — for example `npm test`, `cargo check`, `pytest`, or `go test ./...`. If the plan lists none, detect the project's typechecker and test commands from its manifests, add them to `.muse/TODO.md`, and run them.
 3. If any command fails, fix the failure in another bounded wave (delegating to a `worker` where appropriate) and repeat this gate. Never mark an item done or claim success based on a partial pass.
 4. Append a short entry to the `## Execution Log & Decisions` section at the bottom of `.muse/PLAN.md` (create the section if absent). Record the wave number, what landed, architectural decisions and *why*, gotchas discovered, exact verification commands/results, and any remaining work or blockers. Append only — never rewrite or delete earlier entries — so the on-disk record survives compaction and session restarts.
-5. Only when all TODO items are checked and all verification commands pass, summarize what was verified and return control to the user.
+5. Only when all TODO items are checked and all verification commands pass, summarize what was verified and return control to the user, including the **Subagents / Models** roster for the run (per wave where useful).
 
 ## Session Handoff Notes
 
