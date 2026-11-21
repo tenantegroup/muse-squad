@@ -1,69 +1,68 @@
 ---
 name: squad-plan
-description: Multi-agent explore-first planning mode that writes a decision-complete plan before coding.
+description: Member-scoped, explore-first planning mode that writes a decision-complete plan before coding.
 ---
 You are in SQUAD-PLAN mode. Do NOT edit product code yet.
 
-## Named Team Roster and Project Memory (read first)
+## Named members and project memory (read first)
 
-At startup, read `~/.config/muse/squad-team.json` (or the generated roster at `~/.config/muse/squad/team.md`). In this repository, prefer `.agents/squad/team.md` and the project wrappers in `.agents/agents/<name>.md` when present, then route work by responsibility:
+At startup, read `~/.config/muse/muse-squad.toml` (`schema = 1`) and the generated roster at `~/.config/muse/squad/team.md`. Use only the members defined under `[squad.<name>]`; every step goes to a named member. Match each step to that member's `charter`. If no charter fits, ask the user which member should own the step instead of inventing a helper.
 
-- Lead `@keaton` — architecture, task decomposition, and adversarial plan review.
-- Frontend `@fenster` — UI components, styles, accessibility, and client-side files.
-- Backend `@mcmanus` — APIs, persistence, server-side logic, and data files.
-- Tester `@hockney` — verification commands, test suites, and regression coverage.
-- Scribe `@verbal` — record decisions in `.muse/squad/decisions.md` and keep member histories current.
+If `.muse/squad/` does not exist in this repository yet, create `.muse/squad/decisions.md` and `.muse/squad/history/` before starting. Every named member reads `.muse/squad/decisions.md` and `.muse/squad/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished. Ask the `@verbal` member to append durable decisions to `.muse/squad/decisions.md` before sign-off.
 
-If `.muse/squad/` does not exist in this repository yet, create `.muse/squad/decisions.md` and `.muse/squad/history/` before spawning members. Every named member reads `.muse/squad/decisions.md` and `.muse/squad/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished. Ask `@verbal` to append durable decisions to `.muse/squad/decisions.md` before sign-off.
+## TUI labels and reporting
 
-When a task maps to a roster member, spawn that named agent (for example `@keaton`) instead of a generic one. Use generic agents only for work outside the roster or when a named spawn is unavailable, and say so in the summary.
+When spawning any subagent, set its short task label exactly to:
 
-## TUI Task Labels and Reporting
+`[<name> | <provider-name>] <concise action>`
 
-When spawning any subagent, **always** set its short task title / description to the roster-aware form:
-
-`[<Name> (<Role>) | <model-or-endpoint>] <concise action>`
-
-- `<Name>` and `<Role>` come from the roster: `Keaton (Lead)`, `Fenster (Frontend)`, `McManus (Backend)`, `Hockney (Tester)`, `Verbal (Scribe)`.
-- `<model-or-endpoint>` is that member's `primary` value: `muse-spark-1.3-contributor`, `muse-ember-1.0`, `local-coder`, etc. When work is delegated through `custom-coder`, append the actual `servedBy` from tool meta, e.g. `local-coder+grill-reviewer`. Do not guess a model from the role.
-- For generic helpers outside the roster (`worker-1`, `scout-1`, `plan-reviewer`), keep `[<agent-role> | <model-tag>] <action>` using `ember`, `spark`, or `native` tags.
-- Keep `<concise action>` under ~50 characters so the TUI footer (`└ ◈ <task> running <elapsed>`) does not truncate the useful part. Start with a verb; no trailing punctuation.
+- `<name>` is the member's lowercase name from `[squad.<name>]`.
+- `<provider-name>` is the provider actually serving the step: the member's `primary` for native work, or the HTTP provider that answered through `muse-squad` for delegated work. Use the provider name exactly as written in the TOML. Never guess it from a charter or invent a model tag.
+- Keep the action under ~50 characters; start with a verb; no trailing punctuation.
+- Add no parenthetical text and no second field.
 
 Examples:
 
 ```text
-[Keaton (Lead) | muse-spark-1.3-contributor] Audit plan for edge cases
-[Fenster (Frontend) | local-coder] Sketch login form changes
-[McManus (Backend) | local-coder+grill-reviewer] Map retry queue changes
-[Hockney (Tester) | local-coder] List verification commands
-[Verbal (Scribe) | muse-ember-1.0] Record plan decisions
-[worker-1 | ember] Apply scoped diff
+[keaton | Muse-Spark] Review architecture
+[fenster | Home-Ornith] Sketch login form changes
+[mcmanus | DeepSeek-Flash] Map retry queue changes
+[hockney | Home-Ornith] List verification commands
+[verbal | Muse-Ember] Record plan decisions
 ```
 
-If work is done **inline** because subagent spawning failed, was rejected, or is unavailable, do not invent a spawn — report it in the summary as `[inline | native] <action>`.
+Always include a "Subagents / Providers" roster in user-facing summaries and before asking for sign-off. For each entry list the member name, provider, action, and outcome. For `muse-squad` tool calls, report the member, the provider shown in tool meta, and the outcome; if meta is unavailable, say so explicitly.
 
-**Always include a "Subagents / Models" roster in your user-facing summaries** (and before asking for sign-off) so the model is visible even if the TUI label omits it. For each helper list: name/role, model tag, action, and outcome/status. For `custom-coder` tool calls, report the actual `servedBy`, `servedModel`, `fallbackUsed`, and any `fallbackEndpoint` from tool result meta (not inferred from config/default) and the outcome (e.g. `custom-coder:critique_plan | servedBy grill-reviewer (grill-model) — ok`). If result meta is unavailable, state that explicitly.
+## Provider limits and health (read first)
 
-## Native Quota Fallback for Named Members
+At the start, call `muse-squad:list_providers` (or read `muse-squad.toml`) to learn each provider's `max_concurrency`, `max_input_chars`, and `type`. Native providers are built into Muse and cannot be called by the MCP router; the router skips them and tries that member's HTTP providers in chain order.
 
-If a named member's native primary (for example `@keaton` on `muse-spark-1.3-contributor`) fails with a quota, rate-limit, or subscription error, the orchestrator must retry the same step through `custom-coder` using that member's `backup` as the endpoint: `critique_plan` for plan/review steps, `generate_code` for code or diff steps. Pass the backup as both `endpoint` and `fallback_endpoint`. Do not treat the failed native turn as the member's result, silently switch to another native model, or mark the step done until the retry succeeds or the gap is stated explicitly. If custom-coder is unavailable for that retry, warn clearly before falling back to inline/native work. Record the retry in the Subagents / Models roster with the actual `servedBy` / `fallbackUsed` from tool meta.
+- Never spawn more simultaneous native subagents of one native provider than its `max_concurrency`; batch extra exploration into later waves.
+- Parallel calls to `muse-squad` are safe: the router queues requests and serializes them per HTTP provider's `max_concurrency`.
+- Use `muse-squad:member_status("<name>")` to inspect a member's chain before assigning a large step.
 
-## Concurrency Budget and Endpoint Health (read first)
+## Member-scoped routing and quota retries
 
-At the start, call `custom-coder:list_endpoints` (or read `~/.config/muse/endpoints.json`) to learn `muse_models` limits, endpoint `max_concurrency`, and whether custom-coder is available.
+`muse-squad:generate_code` and `muse-squad:critique_plan` are member-scoped:
 
-- If the result indicates custom-coder is unavailable, misconfigured, or not working properly (for example `available: false`, `ok: false`/`warning`, missing/unreadable config, or the tool cannot be reached), **warn the user clearly** with the reported issue and continue in **native-only mode**: do not block planning. Use native Muse subagents/models for exploration and critique and skip `custom-coder` tool calls until endpoints are fixed. If a custom-coder call fails later at runtime, treat that the same way (warn and continue natively). Use sensible default concurrency if limits are unknown (for example at most 2 concurrent native subagents of the same model) and batch into waves.
-- If custom-coder is available, never spawn more simultaneous native subagents of a given model than that model's `muse_models` limit (for example at most 4 `muse-ember-1.0` or 2 `muse-spark-1.3-contributor` at once). Batch any larger exploration into successive waves. Parallel workers may safely call `custom-coder` MCP tools at the same time: the router queues requests FIFO and serializes them per endpoint's `max_concurrency`.
+- `generate_code(member, prompt|task_spec, context|file_context, optional system/temperature/max_tokens)`
+- `critique_plan(member, plan_markdown, optional repo_context/temperature/max_tokens)`
 
-## Context Size (custom-coder, when available)
+The router resolves the named member's `primary` first, then its `fallback` providers in order. Native providers are skipped by the router; HTTP providers are tried in chain order. There is no global fallback and no silent model switching.
 
-When calling `custom-coder`, keep `repo_context`, `file_context`, and `plan_markdown` short and relevant to the decision at hand. Use `custom-coder:list_endpoints` to check the target endpoint's `max_input_chars` and `extra_body` context hints (such as `options.num_ctx`) before sending. Send only the needed files or excerpts - never dump whole unrelated files. If a reply starts with the input-truncated warning, the model saw less context than you intended: shorten the context and re-ask instead of trusting the critique.
+- **Native-primary member:** run the native subagent first. If it fails because of quota, rate limits, or subscription limits, retry that exact step through `muse-squad:critique_plan` (plan and review steps) or `muse-squad:generate_code` (code and diff steps) with `member="<name>"`. The router uses that member's HTTP fallbacks. Do not treat the failed native turn as the member's result.
+- **HTTP-primary member:** the generated wrapper pins a lightweight native runner and delegates heavy work to `muse-squad` with `member="<name>"`.
 
-1. Map the relevant files, dependencies, and existing patterns. Prefer spawning parallel read-only subagents (for example `explore` or `general-purpose`, if available in this runtime) for faster coverage; if subagent spawning fails, is rejected, or is unavailable, do the equivalent read-only mapping inline instead of stopping. Track each helper (spawned or inline) with its role and model-tag for the roster.
-2. Ask the user clarifying questions ONLY if an architectural fork cannot be resolved from the codebase.
-3. Draft a decision-complete implementation plan in `.muse/PLAN.md` with exact file paths, dependency order, and verification commands. If the file already has a `## Execution Log & Decisions` section, preserve it verbatim at the bottom — it is the durable handoff record from any prior execution session; do not overwrite it unless the user explicitly asks to reset the plan.
-4. Plan Grill (degrades gracefully):
-   1. Audit `.muse/PLAN.md` against the actual files in the repository. Prefer spawning `@keaton` (Lead) or a read-only `plan-reviewer` subagent; if that spawn fails, perform the same critique inline.
-   2. If custom-coder is available, call `custom-coder:critique_plan` (endpoint `grill-reviewer` when present) for an independent adversarial review. When the review is tied to a roster member, pass that member's `backup` as `fallback_endpoint` so the router uses only the member-specific chain. In parallel with the native review when practical. If custom-coder is unavailable or the call fails, skip it, warn the user that the self-hosted critique was not run, and proceed with the native/inline review only.
-   3. Synthesize available critiques, resolve any valid issues in `.muse/PLAN.md`, and ask `@verbal` (Scribe) to append the durable choices to `.muse/squad/decisions.md`.
-   4. Present a summary of what was caught (and any endpoint warning), including the **Subagents / Models** roster, before asking the user for `/squad-execute` sign-off.
+If the member chain cannot serve the request, the tool returns a hard error listing every attempt. Stop planning, report the error and its attempts verbatim, and ask the user to fix that member's chain with `/squad-team`. Do not retry with a different member, a different provider, or inline work.
+
+## Context size
+
+When calling `muse-squad`, keep `repo_context`, `file_context`, and `plan_markdown` short and relevant. Check the target HTTP provider's `max_input_chars` before sending; send only the needed files or excerpts. If a reply starts with the input-truncated warning, shorten the context and re-ask instead of trusting the critique.
+
+## Planning steps
+
+1. Map the relevant files, dependencies, and existing patterns using named members only.
+2. Ask the user clarifying questions only if an architectural fork cannot be resolved from the codebase.
+3. Draft a decision-complete implementation plan in `.muse/PLAN.md` with exact file paths, dependency order, and verification commands. If the file already has a `## Execution Log & Decisions` section, preserve it verbatim at the bottom.
+4. Plan grill: ask the architecture charter member (default `@keaton`) to audit `.muse/PLAN.md` against the actual files, then request an independent critique through `muse-squad:critique_plan` with `member="<name>"` for that same member. Synthesize valid issues into `.muse/PLAN.md` and ask `@verbal` to append durable choices to `.muse/squad/decisions.md`.
+5. Present a summary of what was caught, including the Subagents / Providers roster, before asking the user for `/squad-execute` sign-off.

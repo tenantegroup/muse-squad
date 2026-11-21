@@ -1,11 +1,14 @@
 #!/usr/bin/env node
 'use strict';
 
-// Merges the custom-coder MCP entry into Muse Code's settings.json without
+// Merges the muse-squad MCP entry into Muse Code's settings.json without
 // disturbing any other settings or MCP servers.
 
 const fs = require('fs');
 const path = require('path');
+
+const SERVER_NAME = 'muse-squad';
+const LEGACY_SERVER = 'custom-coder';
 
 function option(flag) {
   const index = process.argv.indexOf(flag);
@@ -65,30 +68,39 @@ function main() {
     : null;
 
   if (unregister) {
-    const removedCurrent = Object.prototype.hasOwnProperty.call(settings.mcpServers, 'custom-coder');
-    const removedLegacy = !!(legacy && Object.prototype.hasOwnProperty.call(legacy, 'custom-coder'));
+    const removedCurrent = Object.prototype.hasOwnProperty.call(settings.mcpServers, SERVER_NAME);
+    const removedLegacy = Object.prototype.hasOwnProperty.call(settings.mcpServers, LEGACY_SERVER) ||
+      !!(legacy && Object.prototype.hasOwnProperty.call(legacy, LEGACY_SERVER));
     if (!removedCurrent && !removedLegacy) {
-      console.log('  unchanged  custom-coder not registered');
+      console.log(`  unchanged  ${SERVER_NAME} not registered`);
       return;
     }
-    if (removedCurrent) delete settings.mcpServers['custom-coder'];
-    if (removedLegacy) delete legacy['custom-coder'];
+    if (removedCurrent) delete settings.mcpServers[SERVER_NAME];
+    if (Object.prototype.hasOwnProperty.call(settings.mcpServers, LEGACY_SERVER)) {
+      delete settings.mcpServers[LEGACY_SERVER];
+    }
+    if (legacy && Object.prototype.hasOwnProperty.call(legacy, LEGACY_SERVER)) {
+      delete legacy[LEGACY_SERVER];
+    }
   } else {
     if (!bridgePath || !configFile) {
       console.error('register-settings.js: --bridge and --config-file are required');
       process.exit(2);
     }
-    settings.mcpServers['custom-coder'] = {
+    settings.mcpServers[SERVER_NAME] = {
       transport: 'stdio',
       command: 'node',
       args: [bridgePath],
       env: {
-        MODELS_CONFIG_FILE: configFile
+        MUSE_SQUAD_CONFIG_FILE: configFile
       },
       mode: 'optional'
     };
-    if (legacy && Object.prototype.hasOwnProperty.call(legacy, 'custom-coder')) {
-      delete legacy['custom-coder'];
+    if (Object.prototype.hasOwnProperty.call(settings.mcpServers, LEGACY_SERVER)) {
+      delete settings.mcpServers[LEGACY_SERVER];
+    }
+    if (legacy && Object.prototype.hasOwnProperty.call(legacy, LEGACY_SERVER)) {
+      delete legacy[LEGACY_SERVER];
     }
   }
 
@@ -109,7 +121,7 @@ function main() {
     console.log(`  backed up  ${settingsPath} -> ${backup}`);
   }
   writeSettings(settings);
-  console.log(`  ${unregister ? 'unregistered' : 'registered'}  custom-coder in ${settingsPath}`);
+  console.log(`  ${unregister ? 'unregistered' : 'registered'}  ${SERVER_NAME} in ${settingsPath}`);
 }
 
 try {

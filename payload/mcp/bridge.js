@@ -1,31 +1,18 @@
 #!/usr/bin/env node
 'use strict';
 
-// MCP stdio server that routes code generation and plan critiques across
-// named self-hosted OpenAI-compatible endpoints. Zero npm dependencies.
-// Requires Node 18+ (uses global fetch and AbortController).
-// The config file is re-read on every tool call, so edits apply immediately.
+// MCP stdio server for the muse-squad roster. Every generation or critique is
+// scoped to a named squad member; the member's provider chain comes from
+// muse-squad.toml. Zero npm dependencies, Node 18+ (global fetch).
 
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
+const configModule = require('./config.js');
 
-const SERVER_NAME = 'muse-squad-custom-coder';
-const SERVER_VERSION = '0.1.0';
-const CONFIG_FILE = (process.env.MODELS_CONFIG_FILE || '~/.config/muse/endpoints.json')
-  .replace(/^~(?=$|[\\/])/, os.homedir());
-const ENV_TIMEOUT = Number.parseInt(process.env.MUSE_CODER_TIMEOUT_MS || '', 10);
-const DEFAULT_TIMEOUT_MS = Number.isFinite(ENV_TIMEOUT) && ENV_TIMEOUT > 0 ? ENV_TIMEOUT : 600000;
-const DEFAULT_MAX_RETRIES = 2;
-const DEFAULT_QUEUE_TIMEOUT_MS = 300000;
-const DEFAULT_MAX_CONCURRENCY = 1;
-
-// Per-endpoint queue state survives config reloads so in-flight slot counts
-// are never reset while a request is still talking to an endpoint.
-const endpointQueues = new Map();
+const SERVER_NAME = 'muse-squad';
+const SERVER_VERSION = '0.3.0';
+const CONFIG_FILE = configModule.configPath({});
 
 const DEFAULT_SYSTEM = [
-  'You are a coding worker in a multi-agent software team.',
+  'You are a named squad member completing a bounded software task.',
   'For existing files, return ONLY a unified diff in `git apply` format with exact file paths and enough context lines to apply cleanly.',
   'If a diff is genuinely impractical, return ONLY the targeted function or block with its file path and line range - never the entire file.',
   'Never output a full-file rewrite, ellipses, placeholders, or truncation markers. Do not use markdown fences.',
@@ -41,25 +28,19 @@ const CRITIQUE_SYSTEM = [
   'Do not praise the plan, rewrite it, or modify any code.'
 ].join(' ');
 
-const ENDPOINT_PARAM = {
+const MEMBER_PARAM = {
   type: 'string',
-  description: 'Named endpoint alias from endpoints.json. Omit to use the configured default.'
-};
-
-const FALLBACK_ENDPOINT_PARAM = {
-  type: 'string',
-  description: 'Member-specific backup endpoint alias. When set, only this endpoint is tried after the primary, instead of the global fallback_order. Set to an empty string to disable MCP fallback (for native backups).'
+  description: 'Name of a squad member from muse-squad.toml.'
 };
 
 const TOOLS = [
   {
     name: 'generate_code',
-    description: 'Generate a targeted unified diff (or single function/block) with automatic retry and fallback. Never returns full-file rewrites.',
+    description: 'Generate a targeted unified diff (or single function/block) through a squad member\'s provider chain. Never returns full-file rewrites.',
     inputSchema: {
       type: 'object',
       properties: {
-        endpoint: ENDPOINT_PARAM,
-        fallback_endpoint: FALLBACK_ENDPOINT_PARAM,
+        member: MEMBER_PARAM,
         prompt: { type: 'string', description: 'Bounded implementation task to perform.' },
         task_spec: { type: 'string', description: 'Alias for prompt.' },
         context: { type: 'string', description: 'Relevant file contents or excerpts to work from.' },
@@ -68,39 +49,39 @@ const TOOLS = [
         temperature: { type: 'number', description: 'Optional sampling temperature override.' },
         max_tokens: { type: 'integer', description: 'Optional maximum tokens to generate.' }
       },
+      required: ['member'],
       anyOf: [{ required: ['prompt'] }, { required: ['task_spec'] }],
       additionalProperties: false
     }
   },
   {
     name: 'critique_plan',
-    description: 'Independently audit a plan for missing edge cases, security flaws, and broken assumptions, with retry and fallback.',
+    description: 'Audit a plan through a squad member\'s provider chain. Reports concrete risks without editing code.',
     inputSchema: {
       type: 'object',
       properties: {
-        endpoint: ENDPOINT_PARAM,
-        fallback_endpoint: FALLBACK_ENDPOINT_PARAM,
+        member: MEMBER_PARAM,
         plan_markdown: { type: 'string', description: 'Full markdown of .muse/PLAN.md to audit.' },
         repo_context: { type: 'string', description: 'Relevant repository files and structure the plan relies on.' },
         temperature: { type: 'number', description: 'Optional sampling temperature override.' },
         max_tokens: { type: 'integer', description: 'Optional maximum tokens to generate.' }
       },
-      required: ['plan_markdown'],
+      required: ['member', 'plan_markdown'],
       additionalProperties: false
     }
   },
   {
-    name: 'coder_status',
-    description: 'List configured endpoint aliases, default, fallback order, retry/queue limits, and live queue state. Keys are redacted. If endpoints are not configured or unreadable, returns a warning payload (available:false) instead of failing so callers can fall back to native Muse models.',
+    name: 'member_status',
+    description: 'Report squad members, their ordered provider chains, and live queue state. Keys are redacted. Omit member to list the whole squad.',
     inputSchema: {
       type: 'object',
-      properties: { endpoint: ENDPOINT_PARAM },
+      properties: { member: MEMBER_PARAM },
       additionalProperties: false
     }
   },
   {
-    name: 'list_endpoints',
-    description: 'Report every endpoint alias with its model, max_concurrency, max_tokens, max_input_chars, and extra_body keys, plus the muse_models native-subagent limits and queue settings. Keys are redacted. If endpoints are not configured or unreadable, returns a warning payload (available:false) instead of failing so callers can fall back to native Muse models.',
+    name: 'list_providers',
+    description: 'Report every configured provider with its model, limits, and live queue state, plus the current squad roster. Keys are redacted.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -111,8 +92,8 @@ const TOOLS = [
 
 const CONFIG_GUIDANCE = [
   `Expected config file: ${CONFIG_FILE}`,
-  'Create or fix endpoints.json with at least one endpoint (base_url, api_key, model).',
-  'Without working custom-coder endpoints, muse-squad skills can still run using native Muse models; custom-coder generation/critique tools will be unavailable until endpoints are configured.'
+  'Create or fix muse-squad.toml with at least one [providers.<Name>] table and one [squad.<name>] table.',
+  'Every member primary/fallback value must match a provider name exactly. Run node mcp/doctor.js for details.'
 ].join(' ');
 
 function log(message) {
@@ -135,185 +116,34 @@ function configError(message) {
   return new Error(`${message}\n${CONFIG_GUIDANCE}`);
 }
 
-function tryLoadConfig() {
+function loadConfigOrThrow() {
   try {
-    return { ok: true, config: loadConfig() };
+    return configModule.loadConfig();
   } catch (error) {
-    return {
-      ok: false,
-      error: error.message,
-      warning: `custom-coder endpoints are not configured or not working properly: ${error.message}. ${CONFIG_GUIDANCE}`
-    };
+    throw configError(error.message);
   }
 }
 
-function unavailableResult(reason) {
-  const payload = {
-    ok: false,
-    available: false,
-    configFile: CONFIG_FILE,
-    warning: reason.warning || `custom-coder endpoints are not configured or not working properly: ${reason.error}. ${CONFIG_GUIDANCE}`,
-    error: reason.error,
-    guidance: CONFIG_GUIDANCE
-  };
-  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], isError: false };
-}
-
-function loadConfig() {
-  let raw;
-  try {
-    raw = fs.readFileSync(CONFIG_FILE, 'utf8');
-  } catch (error) {
-    if (error && error.code === 'ENOENT') {
-      throw configError(`endpoint config not found at ${CONFIG_FILE}`);
-    }
-    throw configError(`cannot read endpoint config ${CONFIG_FILE}: ${error.message}`);
+function resolveMember(config, requested) {
+  if (typeof requested !== 'string' || !requested.trim()) {
+    throw new Error('"member" must be a non-empty squad member name');
   }
-
-  let config;
-  try {
-    config = JSON.parse(raw);
-  } catch (error) {
-    throw configError(`invalid JSON in ${CONFIG_FILE}: ${error.message}`);
-  }
-  if (!config || typeof config !== 'object' || Array.isArray(config)) {
-    throw configError(`${CONFIG_FILE}: top-level JSON value must be an object`);
-  }
-
-  const endpoints = config.endpoints;
-  if (!endpoints || typeof endpoints !== 'object' || Array.isArray(endpoints)) {
-    throw configError(`${CONFIG_FILE}: "endpoints" must be an object`);
-  }
-  const names = Object.keys(endpoints);
-  if (names.length === 0) throw configError(`${CONFIG_FILE}: "endpoints" must not be empty`);
-
-  for (const name of names) {
-    const endpoint = endpoints[name];
-    if (!endpoint || typeof endpoint !== 'object' || Array.isArray(endpoint)) {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" must be an object`);
-    }
-    if (typeof endpoint.base_url !== 'string' || !endpoint.base_url.trim()) {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" needs a non-empty "base_url"`);
-    }
-    if (typeof endpoint.api_key !== 'string') {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" needs "api_key"`);
-    }
-    if (typeof endpoint.model !== 'string' || !endpoint.model.trim()) {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" needs a non-empty "model"`);
-    }
-    if (endpoint.temperature !== undefined && typeof endpoint.temperature !== 'number') {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" temperature must be a number`);
-    }
-    if (endpoint.max_tokens !== undefined &&
-        (!Number.isInteger(endpoint.max_tokens) || endpoint.max_tokens < 1)) {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" max_tokens must be a positive integer`);
-    }
-    if (endpoint.max_input_chars !== undefined &&
-        (!Number.isInteger(endpoint.max_input_chars) || endpoint.max_input_chars < 1)) {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" max_input_chars must be a positive integer`);
-    }
-    if (endpoint.extra_body !== undefined &&
-        (!endpoint.extra_body || typeof endpoint.extra_body !== 'object' ||
-         Array.isArray(endpoint.extra_body))) {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" extra_body must be an object`);
-    }
-    const onContextExceeded = endpoint.on_context_exceeded === undefined
-      ? 'truncate'
-      : endpoint.on_context_exceeded;
-    if (onContextExceeded !== 'truncate' && onContextExceeded !== 'fallback') {
-      throw new Error(
-        `${CONFIG_FILE}: endpoint "${name}" on_context_exceeded must be "truncate" or "fallback"`
-      );
-    }
-    endpoint.on_context_exceeded = onContextExceeded; // normalize default for callers
-    const maxConcurrency = endpoint.max_concurrency === undefined
-      ? DEFAULT_MAX_CONCURRENCY
-      : endpoint.max_concurrency;
-    if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1) {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" max_concurrency must be a positive integer`);
-    }
-    endpoint.max_concurrency = maxConcurrency; // normalize default for callers
-  }
-
-  // Accept both our "default" and the example's "default_endpoint".
-  const defaultName = typeof config.default === 'string' && config.default
-    ? config.default
-    : (typeof config.default_endpoint === 'string' && config.default_endpoint
-      ? config.default_endpoint
-      : names[0]);
-  if (!Object.prototype.hasOwnProperty.call(endpoints, defaultName)) {
-    throw new Error(`${CONFIG_FILE}: default endpoint "${defaultName}" is not defined`);
-  }
-
-  let fallbackOrder = config.fallback_order === undefined ? names : config.fallback_order;
-  if (!Array.isArray(fallbackOrder) || fallbackOrder.some((name) => typeof name !== 'string')) {
-    throw new Error(`${CONFIG_FILE}: "fallback_order" must be an array of strings`);
-  }
-
-  const timeoutMs = config.timeout_ms === undefined
-    ? DEFAULT_TIMEOUT_MS
-    : config.timeout_ms;
-  if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new Error(`${CONFIG_FILE}: "timeout_ms" must be a positive number`);
-  }
-
-  const maxRetries = config.max_retries === undefined ? DEFAULT_MAX_RETRIES : config.max_retries;
-  if (!Number.isInteger(maxRetries) || maxRetries < 0) {
-    throw new Error(`${CONFIG_FILE}: "max_retries" must be a non-negative integer`);
-  }
-
-  const queueTimeoutMs = config.queue_timeout_ms === undefined
-    ? DEFAULT_QUEUE_TIMEOUT_MS
-    : config.queue_timeout_ms;
-  if (typeof queueTimeoutMs !== 'number' || !Number.isFinite(queueTimeoutMs) || queueTimeoutMs <= 0) {
-    throw new Error(`${CONFIG_FILE}: "queue_timeout_ms" must be a positive number`);
-  }
-
-  const museModels = config.muse_models === undefined ? {} : config.muse_models;
-  if (!museModels || typeof museModels !== 'object' || Array.isArray(museModels)) {
-    throw new Error(`${CONFIG_FILE}: "muse_models" must be an object`);
-  }
-  for (const [model, limit] of Object.entries(museModels)) {
-    if (!Number.isInteger(limit) || limit < 0) {
-      throw new Error(`${CONFIG_FILE}: muse_models["${model}"] must be a non-negative integer`);
-    }
-  }
-
-  return { endpoints, defaultName, fallbackOrder, timeoutMs, maxRetries, queueTimeoutMs, museModels };
-}
-
-function requireEndpoint(config, requested) {
-  const name = requested === undefined || requested === null || requested === ''
-    ? config.defaultName
-    : requested;
-  if (typeof name !== 'string') throw new Error('"endpoint" must be a string');
-  if (!Object.prototype.hasOwnProperty.call(config.endpoints, name)) {
-    throw new Error(`unknown endpoint "${name}". Available: ${Object.keys(config.endpoints).join(', ')}`);
-  }
-  return name;
-}
-
-// Resolves a member-specific backup chain. Omitted means "use the global
-// fallback_order"; "" means "no MCP fallback"; a name means "only this one".
-function parseFallbackEndpoint(config, requested) {
-  if (requested === undefined || requested === null) {
-    return { provided: false, name: null };
-  }
-  if (typeof requested !== 'string') {
-    throw new Error('"fallback_endpoint" must be a string');
-  }
-  if (requested === '') {
-    return { provided: true, name: null };
-  }
-  if (!Object.prototype.hasOwnProperty.call(config.endpoints, requested)) {
+  const member = config.squad.members[requested];
+  if (!member) {
     throw new Error(
-      `unknown fallback_endpoint "${requested}". Available: ${Object.keys(config.endpoints).join(', ')}`
+      `unknown squad member "${requested}". Available: ${Object.keys(config.squad.members).join(', ')}`
     );
   }
-  return { provided: true, name: requested };
+  const chain = [];
+  for (const name of [member.primary, ...member.fallback]) {
+    if (!chain.includes(name)) chain.push(name);
+  }
+  return { member, chain, providersByName: config.providers };
 }
 
-// --- Per-endpoint FIFO concurrency queues ---------------------------------
+// --- Per-provider FIFO concurrency queues ---------------------------------
+
+const providerQueues = new Map();
 
 function grantWaiters(state) {
   while (state.waiters.length > 0 && state.active < state.limit) {
@@ -325,14 +155,13 @@ function grantWaiters(state) {
 }
 
 function queueState(name, limit) {
-  let state = endpointQueues.get(name);
+  let state = providerQueues.get(name);
   if (!state) {
     state = { active: 0, limit, waiters: [] };
-    endpointQueues.set(name, state);
+    providerQueues.set(name, state);
   }
   if (state.limit !== limit) {
     // Hot reload: adopt the new limit without touching active slot counts.
-    // A raised limit may immediately unblock queued callers.
     state.limit = limit;
     grantWaiters(state);
   }
@@ -360,18 +189,16 @@ function acquireSlot(name, limit, queueTimeoutMs) {
       const index = state.waiters.indexOf(waiter);
       if (index === -1) return; // already granted
       state.waiters.splice(index, 1);
-      const error = new Error(
-        `queue timeout waiting for endpoint "${name}" after ${queueTimeoutMs}ms`
-      );
+      const error = new Error(`queue timeout waiting for provider "${name}" after ${queueTimeoutMs}ms`);
       error.queueTimeout = true;
-      error.retryable = false; // do not retry the same endpoint; let fallback decide
+      error.retryable = false; // let the member's next fallback decide
       reject(error);
     }, queueTimeoutMs);
   });
 }
 
 function queueSnapshot(name) {
-  const state = endpointQueues.get(name);
+  const state = providerQueues.get(name);
   return {
     activeCalls: state ? state.active : 0,
     queuedCalls: state ? state.waiters.length : 0
@@ -387,15 +214,15 @@ function isRetryable(error) {
   return true; // network failures and aborts
 }
 
-async function postChatOnce(endpoint, payload, timeoutMs) {
+async function postChatOnce(provider, payload) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(), provider.timeout_ms);
   let target;
   try {
-    target = new URL(`${endpoint.base_url.replace(/\/+$/, '')}/chat/completions`);
+    target = new URL(`${provider.base_url.replace(/\/+$/, '')}/chat/completions`);
   } catch (error) {
     clearTimeout(timer);
-    const invalid = new Error(`invalid base_url for "${endpoint.name}": ${error.message}`);
+    const invalid = new Error(`invalid base_url for "${provider.name}": ${error.message}`);
     invalid.retryable = false;
     throw invalid;
   }
@@ -405,7 +232,7 @@ async function postChatOnce(endpoint, payload, timeoutMs) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${endpoint.api_key}`
+        Authorization: `Bearer ${provider.api_key || ''}`
       },
       body: JSON.stringify(payload),
       signal: controller.signal
@@ -444,22 +271,21 @@ async function postChatOnce(endpoint, payload, timeoutMs) {
   }
 }
 
-async function chatWithRetries(endpoint, payload, config) {
-  // One slot is held across the whole retry sequence for this endpoint, so a
-  // queued caller keeps its FIFO position and a slow retry cannot hog slots.
+async function chatWithRetries(provider, payload) {
+  // One slot is held across the whole retry sequence for this provider.
   const release = await acquireSlot(
-    endpoint.name,
-    endpoint.max_concurrency,
-    config.queueTimeoutMs
+    provider.name,
+    provider.max_concurrency,
+    provider.queue_timeout_ms
   );
   try {
     let lastError;
-    for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
+    for (let attempt = 0; attempt <= provider.max_retries; attempt++) {
       try {
-        return await postChatOnce(endpoint, payload, config.timeoutMs);
+        return await postChatOnce(provider, payload);
       } catch (error) {
         lastError = error;
-        if (attempt >= config.maxRetries || !isRetryable(error)) break;
+        if (attempt >= provider.max_retries || !isRetryable(error)) break;
         await sleep(1000 * 2 ** attempt);
       }
     }
@@ -484,23 +310,22 @@ function redactExtra(extra) {
   return copy;
 }
 
-function buildPayload(endpoint, requestTemplate) {
+function buildPayload(provider, requestTemplate) {
   const { params } = requestTemplate;
   let system = requestTemplate.systemPrompt;
   let user = requestTemplate.userPrompt;
   let warning = '';
 
-  // KV-cache guard: keep oversized prompts away from small local contexts.
-  if (typeof endpoint.max_input_chars === 'number') {
-    const limit = endpoint.max_input_chars;
+  if (provider.max_input_chars !== undefined) {
+    const limit = provider.max_input_chars;
     const total = system.length + user.length;
     if (total > limit) {
-      if (endpoint.on_context_exceeded === 'fallback') {
+      if (provider.on_context_exceeded === 'fallback') {
         const error = new Error(
-          `input size ${total} exceeds max_input_chars ${limit} for endpoint "${endpoint.name}"`
+          `input size ${total} exceeds max_input_chars ${limit} for provider "${provider.name}"`
         );
         error.contextExceeded = true;
-        error.retryable = false; // let fallback try another endpoint, not a retry
+        error.retryable = false; // let the member's next fallback decide
         throw error;
       }
       if (system.length > limit) {
@@ -509,26 +334,24 @@ function buildPayload(endpoint, requestTemplate) {
       } else {
         user = user.slice(0, Math.max(0, limit - system.length));
       }
-      warning = `> *[Warning: Input truncated to max_input_chars for '${endpoint.name}']*\n\n`;
+      warning = `> *[Warning: Input truncated to max_input_chars for '${provider.name}']*\n\n`;
     }
   }
 
-  const extra = endpoint.extra_body && typeof endpoint.extra_body === 'object'
-    ? endpoint.extra_body
+  const extra = provider.extra_body && typeof provider.extra_body === 'object'
+    ? provider.extra_body
     : {};
-  const temperature = params.temperature === undefined
-    ? endpoint.temperature
-    : params.temperature;
+  const temperature = params.temperature === undefined ? provider.temperature : params.temperature;
   const maxTokens = params.max_tokens !== undefined
     ? params.max_tokens
-    : (Object.prototype.hasOwnProperty.call(extra, 'max_tokens') ? undefined : endpoint.max_tokens);
+    : (Object.prototype.hasOwnProperty.call(extra, 'max_tokens') ? undefined : provider.max_tokens);
 
   return {
     warning,
     payload: {
       ...extra, // backend-specific knobs first
       // Core fields are written last so a malformed extra_body cannot clobber them.
-      model: endpoint.model,
+      model: provider.model,
       messages: [
         { role: 'system', content: system },
         { role: 'user', content: user }
@@ -540,109 +363,150 @@ function buildPayload(endpoint, requestTemplate) {
   };
 }
 
-async function queryWithFallback(primaryName, requestTemplate, config, fallback = { provided: false, name: null }) {
-  const orderedNames = fallback.provided
-    ? (fallback.name ? [fallback.name] : [])
-    : config.fallbackOrder;
-  const candidates = [];
-  for (const name of [primaryName, ...orderedNames]) {
-    if (name && !candidates.includes(name)) candidates.push(name);
-  }
-
+async function queryWithMember(memberInfo, requestTemplate) {
   const attempts = [];
-  for (const name of candidates) {
-    const endpoint = config.endpoints[name];
-    if (!endpoint) {
-      attempts.push({ endpoint: name, error: 'not found in config' });
+  for (let index = 0; index < memberInfo.chain.length; index++) {
+    const name = memberInfo.chain[index];
+    const provider = memberInfo.providersByName[name];
+
+    if (!provider) {
+      attempts.push({ provider: name, error: 'provider not found in config' });
       continue;
     }
+    if (provider.type !== 'http') {
+      attempts.push({
+        provider: name,
+        type: 'native',
+        model: provider.model,
+        error: 'native providers cannot be called by the muse-squad MCP router'
+      });
+      continue;
+    }
+
     try {
-      // Build per endpoint: each fallback may have its own context limit,
-      // temperature, max_tokens, and extra_body.
-      const { payload, warning } = buildPayload({ ...endpoint, name }, requestTemplate);
-      const result = await chatWithRetries({ ...endpoint, name }, payload, config);
+      const { payload, warning } = buildPayload(provider, requestTemplate);
+      const result = await chatWithRetries(provider, payload);
       return {
         text: `${warning}${result.content}`,
         meta: {
-          primary: primaryName,
+          member: memberInfo.member.name,
+          primary: memberInfo.member.primary,
+          chain: memberInfo.chain,
           servedBy: name,
-          servedModel: endpoint.model,
+          servedProvider: name,
+          servedModel: provider.model,
           ...(result.upstreamModel ? { upstreamModel: result.upstreamModel } : {}),
           ...(result.usage ? { usage: result.usage } : {}),
-          fallbackUsed: name !== primaryName,
-          ...(fallback.provided ? { fallbackEndpoint: fallback.name, fallbackRestricted: true } : {}),
+          fallbackUsed: index > 0,
+          chainIndex: index,
           attempts
         }
       };
     } catch (error) {
-      attempts.push({ endpoint: name, model: endpoint.model, error: error.message });
+      attempts.push({ provider: name, type: 'http', model: provider.model, error: error.message });
     }
   }
-  throw new Error(`All endpoints failed:\n- ${attempts.map((item) => `${item.endpoint}: ${item.error}`).join('\n- ')}`);
+
+  throw new Error(
+    `Member "${memberInfo.member.name}" could not be served. Attempted providers:\n` +
+    attempts.map((item) => `- ${item.provider}${item.type ? ` (${item.type})` : ''}: ${item.error}`).join('\n')
+  );
+}
+
+function memberSummary(config, name) {
+  const selected = resolveMember(config, name);
+  const providers = selected.chain.map((providerName) => {
+    const provider = selected.providersByName[providerName];
+    return {
+      name: providerName,
+      type: provider.type,
+      model: provider.model,
+      callableByMcp: provider.type === 'http',
+      ...queueSnapshot(providerName)
+    };
+  });
+  return {
+    name: selected.member.name,
+    primary: selected.member.primary,
+    fallback: [...selected.member.fallback],
+    chain: selected.chain,
+    charter: selected.member.charter,
+    providers
+  };
+}
+
+function providerSummary(config, name) {
+  const provider = config.providers[name];
+  return {
+    name,
+    type: provider.type,
+    model: provider.model,
+    ...(provider.base_url === undefined ? {} : { baseUrl: provider.base_url }),
+    temperature: provider.temperature,
+    topP: provider.extra_body && provider.extra_body.top_p,
+    maxTokens: provider.max_tokens,
+    max_tokens: provider.max_tokens,
+    maxInputChars: provider.max_input_chars,
+    max_input_chars: provider.max_input_chars,
+    onContextExceeded: provider.on_context_exceeded,
+    on_context_exceeded: provider.on_context_exceeded,
+    extraBody: redactExtra(provider.extra_body),
+    extra_body: redactExtra(provider.extra_body),
+    maxConcurrency: provider.max_concurrency,
+    max_concurrency: provider.max_concurrency,
+    timeoutMs: provider.timeout_ms,
+    timeout_ms: provider.timeout_ms,
+    queueTimeoutMs: provider.queue_timeout_ms,
+    queue_timeout_ms: provider.queue_timeout_ms,
+    maxRetries: provider.max_retries,
+    max_retries: provider.max_retries,
+    apiKeyConfigured: provider.api_key === undefined ? false : Boolean(provider.api_key),
+    ...queueSnapshot(name)
+  };
 }
 
 async function callTool(name, args) {
   const params = args || {};
-  const loaded = tryLoadConfig();
-  if (!loaded.ok) {
-    if (name === 'coder_status' || name === 'list_endpoints') {
-      return unavailableResult(loaded);
-    }
-    throw new Error(loaded.warning);
-  }
-  const config = loaded.config;
+  const config = loadConfigOrThrow();
 
-  if (name === 'coder_status' || name === 'list_endpoints') {
-    const selected = name === 'coder_status' ? requireEndpoint(config, params.endpoint) : null;
-    const endpointInfo = (endpointName) => {
-      const endpoint = config.endpoints[endpointName];
-      return {
-        name: endpointName,
-        baseUrl: endpoint.base_url,
-        model: endpoint.model,
-        temperature: endpoint.temperature,
-        maxConcurrency: endpoint.max_concurrency,
-        max_concurrency: endpoint.max_concurrency,
-        maxTokens: endpoint.max_tokens,
-        max_tokens: endpoint.max_tokens,
-        maxInputChars: endpoint.max_input_chars,
-        max_input_chars: endpoint.max_input_chars,
-        onContextExceeded: endpoint.on_context_exceeded,
-        on_context_exceeded: endpoint.on_context_exceeded,
-        extraBody: redactExtra(endpoint.extra_body),
-        extra_body: redactExtra(endpoint.extra_body),
-        apiKeyConfigured: Boolean(endpoint.api_key),
-        ...queueSnapshot(endpointName)
-      };
-    };
-    const shared = {
+  if (name === 'member_status') {
+    const members = Object.keys(config.squad.members).map((memberName) =>
+      memberSummary(config, memberName)
+    );
+    const selected = params.member === undefined ? null : memberSummary(config, params.member);
+    const text = JSON.stringify({
       ok: true,
       available: true,
       configFile: CONFIG_FILE,
-      defaultEndpoint: config.defaultName,
-      fallbackOrder: config.fallbackOrder,
-      museModels: config.museModels,
-      muse_models: config.museModels,
-      maxRetries: config.maxRetries,
-      timeoutMs: config.timeoutMs,
-      queueTimeoutMs: config.queueTimeoutMs,
-      queue_timeout_ms: config.queueTimeoutMs
-    };
-    const text = name === 'list_endpoints'
-      ? JSON.stringify({
-        ...shared,
-        endpoints: Object.fromEntries(
-          Object.keys(config.endpoints).map((endpointName) => [
-            endpointName,
-            endpointInfo(endpointName)
-          ])
-        )
-      }, null, 2)
-      : JSON.stringify({
-        ...shared,
-        availableEndpoints: Object.keys(config.endpoints),
-        selected: endpointInfo(selected)
-      }, null, 2);
+      schema: config.schema,
+      squad: config.squad.name,
+      members,
+      ...(selected ? { selected } : {})
+    }, null, 2);
+    return { content: [{ type: 'text', text }] };
+  }
+
+  if (name === 'list_providers') {
+    const text = JSON.stringify({
+      ok: true,
+      available: true,
+      configFile: CONFIG_FILE,
+      schema: config.schema,
+      providers: Object.fromEntries(
+        Object.keys(config.providers).map((providerName) => [
+          providerName,
+          providerSummary(config, providerName)
+        ])
+      ),
+      members: Object.keys(config.squad.members).map((memberName) => {
+        const member = config.squad.members[memberName];
+        return {
+          name: memberName,
+          primary: member.primary,
+          fallback: [...member.fallback]
+        };
+      })
+    }, null, 2);
     return { content: [{ type: 'text', text }] };
   }
 
@@ -650,8 +514,7 @@ async function callTool(name, args) {
     if (typeof params.plan_markdown !== 'string' || params.plan_markdown.trim() === '') {
       throw new Error('critique_plan requires a non-empty "plan_markdown"');
     }
-    const primary = requireEndpoint(config, params.endpoint);
-    const fallback = parseFallbackEndpoint(config, params.fallback_endpoint);
+    const memberInfo = resolveMember(config, params.member);
     const user = [
       'PLAN MARKDOWN:',
       params.plan_markdown,
@@ -661,12 +524,11 @@ async function callTool(name, args) {
         ? params.repo_context
         : '(none provided)'
     ].join('\n');
-    const result = await queryWithFallback(
-      primary,
-      { systemPrompt: CRITIQUE_SYSTEM, userPrompt: user, params },
-      config,
-      fallback
-    );
+    const result = await queryWithMember(memberInfo, {
+      systemPrompt: CRITIQUE_SYSTEM,
+      userPrompt: user,
+      params
+    });
     return { content: [{ type: 'text', text: result.text }], meta: result.meta };
   }
 
@@ -676,18 +538,16 @@ async function callTool(name, args) {
       throw new Error('generate_code requires a non-empty "prompt" (or "task_spec")');
     }
     const context = typeof params.context === 'string' ? params.context : params.file_context;
-    const primary = requireEndpoint(config, params.endpoint);
-    const fallback = parseFallbackEndpoint(config, params.fallback_endpoint);
+    const memberInfo = resolveMember(config, params.member);
     const system = typeof params.system === 'string' && params.system.trim() ? params.system : DEFAULT_SYSTEM;
     const user = typeof context === 'string' && context.trim()
       ? `TASK:\n${prompt}\n\nRELEVANT CONTEXT:\n${context}`
       : `TASK:\n${prompt}`;
-    const result = await queryWithFallback(
-      primary,
-      { systemPrompt: system, userPrompt: user, params },
-      config,
-      fallback
-    );
+    const result = await queryWithMember(memberInfo, {
+      systemPrompt: system,
+      userPrompt: user,
+      params
+    });
     return { content: [{ type: 'text', text: result.text }], meta: result.meta };
   }
 
@@ -756,10 +616,16 @@ process.stdin.on('data', (chunk) => {
   while ((newline = buffer.indexOf('\n')) !== -1) {
     const line = buffer.slice(0, newline).trim();
     buffer = buffer.slice(newline + 1);
-    if (line) {
-      void handleLine(line);
-    }
+    if (line) void handleLine(line);
   }
 });
-process.stdin.on('end', () => process.exit(0));
-process.on('uncaughtException', (error) => log(`uncaught: ${error.message}`));
+
+module.exports = {
+  CONFIG_FILE,
+  SERVER_NAME,
+  SERVER_VERSION,
+  TOOLS,
+  callTool,
+  handleLine,
+  resolveMember
+};

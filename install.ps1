@@ -4,7 +4,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$Version = '0.2.6'
+$Version = '0.3.0'
 $configDir = if ($env:MUSE_CONFIG_DIR) { $env:MUSE_CONFIG_DIR } else { Join-Path $HOME '.config/muse' }
 $configDirExplicit = [bool]$env:MUSE_CONFIG_DIR
 $mode = 'install'
@@ -63,8 +63,8 @@ Usage:
 Options:
   --dir PATH          Install into PATH instead of ~/.config/muse
   --update            Download and run the latest installer from GitHub, then install
-  --uninstall         Remove managed files and unregister custom-coder
-  --no-mcp            Skip custom-coder MCP registration
+  --uninstall         Remove managed files and unregister muse-squad
+  --no-mcp            Skip muse-squad MCP registration
   --backup            Force a backup prompt/backup
   --no-backup         Skip the backup prompt and backup
   --reconfigure-team  Rerun the interactive team wizard on an existing install
@@ -78,7 +78,7 @@ Environment:
   MUSE_SQUAD_NO_BACKUP     Set to 1 to skip backup unless --backup is passed
   MUSE_SQUAD_SKIP_MUSE_CHECK Set to 1 to skip Muse install/config discovery
 
-Endpoints are configured in endpoints.json inside the config directory.
+Providers and squad members are configured in muse-squad.toml inside the config directory.
 
 Note: Windows PowerShell 5.1 has no `irm` alias. Use:
   Invoke-RestMethod 'https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install.ps1' | iex
@@ -270,7 +270,7 @@ function Backup-Config {
     Copy-Item -LiteralPath $_.FullName -Destination $backup -Recurse -Force
   }
   Write-Host "  backed up    $configDir -> $backup"
-  Write-Host "  restore      copy the contents of $backup back into $configDir"
+  Write-Host "  restore      $backup"
 }
 
 function Install-File([string]$rel, [string]$content) {
@@ -400,8 +400,8 @@ function Uninstall-Agents-Policy {
   }
 }
 
-function Install-Endpoints-Config([string]$content) {
-  $dest = Get-Dest 'endpoints.json'
+function Install-Config([string]$content) {
+  $dest = Get-Dest 'muse-squad.toml'
   if (Test-Path -LiteralPath $dest) {
     Write-Host "  unchanged  $dest"
     return
@@ -412,21 +412,16 @@ function Install-Endpoints-Config([string]$content) {
   }
   $normalized = $content -replace "(?:\r?\n)+\z", "`n"
   [IO.File]::WriteAllText($dest, $normalized, [System.Text.UTF8Encoding]::new($false))
-  Write-Host "  created    $dest"
-}
-
-function Install-Squad-Team-Config {
-  $dest = Get-Dest 'squad-team.json'
-  if (Test-Path -LiteralPath $dest) {
-    Write-Host "  unchanged  $dest"
-    return
+  try {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList @($identity, 'FullControl', 'Allow')
+    $acl = Get-Acl -LiteralPath $dest
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.SetAccessRule($rule)
+    Set-Acl -LiteralPath $dest -AclObject $acl
+  } catch {
+    # ACLs are best effort; the file still owns the current user by default.
   }
-  $parent = Split-Path -Parent $dest
-  if (-not (Test-Path -LiteralPath $parent)) {
-    New-Item -ItemType Directory -Path $parent -Force | Out-Null
-  }
-  $normalized = (Get-Team-Defaults) -replace "(?:\r?\n)+\z", "`n"
-  [IO.File]::WriteAllText($dest, $normalized, [System.Text.UTF8Encoding]::new($false))
   Write-Host "  created    $dest"
 }
 
@@ -439,39 +434,43 @@ function Test-Interactive-Input {
   }
 }
 
-function Get-Available-Models {
-  $models = New-Object 'System.Collections.Generic.List[string]'
-  foreach ($name in @('muse-spark-1.3-contributor', 'muse-ember-1.0', 'muse-wonder-1.0')) {
-    if (-not $models.Contains($name)) { $models.Add($name) }
-  }
-  $endpointsFile = Get-Dest 'endpoints.json'
-  if ((Get-Command node -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $endpointsFile)) {
-    $script = @'
-const fs = require('fs');
-const config = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
-const seen = new Set();
-for (const name of Object.keys(config.muse_models || {})) if (!seen.has(name)) {
-  seen.add(name); console.log(name);
-}
-for (const name of Object.keys(config.endpoints || {})) if (!seen.has(name)) {
-  seen.add(name); console.log(name);
-}
-'@
-    $output = & node -e $script $endpointsFile 2>$null
+function Get-Available-Providers {
+  $providers = New-Object 'System.Collections.Generic.List[string]'
+  $configFile = Get-Dest 'muse-squad.toml'
+  $parser = Get-Dest 'mcp/config.js'
+  if ((Get-Command node -ErrorAction SilentlyContinue) -and
+      (Test-Path -LiteralPath $configFile) -and (Test-Path -LiteralPath $parser)) {
+    $output = & node $parser --file $configFile --list-providers 2>$null
     foreach ($line in $output) {
       $name = ([string]$line).Trim()
-      if ($name -and -not $models.Contains($name)) { $models.Add($name) }
+      if ($name -and -not $providers.Contains($name)) { $providers.Add($name) }
     }
   }
-  return $models.ToArray()
+  return $providers.ToArray()
 }
 
-function Get-Model-Menu([string[]]$models) {
+function Get-Provider-Menu([string[]]$providers) {
   $items = @()
-  for ($i = 0; $i -lt $models.Count; $i++) {
-    $items += "$($i + 1): $($models[$i])"
+  for ($i = 0; $i -lt $providers.Count; $i++) {
+    $items += "$($i + 1): $($providers[$i])"
   }
   return ($items -join ', ')
+}
+
+function Get-Existing-Charter([string]$name) {
+  $configFile = Get-Dest 'muse-squad.toml'
+  $parser = Get-Dest 'mcp/config.js'
+  if ((Get-Command node -ErrorAction SilentlyContinue) -and
+      (Test-Path -LiteralPath $configFile) -and (Test-Path -LiteralPath $parser)) {
+    $script = @'
+const config = require(process.argv[1]).loadConfig({ config_file: process.argv[2] });
+const member = config.squad.members[process.argv[3]];
+if (member) process.stdout.write(member.charter.replace(/\s+/g, ' ').trim());
+'@
+    $output = & node -e $script $parser $configFile $name 2>$null
+    if ($output) { return (([string]($output -join ' ')).Trim()) }
+  }
+  return ''
 }
 
 function Read-Defaulted([string]$prompt, [string]$default) {
@@ -490,81 +489,117 @@ function ConvertTo-Member-Name([string]$value) {
   $slug = $value.ToLowerInvariant() -replace '[^a-z0-9]+', '-'
   $slug = $slug.Trim('-')
   if ([string]::IsNullOrEmpty($slug)) { $slug = 'member' }
-  if (@('worker', 'plan-reviewer', 'general-purpose') -contains $slug) { $slug = "$slug-1" }
   return $slug
 }
 
-function Resolve-Model([string]$answer, [string]$default) {
+function Resolve-Provider([string]$answer, [string]$default) {
   if ([string]::IsNullOrWhiteSpace($answer)) { return $default }
   if ($answer -match '^\d+$') {
     $index = [int]$answer - 1
-    if ($index -ge 0 -and $index -lt $script:WizardModels.Count) {
-      return $script:WizardModels[$index]
+    if ($index -ge 0 -and $index -lt $script:WizardProviders.Count) {
+      return $script:WizardProviders[$index]
     }
-    throw "Invalid model number: $answer"
+    throw "Invalid provider number: $answer"
   }
   return $answer
 }
 
-function New-Team-Config([object[]]$members) {
-  $defaults = Get-Team-Defaults | ConvertFrom-Json
-  $byRole = @{}
-  foreach ($member in $defaults.members) { $byRole[$member.role] = $member }
-
-  $built = @()
-  foreach ($member in $members) {
-    $template = $null
-    if ($byRole.ContainsKey($member.role)) { $template = $byRole[$member.role] }
-    $responsibility = if ($template) {
-      $template.responsibility
-    } else {
-      "$($member.role) work and bounded implementation tasks"
-    }
-    $charter = if ($template) {
-      $template.charter
-    } else {
-      "Domain expertise: $($member.role.ToLowerInvariant()) tasks. Voice: concise and evidence-first. " +
-        'Guardrails: stay scoped to assigned files, preserve existing conventions, and verify ' +
-        'changes before reporting done.'
-    }
-    $display = (($member.name -split '-' | Where-Object { $_ } | ForEach-Object {
-      $_.Substring(0, 1).ToUpperInvariant() + $_.Substring(1)
-    }) -join ' ')
-
-    $built += [pscustomobject]@{
-      name           = $member.name
-      display_name   = $display
-      role           = $member.role
-      responsibility = $responsibility
-      primary        = $member.primary
-      backup         = $member.backup
-      charter        = $charter
-    }
+function Resolve-Provider-List([string]$answer, [string]$default) {
+  if ([string]::IsNullOrWhiteSpace($answer)) { return $default }
+  $resolved = @()
+  foreach ($part in ($answer -split ',')) {
+    $part = ([string]$part).Trim()
+    if (-not $part) { continue }
+    $resolved += (Resolve-Provider $part '')
   }
-
-  $team = [ordered]@{
-    schema_version = $defaults.schema_version
-    team_name      = $defaults.team_name
-    memory_dir     = $defaults.memory_dir
-    members        = @($built)
-    projects       = $defaults.projects
-  }
-  return ($team | ConvertTo-Json -Depth 8)
+  return ($resolved -join ',')
 }
 
-function Write-Team-Config([string]$content, [string]$action) {
-  $dest = Get-Dest 'squad-team.json'
+function Test-Provider-Known([string]$candidate) {
+  return ($script:WizardProviders -contains $candidate)
+}
+
+function Test-Provider-List([string]$list) {
+  if ([string]::IsNullOrWhiteSpace($list)) { return $true }
+  foreach ($part in ($list -split ',')) {
+    if (-not (Test-Provider-Known ([string]$part).Trim())) { return $false }
+  }
+  return $true
+}
+
+function Write-Team-Config([string]$membersFile, [string]$action) {
+  $dest = Get-Dest 'muse-squad.toml'
   $parent = Split-Path -Parent $dest
   if (-not (Test-Path -LiteralPath $parent)) {
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
   }
-  $normalized = $content -replace "(?:\r?\n)+\z", "`n"
+  $nodeScript = @'
+const fs = require('fs');
+const path = require('path');
+
+const configFile = process.argv[2];
+const membersFile = process.argv[3];
+const outputFile = process.argv[4];
+
+function quote(value) {
+  return JSON.stringify(String(value));
+}
+
+function quoteBlock(value) {
+  const text = String(value).trim();
+  if (text.includes('"""')) return quote(text);
+  return `"""\n${text}\n"""`;
+}
+
+const raw = fs.readFileSync(configFile, 'utf8');
+const marker = raw.match(/^\[squad\][ \t]*$/m);
+if (!marker) throw new Error('muse-squad.toml has no [squad] table');
+const prefix = raw.slice(0, marker.index).replace(/\r?\n+$/, '\n');
+const config = require(path.join(path.dirname(configFile), 'mcp', 'config.js'))
+  .loadConfig({ config_file: configFile });
+
+const members = fs.readFileSync(membersFile, 'utf8').split(/\r?\n/)
+  .filter((line) => line.length > 0)
+  .map((line) => {
+    const fields = line.split('\t');
+    if (fields.length !== 4) throw new Error(`bad member line: ${line}`);
+    const [name, primary, fallback, charter] = fields;
+    return {
+      name,
+      primary,
+      fallback: fallback ? fallback.split(',') : [],
+      charter
+    };
+  });
+
+const lines = [
+  '[squad]',
+  `name = ${quote(config.squad.name)}`,
+  `memory_dir = ${quote(config.squad.memory_dir)}`,
+  ''
+];
+for (const member of members) {
+  lines.push(
+    `[squad.${member.name}]`,
+    `primary = ${quote(member.primary)}`,
+    `fallback = [${member.fallback.map(quote).join(', ')}]`,
+    `charter = ${quoteBlock(member.charter)}`,
+    ''
+  );
+}
+fs.writeFileSync(outputFile, `${prefix}${lines.join('\n')}`);
+'@
+  $rendered = & node -e $nodeScript $dest $membersFile
+  if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) {
+    throw "team config generation failed with exit code $LASTEXITCODE"
+  }
+  $normalized = (($rendered -join "`n") -replace "(?:\r?\n)+\z", "`n")
   [IO.File]::WriteAllText($dest, $normalized, [System.Text.UTF8Encoding]::new($false))
   Write-Host "  $action  $dest"
 }
 
 function Configure-Team {
-  $dest = Get-Dest 'squad-team.json'
+  $dest = Get-Dest 'muse-squad.toml'
   $action = 'created'
   if (Test-Path -LiteralPath $dest) {
     $action = 'updated'
@@ -579,7 +614,7 @@ function Configure-Team {
   } else {
     if ($useDefaults -or -not (Test-Interactive-Input) -or
         -not (Get-Command node -ErrorAction SilentlyContinue)) {
-      Install-Squad-Team-Config
+      Install-Config (Get-Config-Defaults)
       return
     }
   }
@@ -595,7 +630,7 @@ function Configure-Team {
     if (Test-Path -LiteralPath $dest) {
       Write-Host "  unchanged  $dest"
     } else {
-      Install-Squad-Team-Config
+      Install-Config (Get-Config-Defaults)
     }
     return
   }
@@ -603,23 +638,21 @@ function Configure-Team {
     throw 'Expected Y or n for team customization prompt'
   }
 
-  $script:WizardModels = Get-Available-Models
-  $menu = Get-Model-Menu $script:WizardModels
-  $defaultNames = @('keaton', 'fenster', 'mcmanus', 'hockney', 'verbal')
-  $defaultRoles = @('Lead', 'Frontend', 'Backend', 'Tester', 'Scribe')
-  $defaultPrimary = @(
-    'muse-spark-1.3-contributor', 'local-coder', 'local-coder', 'local-coder', 'muse-ember-1.0'
-  )
-  $defaultBackup = @(
-    'grill-reviewer', 'muse-ember-1.0', 'grill-reviewer', 'muse-ember-1.0', 'local-coder'
-  )
+  $script:WizardProviders = Get-Available-Providers
+  if ($script:WizardProviders.Count -eq 0) {
+    throw "no providers are defined in $dest"
+  }
+  $menu = Get-Provider-Menu $script:WizardProviders
 
+  $defaultNames = @('keaton', 'fenster', 'mcmanus', 'hockney', 'verbal')
+  $defaultPrimary = @('Muse-Spark', 'Home-Ornith', 'Home-Ornith', 'Home-Ornith', 'Muse-Ember')
+  $defaultFallback = @('DeepSeek-Flash', 'Muse-Ember', 'DeepSeek-Flash', 'Muse-Ember', 'Home-Ornith')
   $members = @()
   $used = New-Object 'System.Collections.Generic.HashSet[string]'
 
   for ($i = 0; $i -lt 5; $i++) {
     while ($true) {
-      $rawName = Read-Defaulted "Member $($i + 1) [$($defaultRoles[$i])] name" $defaultNames[$i]
+      $rawName = Read-Defaulted "Member $($i + 1) name" $defaultNames[$i]
       $name = ConvertTo-Member-Name $rawName
       if ($used.Contains($name)) {
         Write-Host "  name already in use: $name"
@@ -628,13 +661,20 @@ function Configure-Team {
       [void]$used.Add($name)
       break
     }
-    $role = (Read-Defaulted "Role for $name" $defaultRoles[$i]).Trim()
-    if ([string]::IsNullOrEmpty($role)) { $role = $defaultRoles[$i] }
-    $primary = Resolve-Model `
-      (Read-Defaulted "Primary model/endpoint for $name ($menu)" $defaultPrimary[$i]) $defaultPrimary[$i]
-    $backup = Resolve-Model `
-      (Read-Defaulted "Backup model/endpoint for $name" $defaultBackup[$i]) $defaultBackup[$i]
-    $members += [pscustomobject]@{ name = $name; role = $role; primary = $primary; backup = $backup }
+    $primary = Resolve-Provider `
+      (Read-Defaulted "Primary provider for $name ($menu)" $defaultPrimary[$i]) $defaultPrimary[$i]
+    if (-not (Test-Provider-Known $primary)) { throw "unknown provider: $primary" }
+    $fallback = Resolve-Provider-List `
+      (Read-Defaulted "Fallback providers for $name (comma-separated, empty for none)" $defaultFallback[$i]) `
+      $defaultFallback[$i]
+    if (-not (Test-Provider-List $fallback)) { throw "unknown provider in fallback list: $fallback" }
+    $charter = Get-Existing-Charter $name
+    if ([string]::IsNullOrWhiteSpace($charter)) {
+      $charter = "Domain expertise: $name tasks. Voice: concise and evidence-first. " +
+        'Guardrails: stay scoped to assigned files, preserve existing conventions, and verify changes before reporting done.'
+    }
+    $charter = ((Read-Defaulted "Charter for $name" $charter).Trim() -replace '\s+', ' ')
+    $members += [pscustomobject]@{ name = $name; primary = $primary; fallback = $fallback; charter = $charter }
   }
 
   while ($true) {
@@ -655,24 +695,32 @@ function Configure-Team {
       [void]$used.Add($name)
       break
     }
-    $role = (Read-Required "Role for $name" 'Contributor').Trim()
-    if ([string]::IsNullOrEmpty($role)) { $role = 'Contributor' }
-    $primary = Resolve-Model `
-      (Read-Defaulted "Primary model/endpoint for $name ($menu)" 'muse-ember-1.0') 'muse-ember-1.0'
-    $backup = Resolve-Model `
-      (Read-Defaulted "Backup model/endpoint for $name" 'local-coder') 'local-coder'
-    $members += [pscustomobject]@{ name = $name; role = $role; primary = $primary; backup = $backup }
+    $primary = Resolve-Provider `
+      (Read-Defaulted "Primary provider for $name ($menu)" 'Muse-Ember') 'Muse-Ember'
+    if (-not (Test-Provider-Known $primary)) { throw "unknown provider: $primary" }
+    $fallback = Resolve-Provider-List `
+      (Read-Defaulted "Fallback providers for $name (comma-separated, empty for none)" 'Home-Ornith') 'Home-Ornith'
+    if (-not (Test-Provider-List $fallback)) { throw "unknown provider in fallback list: $fallback" }
+    $charter = Read-Defaulted 'Charter' 'Domain expertise: bounded implementation tasks. Voice: concise and evidence-first. Guardrails: stay scoped to assigned files, preserve existing conventions, and verify changes before reporting done.'
+    $charter = ($charter.Trim() -replace '\s+', ' ')
+    $members += [pscustomobject]@{ name = $name; primary = $primary; fallback = $fallback; charter = $charter }
   }
 
-  Write-Team-Config (New-Team-Config $members) $action
+  $membersFile = Join-Path ([IO.Path]::GetTempPath()) ('muse-squad-members-' + [Guid]::NewGuid().ToString('N') + '.tsv')
+  try {
+    $lines = foreach ($member in $members) {
+      "$($member.name)`t$($member.primary)`t$($member.fallback)`t$($member.charter)"
+    }
+    [IO.File]::WriteAllText($membersFile, (($lines -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
+    Write-Team-Config $membersFile $action
+  } finally {
+    if (Test-Path -LiteralPath $membersFile) {
+      Remove-Item -LiteralPath $membersFile -Force -ErrorAction SilentlyContinue
+    }
+  }
 }
 
 function Uninstall-Team {
-  $teamFile = Get-Dest 'squad-team.json'
-  if (Test-Path -LiteralPath $teamFile) {
-    Remove-Item -LiteralPath $teamFile -Force
-    Write-Host "  removed    $teamFile"
-  }
   $squadDir = Get-Dest 'squad'
   if (Test-Path -LiteralPath $squadDir -PathType Container) {
     Remove-Item -LiteralPath $squadDir -Recurse -Force
@@ -720,7 +768,7 @@ function Register-Mcp([string]$action) {
   if ($action -eq 'unregister') {
     $nodeArgs += '--unregister'
   } else {
-    $nodeArgs += @('--config-file', (Get-Dest 'endpoints.json'))
+    $nodeArgs += @('--config-file', (Get-Dest 'muse-squad.toml'))
   }
   & node @nodeArgs
   if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) {
@@ -776,7 +824,7 @@ if ($mode -eq 'update') {
   return
 }
 
-$firstInstall = -not (Test-Path -LiteralPath (Join-Path $configDir 'endpoints.json'))
+$firstInstall = -not (Test-Path -LiteralPath (Get-Dest 'muse-squad.toml'))
 
 Backup-Config
 
@@ -785,125 +833,59 @@ if ($mode -eq 'uninstall') {
   Uninstall-Agents-Policy
   Invoke-Sync-Team 'uninstall'
   Uninstall-Team
-  Uninstall-File 'agents/plan-reviewer.md'
-  Uninstall-File 'agents/general-purpose.md'
-  Uninstall-File 'agents/worker.md'
   Uninstall-File 'skills/squad-team/SKILL.md'
   Uninstall-File 'skills/squad-doctor/SKILL.md'
   Uninstall-File 'skills/squad-plan/SKILL.md'
   Uninstall-File 'skills/squad-execute/SKILL.md'
   Uninstall-File 'mcp/bridge.js'
+  Uninstall-File 'mcp/config.js'
   Uninstall-File 'mcp/doctor.js'
   Uninstall-File 'mcp/register-settings.js'
   Uninstall-File 'mcp/sync-team.js'
-  if (Test-Path -LiteralPath (Get-Dest 'endpoints.json')) {
-    Write-Host "  kept       endpoints.json (remove manually if desired)"
+  Uninstall-File 'agents/plan-reviewer.md'
+  Uninstall-File 'agents/general-purpose.md'
+  Uninstall-File 'agents/worker.md'
+  if (Test-Path -LiteralPath (Get-Dest 'muse-squad.toml')) {
+    Write-Host "  kept       $(Get-Dest 'muse-squad.toml') (config is never removed)"
   }
   Write-Host 'done.'
   return
 }
 
-Install-File 'agents/plan-reviewer.md' @'
----
-name: plan-reviewer
-description: Use proactively in normal sessions before risky or ambiguous changes, and when auditing an existing plan, design, or diff. Read-only; reports edge cases, missing files, race conditions, and verification gaps without editing code.
-disallowedTools: ["Edit", "Write", "Bash"]
----
-Review the proposed plan in `.muse/PLAN.md`. Identify gaps, ambiguous requirements, race conditions, or missing verification steps. Do not modify code.
-'@
-Install-File 'agents/general-purpose.md' @'
----
-name: general-purpose
-description: Use proactively in normal sessions as the general implementation fallback for bounded coding or test tasks when no more specific agent fits. Keeps edits inside the brief and runs fast per-file diagnostics.
----
-Complete the assigned step from `.muse/PLAN.md`. Only touch files listed in your brief, run the specified tests, and return a concise summary of changes.
-
-## Patch Discipline
-
-If `custom-coder` is available, you may use `custom-coder:generate_code` and apply its output only as a targeted unified diff or single function/block using native `Edit` tools - never overwrite an entire file from local-model output. Reject full-file rewrites, truncation markers, and unapplyable diffs; re-prompt for a scoped diff instead. If `custom-coder` is unavailable or misconfigured, implement the assigned change directly with your own tools/editing capabilities and continue; report the endpoint warning in your summary.
-
-## Instant Diagnostics
-
-Immediately after applying code changes - and before returning your summary - run the fastest available single-file or incremental check on the files you changed:
-
-- Use any LSP diagnostics the harness exposes for the changed files.
-- TypeScript/JavaScript: `npx tsc --noEmit` (or the project's incremental typecheck).
-- Python: `ruff check <changed-files>` (or `python -m py_compile <changed-files>`).
-- Rust: `cargo check` (incremental).
-- Structural checks: `sg` / `ast-grep` if installed, for example to confirm a broken import or call pattern is gone.
-
-Prefer checks scoped to the changed files. Do not install new tools or run full builds here — full verification belongs to the `/squad-execute` verification gate. If no fast checker is available, say so explicitly in your summary.
-
-## Shared MCP Queue
-
-Other workers may call `custom-coder` tools at the same time. The router queues those calls FIFO and serializes them per endpoint's `max_concurrency`, so just make your call and wait - do not add your own locks or retry loops, and do not switch endpoints to dodge a queue. If a call reports a queue timeout, config/endpoint error, or that custom-coder is unavailable, note it clearly in your summary and continue with native implementation when possible; let the orchestrator re-batch or reconfigure if needed.
-'@
-Install-File 'agents/worker.md' @'
----
-name: worker
-description: Use proactively in normal sessions for bounded code edits, small refactors, bug fixes, and unit-test implementation when the files and checks are clearly scoped. Applies surgical changes and runs fast per-file diagnostics.
----
-Complete the assigned step from `.muse/PLAN.md`. Only touch files listed in your brief, run the specified tests, and return a concise summary of changes.
-
-## Patch Discipline
-
-If `custom-coder` is available, you may use `custom-coder:generate_code` and apply its output only as a targeted unified diff or single function/block using native `Edit` tools - never overwrite an entire file from local-model output. Reject full-file rewrites, truncation markers, and unapplyable diffs; re-prompt for a scoped diff instead. If `custom-coder` is unavailable or misconfigured, implement the assigned change directly with your own tools/editing capabilities and continue; report the endpoint warning in your summary.
-
-## Instant Diagnostics
-
-Immediately after applying code changes - and before returning your summary - run the fastest available single-file or incremental check on the files you changed:
-
-- Use any LSP diagnostics the harness exposes for the changed files.
-- TypeScript/JavaScript: `npx tsc --noEmit` (or the project's incremental typecheck).
-- Python: `ruff check <changed-files>` (or `python -m py_compile <changed-files>`).
-- Rust: `cargo check` (incremental).
-- Structural checks: `sg` / `ast-grep` if installed, for example to confirm a broken import or call pattern is gone.
-
-Prefer checks scoped to the changed files. Do not install new tools or run full builds here — full verification belongs to the `/squad-execute` verification gate. If no fast checker is available, say so explicitly in your summary.
-
-## Shared MCP Queue
-
-Other workers may call `custom-coder` tools at the same time. The router queues those calls FIFO and serializes them per endpoint's `max_concurrency`, so just make your call and wait - do not add your own locks or retry loops, and do not switch endpoints to dodge a queue. If a call reports a queue timeout, config/endpoint error, or that custom-coder is unavailable, note it clearly in your summary and continue with native implementation when possible; let the orchestrator re-batch or reconfigure if needed.
-'@
 Install-File 'skills/squad-team/SKILL.md' @'
 ---
 name: squad-team
-description: Manage the persistent named Muse Squad roster and regenerate its native agent wrappers.
+description: Manage the single muse-squad.toml config and regenerate the roster and member wrappers.
 ---
-You are in SQUAD-TEAM mode. Change the roster and its generated outputs only.
+You are in SQUAD-TEAM mode. Change the squad configuration and its generated outputs only.
 
 ## Read first
 
 1. Resolve the Muse config directory: use `MUSE_CONFIG_DIR` when set, otherwise `~/.config/muse` (`%USERPROFILE%\.config\muse` on Windows).
-2. Read `squad-team.json`, `endpoints.json`, and the generated `squad/team.md` from that directory.
-3. Show the current roster briefly as `@name | Role | Primary | Backup` before asking what to change.
+2. Read `muse-squad.toml` from that directory and the generated `squad/team.md`.
+3. Show the current roster briefly as `@<name> | primary | fallback chain` before asking what to change.
 
 ## What you may edit
 
-Edit only `squad-team.json`. Do not hand-edit `squad/team.md`, `agents/<name>.md`, `.agents/squad/team.md`, `.agents/agents/<name>.md`, `AGENTS.md` / `MUSE.md`, `endpoints.json`, or the generic `worker.md`, `plan-reviewer.md`, and `general-purpose.md` agents. For a full interactive rebuild of the default five-member roster, tell the user to re-run the installer with `--reconfigure-team`; this command is for targeted roster changes.
+Edit only `muse-squad.toml`. Do not hand-edit `squad/team.md`, `agents/<name>.md`, `AGENTS.md` / `MUSE.md`, or anything under `mcp/`. This is the only config file; there are no per-repo settings and no helper agents to edit.
 
-Each member needs these fields:
+The file uses `schema = 1` and these tables:
 
-- `name`: lowercase slug (`a-z0-9-`), not `worker`, `plan-reviewer`, or `general-purpose`.
-- `display_name`: human-readable name.
-- `role` and `responsibility`: non-empty strings.
-- `primary` and `backup`: a native Muse model (for example `muse-spark-1.3-contributor`, `muse-ember-1.0`, or `muse-wonder-1.0`) or an alias under `endpoints` in `endpoints.json`.
-- `charter`: non-empty instructions for that member.
+- `[providers.<Name>]` — a provider name may contain letters, numbers, `.`, `_`, and `-`. `type = "native"` requires `model` and `max_concurrency`. `type = "http"` requires `base_url`, `api_key`, and `model`, and accepts `temperature`, `top_p`, `max_tokens`, `max_input_chars`, `on_context_exceeded`, `max_concurrency`, `timeout_ms`, `queue_timeout_ms`, and `max_retries`. `api_key` may be plaintext or `${ENV_VAR}`.
+- `[squad.<name>]` — one per member, with only `primary`, an ordered `fallback` array, and `charter`.
 
-If a model/endpoint name is not a known native model and not an `endpoints` alias, ask for a correction instead of inventing one. Keep the top-level `schema_version`, `team_name`, `memory_dir`, `members`, and `projects` fields intact.
+Every member needs at least one provider in its chain: `primary` and every `fallback` entry must match a provider table name exactly. Validate all cross-references before writing. Never invent a provider name. Member names are lowercase slugs (`a-z0-9-`); retired helper names are reserved. Keep `schema = 1`. Do not add display names, responsibilities, labels, or any new member keys. Use `#` for TOML comments, not `;`.
 
 ## Apply the change
 
 Ask which change to make unless the user already stated it clearly:
 
-- add, rename, or remove a member;
-- change a role, responsibility, charter, primary, or backup;
-- rename the team or change `memory_dir`;
-- add or update a project-only override under `projects`, keyed by the repository directory name or its absolute path.
+- add, rename, or remove a provider (check every member chain before removing);
+- add, rename, or remove a member (at least one member must remain);
+- change a member's `primary`, reorder or replace its `fallback` array, or rewrite its `charter`;
+- change any provider setting, including moving a secret into `${ENV_VAR}`.
 
-For a project override, preserve unrelated `projects` entries and apply only the requested partial `members` patch. Pass the repository root explicitly so `sync-team.js` resolves the override and writes the project-scoped artifacts there; global wrappers always stay on the base roster.
-
-Before writing, copy `squad-team.json` to a timestamped sibling backup such as `squad-team.json.bak.20261121-143022`. Apply the smallest valid JSON edit and parse the result before continuing. If parsing fails, restore the backup and stop.
+Before writing, copy `muse-squad.toml` to a timestamped sibling backup such as `muse-squad.toml.bak.20261121-143022`. Apply the smallest valid TOML edit, then parse the result and re-check every provider reference. If parsing or validation fails, restore the backup and stop.
 
 ## Regenerate
 
@@ -913,26 +895,20 @@ Run the materializer with the same config directory:
 node "$MUSE_CONFIG_DIR/mcp/sync-team.js" --config-dir "$MUSE_CONFIG_DIR"
 ```
 
-For a project override, also pass the repo root (run this from the repository root):
+On Windows without `MUSE_CONFIG_DIR`, use `node "$HOME\.config\muse\mcp\sync-team.js" --config-dir "$HOME\.config\muse"`.
 
-```bash
-node "$MUSE_CONFIG_DIR/mcp/sync-team.js" --config-dir "$MUSE_CONFIG_DIR" --project-dir "$PWD"
-```
+If the command fails, restore the config backup, report the exact error, and do not claim success.
 
-On Windows without `MUSE_CONFIG_DIR`, use `node "$HOME\.config\muse\mcp\sync-team.js" --config-dir "$HOME\.config\muse"` and add `--project-dir "$PWD"` for a project override.
-
-If the command fails, restore the roster backup, report the exact error, and do not claim success.
-
-Stale `agents/<name>.md` and `.agents/agents/<name>.md` files that carry the `Generated by muse-squad sync-team.js` marker are removed automatically. Leave any unmarked agent file untouched.
+Stale `agents/<name>.md` wrappers that carry the generated marker are removed automatically. Leave any unmarked agent file untouched.
 
 ## Finish
 
-Re-read `squad/team.md` and, for a project override, `.agents/squad/team.md`. Report the final `@name | Role | Primary | Backup` table and the regenerated file paths, noting which files are project-scoped. Never report the change as done until the materializer exited successfully.
+Re-read `squad/team.md`. Report the final `@<name> | primary | fallback` table and the regenerated file paths. Never report the change as done until the materializer exited successfully.
 '@
 Install-File 'skills/squad-doctor/SKILL.md' @'
 ---
 name: squad-doctor
-description: Diagnose Muse Squad MCP registration, endpoint reachability, and roster/wrapper drift.
+description: Diagnose Muse Squad MCP registration, config validity, provider reachability, and roster/wrapper drift.
 ---
 You are in SQUAD-DOCTOR mode. Diagnose only; do not change config or product code unless the user asks.
 
@@ -946,194 +922,186 @@ node "$MUSE_CONFIG_DIR/mcp/doctor.js" --config-dir "$MUSE_CONFIG_DIR" --timeout-
 
 On Windows without `MUSE_CONFIG_DIR`, use `node "$HOME\.config\muse\mcp\doctor.js" --config-dir "$HOME\.config\muse"`. Add `--json` when a machine-readable report is useful. If `doctor.js` is missing, say the installation is incomplete and recommend re-running the installer with `--update`.
 
-The check does not use `custom-coder`, so it still works when the model server is down. Never print API keys; report only the endpoint alias, status, URL, and redacted hint from the tool output.
+The check does not call `muse-squad` generation tools, so it still works when an HTTP provider is down. Never print API keys: report only the provider name, status, redacted hint, and, for HTTP providers, the base URL. An `api_key` read from `${ENV_VAR}` is shown only as the variable name, never its resolved value.
 
 ## What it checks
 
-1. `settings.json` - that `mcpServers["custom-coder"]` exists, launches `node`, points at `mcp/bridge.js`, and uses this config dir's `endpoints.json`.
-2. Every `endpoints.json` alias - a live `GET /v1/models` (or `GET /models` when `base_url` already ends in `/v1`) with a short timeout. `OK` means reachable; `AUTH` means 401/403; `HTTP` means another error status; `DOWN` / `TIMEOUT` means no answer.
-3. `squad-team.json` - that `squad/team.md` and every global `agents/<name>.md` match what `sync-team.js` would generate, and that no stale generated wrappers remain.
+1. `settings.json` — that `mcpServers["muse-squad"]` exists, launches `node`, and points at the bundled `mcp/bridge.js` with this config directory.
+2. `muse-squad.toml` — that `schema = 1`, the file parses, every provider has valid settings, and every member has `primary`, an ordered `fallback` array, and a `charter`. Every provider name in every member chain must resolve to a provider table. At least one member is required.
+3. HTTP providers — a live `GET /v1/models` (or `GET /models` when `base_url` already ends in `/v1`) with a short timeout. `OK` means reachable, `AUTH` means 401/403, `HTTP` means another error status, `DOWN` / `TIMEOUT` means no answer. Native providers are reported as `native` and are not pinged; the MCP router skips them too.
+4. Roster and wrappers — that `squad/team.md` and every global `agents/<name>.md` match what `sync-team.js` would generate from the TOML, that only current members have generated wrappers, and that no leftover non-member agent files remain.
+5. Secrets — every `api_key` is redacted in all output, including `--json`.
 
 Exit code `0` means all checks passed, `1` means at least one check failed, and `2` means the diagnostic itself could not run.
 
 ## Recommended follow-ups
 
-- Missing or bad `custom-coder` registration: re-run the installer, or run `node "$MUSE_CONFIG_DIR/mcp/register-settings.js"` with the installer's usual `--settings`, `--bridge`, and `--config-file` arguments.
-- `DOWN` / `TIMEOUT`: check that the local model server is running, the `base_url` is correct, and the port is exposed.
-- `AUTH`: check that endpoint's key in `endpoints.json`; never echo the key into chat.
-- `HTTP`: inspect the model server logs for the reported status.
-- Roster drift: run `node "$MUSE_CONFIG_DIR/mcp/sync-team.js" --config-dir "$MUSE_CONFIG_DIR"`, or use `/squad-team` if the roster itself needs editing.
+- Missing or bad `muse-squad` registration: re-run the installer, or run `node "$MUSE_CONFIG_DIR/mcp/register-settings.js"` with the installer's usual `--settings` and `--bridge` arguments.
+- Config parse or cross-reference failure: fix `muse-squad.toml` with `/squad-team`. An unknown provider in a member's chain blocks that member's routing.
+- `DOWN` / `TIMEOUT`: check that the HTTP model server is running, `base_url` is correct, and the port is exposed. A native provider needs no ping.
+- `AUTH`: check that provider's `api_key` or its `${ENV_VAR}` source; never echo the key into chat.
+- Roster drift or leftover wrappers: run `node "$MUSE_CONFIG_DIR/mcp/sync-team.js" --config-dir "$MUSE_CONFIG_DIR"`, or use `/squad-team` if the TOML itself needs editing.
 
-Present a short summary table of `Check | Status | Detail`, list the failing checks first, and do not claim the installation is healthy unless the diagnostic exited `0`.
+Present a short summary table of `Check | Status | Detail`, list failing checks first, and do not claim the installation is healthy unless the diagnostic exited `0`.
 '@
 Install-File 'skills/squad-plan/SKILL.md' @'
 ---
 name: squad-plan
-description: Multi-agent explore-first planning mode that writes a decision-complete plan before coding.
+description: Member-scoped, explore-first planning mode that writes a decision-complete plan before coding.
 ---
 You are in SQUAD-PLAN mode. Do NOT edit product code yet.
 
-## Named Team Roster and Project Memory (read first)
+## Named members and project memory (read first)
 
-At startup, read `~/.config/muse/squad-team.json` (or the generated roster at `~/.config/muse/squad/team.md`). In this repository, prefer `.agents/squad/team.md` and the project wrappers in `.agents/agents/<name>.md` when present, then route work by responsibility:
+At startup, read `~/.config/muse/muse-squad.toml` (`schema = 1`) and the generated roster at `~/.config/muse/squad/team.md`. Use only the members defined under `[squad.<name>]`; every step goes to a named member. Match each step to that member's `charter`. If no charter fits, ask the user which member should own the step instead of inventing a helper.
 
-- Lead `@keaton` — architecture, task decomposition, and adversarial plan review.
-- Frontend `@fenster` — UI components, styles, accessibility, and client-side files.
-- Backend `@mcmanus` — APIs, persistence, server-side logic, and data files.
-- Tester `@hockney` — verification commands, test suites, and regression coverage.
-- Scribe `@verbal` — record decisions in `.muse/squad/decisions.md` and keep member histories current.
+If `.muse/squad/` does not exist in this repository yet, create `.muse/squad/decisions.md` and `.muse/squad/history/` before starting. Every named member reads `.muse/squad/decisions.md` and `.muse/squad/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished. Ask the `@verbal` member to append durable decisions to `.muse/squad/decisions.md` before sign-off.
 
-If `.muse/squad/` does not exist in this repository yet, create `.muse/squad/decisions.md` and `.muse/squad/history/` before spawning members. Every named member reads `.muse/squad/decisions.md` and `.muse/squad/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished. Ask `@verbal` to append durable decisions to `.muse/squad/decisions.md` before sign-off.
+## TUI labels and reporting
 
-When a task maps to a roster member, spawn that named agent (for example `@keaton`) instead of a generic one. Use generic agents only for work outside the roster or when a named spawn is unavailable, and say so in the summary.
+When spawning any subagent, set its short task label exactly to:
 
-## TUI Task Labels and Reporting
+`[<name> | <provider-name>] <concise action>`
 
-When spawning any subagent, **always** set its short task title / description to the roster-aware form:
-
-`[<Name> (<Role>) | <model-or-endpoint>] <concise action>`
-
-- `<Name>` and `<Role>` come from the roster: `Keaton (Lead)`, `Fenster (Frontend)`, `McManus (Backend)`, `Hockney (Tester)`, `Verbal (Scribe)`.
-- `<model-or-endpoint>` is that member's `primary` value: `muse-spark-1.3-contributor`, `muse-ember-1.0`, `local-coder`, etc. When work is delegated through `custom-coder`, append the actual `servedBy` from tool meta, e.g. `local-coder+grill-reviewer`. Do not guess a model from the role.
-- For generic helpers outside the roster (`worker-1`, `scout-1`, `plan-reviewer`), keep `[<agent-role> | <model-tag>] <action>` using `ember`, `spark`, or `native` tags.
-- Keep `<concise action>` under ~50 characters so the TUI footer (`└ ◈ <task> running <elapsed>`) does not truncate the useful part. Start with a verb; no trailing punctuation.
+- `<name>` is the member's lowercase name from `[squad.<name>]`.
+- `<provider-name>` is the provider actually serving the step: the member's `primary` for native work, or the HTTP provider that answered through `muse-squad` for delegated work. Use the provider name exactly as written in the TOML. Never guess it from a charter or invent a model tag.
+- Keep the action under ~50 characters; start with a verb; no trailing punctuation.
+- Add no parenthetical text and no second field.
 
 Examples:
 
 ```text
-[Keaton (Lead) | muse-spark-1.3-contributor] Audit plan for edge cases
-[Fenster (Frontend) | local-coder] Sketch login form changes
-[McManus (Backend) | local-coder+grill-reviewer] Map retry queue changes
-[Hockney (Tester) | local-coder] List verification commands
-[Verbal (Scribe) | muse-ember-1.0] Record plan decisions
-[worker-1 | ember] Apply scoped diff
+[keaton | Muse-Spark] Review architecture
+[fenster | Home-Ornith] Sketch login form changes
+[mcmanus | DeepSeek-Flash] Map retry queue changes
+[hockney | Home-Ornith] List verification commands
+[verbal | Muse-Ember] Record plan decisions
 ```
 
-If work is done **inline** because subagent spawning failed, was rejected, or is unavailable, do not invent a spawn — report it in the summary as `[inline | native] <action>`.
+Always include a "Subagents / Providers" roster in user-facing summaries and before asking for sign-off. For each entry list the member name, provider, action, and outcome. For `muse-squad` tool calls, report the member, the provider shown in tool meta, and the outcome; if meta is unavailable, say so explicitly.
 
-**Always include a "Subagents / Models" roster in your user-facing summaries** (and before asking for sign-off) so the model is visible even if the TUI label omits it. For each helper list: name/role, model tag, action, and outcome/status. For `custom-coder` tool calls, report the actual `servedBy`, `servedModel`, `fallbackUsed`, and any `fallbackEndpoint` from tool result meta (not inferred from config/default) and the outcome (e.g. `custom-coder:critique_plan | servedBy grill-reviewer (grill-model) — ok`). If result meta is unavailable, state that explicitly.
+## Provider limits and health (read first)
 
-## Native Quota Fallback for Named Members
+At the start, call `muse-squad:list_providers` (or read `muse-squad.toml`) to learn each provider's `max_concurrency`, `max_input_chars`, and `type`. Native providers are built into Muse and cannot be called by the MCP router; the router skips them and tries that member's HTTP providers in chain order.
 
-If a named member's native primary (for example `@keaton` on `muse-spark-1.3-contributor`) fails with a quota, rate-limit, or subscription error, the orchestrator must retry the same step through `custom-coder` using that member's `backup` as the endpoint: `critique_plan` for plan/review steps, `generate_code` for code or diff steps. Pass the backup as both `endpoint` and `fallback_endpoint`. Do not treat the failed native turn as the member's result, silently switch to another native model, or mark the step done until the retry succeeds or the gap is stated explicitly. If custom-coder is unavailable for that retry, warn clearly before falling back to inline/native work. Record the retry in the Subagents / Models roster with the actual `servedBy` / `fallbackUsed` from tool meta.
+- Never spawn more simultaneous native subagents of one native provider than its `max_concurrency`; batch extra exploration into later waves.
+- Parallel calls to `muse-squad` are safe: the router queues requests and serializes them per HTTP provider's `max_concurrency`.
+- Use `muse-squad:member_status("<name>")` to inspect a member's chain before assigning a large step.
 
-## Concurrency Budget and Endpoint Health (read first)
+## Member-scoped routing and quota retries
 
-At the start, call `custom-coder:list_endpoints` (or read `~/.config/muse/endpoints.json`) to learn `muse_models` limits, endpoint `max_concurrency`, and whether custom-coder is available.
+`muse-squad:generate_code` and `muse-squad:critique_plan` are member-scoped:
 
-- If the result indicates custom-coder is unavailable, misconfigured, or not working properly (for example `available: false`, `ok: false`/`warning`, missing/unreadable config, or the tool cannot be reached), **warn the user clearly** with the reported issue and continue in **native-only mode**: do not block planning. Use native Muse subagents/models for exploration and critique and skip `custom-coder` tool calls until endpoints are fixed. If a custom-coder call fails later at runtime, treat that the same way (warn and continue natively). Use sensible default concurrency if limits are unknown (for example at most 2 concurrent native subagents of the same model) and batch into waves.
-- If custom-coder is available, never spawn more simultaneous native subagents of a given model than that model's `muse_models` limit (for example at most 4 `muse-ember-1.0` or 2 `muse-spark-1.3-contributor` at once). Batch any larger exploration into successive waves. Parallel workers may safely call `custom-coder` MCP tools at the same time: the router queues requests FIFO and serializes them per endpoint's `max_concurrency`.
+- `generate_code(member, prompt|task_spec, context|file_context, optional system/temperature/max_tokens)`
+- `critique_plan(member, plan_markdown, optional repo_context/temperature/max_tokens)`
 
-## Context Size (custom-coder, when available)
+The router resolves the named member's `primary` first, then its `fallback` providers in order. Native providers are skipped by the router; HTTP providers are tried in chain order. There is no global fallback and no silent model switching.
 
-When calling `custom-coder`, keep `repo_context`, `file_context`, and `plan_markdown` short and relevant to the decision at hand. Use `custom-coder:list_endpoints` to check the target endpoint's `max_input_chars` and `extra_body` context hints (such as `options.num_ctx`) before sending. Send only the needed files or excerpts - never dump whole unrelated files. If a reply starts with the input-truncated warning, the model saw less context than you intended: shorten the context and re-ask instead of trusting the critique.
+- **Native-primary member:** run the native subagent first. If it fails because of quota, rate limits, or subscription limits, retry that exact step through `muse-squad:critique_plan` (plan and review steps) or `muse-squad:generate_code` (code and diff steps) with `member="<name>"`. The router uses that member's HTTP fallbacks. Do not treat the failed native turn as the member's result.
+- **HTTP-primary member:** the generated wrapper pins a lightweight native runner and delegates heavy work to `muse-squad` with `member="<name>"`.
 
-1. Map the relevant files, dependencies, and existing patterns. Prefer spawning parallel read-only subagents (for example `explore` or `general-purpose`, if available in this runtime) for faster coverage; if subagent spawning fails, is rejected, or is unavailable, do the equivalent read-only mapping inline instead of stopping. Track each helper (spawned or inline) with its role and model-tag for the roster.
-2. Ask the user clarifying questions ONLY if an architectural fork cannot be resolved from the codebase.
-3. Draft a decision-complete implementation plan in `.muse/PLAN.md` with exact file paths, dependency order, and verification commands. If the file already has a `## Execution Log & Decisions` section, preserve it verbatim at the bottom — it is the durable handoff record from any prior execution session; do not overwrite it unless the user explicitly asks to reset the plan.
-4. Plan Grill (degrades gracefully):
-   1. Audit `.muse/PLAN.md` against the actual files in the repository. Prefer spawning `@keaton` (Lead) or a read-only `plan-reviewer` subagent; if that spawn fails, perform the same critique inline.
-   2. If custom-coder is available, call `custom-coder:critique_plan` (endpoint `grill-reviewer` when present) for an independent adversarial review. When the review is tied to a roster member, pass that member's `backup` as `fallback_endpoint` so the router uses only the member-specific chain. In parallel with the native review when practical. If custom-coder is unavailable or the call fails, skip it, warn the user that the self-hosted critique was not run, and proceed with the native/inline review only.
-   3. Synthesize available critiques, resolve any valid issues in `.muse/PLAN.md`, and ask `@verbal` (Scribe) to append the durable choices to `.muse/squad/decisions.md`.
-   4. Present a summary of what was caught (and any endpoint warning), including the **Subagents / Models** roster, before asking the user for `/squad-execute` sign-off.
+If the member chain cannot serve the request, the tool returns a hard error listing every attempt. Stop planning, report the error and its attempts verbatim, and ask the user to fix that member's chain with `/squad-team`. Do not retry with a different member, a different provider, or inline work.
+
+## Context size
+
+When calling `muse-squad`, keep `repo_context`, `file_context`, and `plan_markdown` short and relevant. Check the target HTTP provider's `max_input_chars` before sending; send only the needed files or excerpts. If a reply starts with the input-truncated warning, shorten the context and re-ask instead of trusting the critique.
+
+## Planning steps
+
+1. Map the relevant files, dependencies, and existing patterns using named members only.
+2. Ask the user clarifying questions only if an architectural fork cannot be resolved from the codebase.
+3. Draft a decision-complete implementation plan in `.muse/PLAN.md` with exact file paths, dependency order, and verification commands. If the file already has a `## Execution Log & Decisions` section, preserve it verbatim at the bottom.
+4. Plan grill: ask the architecture charter member (default `@keaton`) to audit `.muse/PLAN.md` against the actual files, then request an independent critique through `muse-squad:critique_plan` with `member="<name>"` for that same member. Synthesize valid issues into `.muse/PLAN.md` and ask `@verbal` to append durable choices to `.muse/squad/decisions.md`.
+5. Present a summary of what was caught, including the Subagents / Providers roster, before asking the user for `/squad-execute` sign-off.
 '@
 Install-File 'skills/squad-execute/SKILL.md' @'
 ---
 name: squad-execute
-description: Executes the approved `.muse/PLAN.md` using parallel subagents in isolated worktrees, with a verification gate that blocks premature completion.
+description: Executes the approved .muse/PLAN.md with named squad members and a verification gate that blocks premature completion.
 ---
 
-## Named Team Roster and Project Memory (read first)
+## Named members and project memory (read first)
 
-At startup, read `~/.config/muse/squad-team.json` (or the generated roster at `~/.config/muse/squad/team.md`). In this repository, prefer `.agents/squad/team.md` and the project wrappers in `.agents/agents/<name>.md` when present, then route each wave by responsibility:
+At startup, read `~/.config/muse/muse-squad.toml` and the generated roster at `~/.config/muse/squad/team.md`. Use only the members defined under `[squad.<name>]`. All implementation and review goes through named members; there are no unnamed helpers. Match each task to a member's `charter`, and ask the user which member owns a step if no charter fits.
 
-- Lead `@keaton` — architecture, sequencing, and risk review for the wave.
-- Frontend `@fenster` — UI components, styles, accessibility, and client-side files.
-- Backend `@mcmanus` — APIs, persistence, server-side logic, and data files.
-- Tester `@hockney` — verification commands, test suites, and regression coverage.
-- Scribe `@verbal` — append decisions to `.muse/squad/decisions.md` after each wave and maintain history files.
+If `.muse/squad/` does not exist yet, create `.muse/squad/decisions.md` and `.muse/squad/history/`. Every member reads both files before starting and appends concise lasting learnings when finished. Use isolated Git worktrees for bounded implementation tasks where available.
 
-If `.muse/squad/` does not exist in this repository yet, create `.muse/squad/decisions.md` and `.muse/squad/history/` before spawning members. Every named member reads `.muse/squad/decisions.md` and `.muse/squad/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished.
+## TUI labels and reporting
 
-Spawn named members for tasks that match their charter; use generic `worker` subagents only for work outside the roster or when the named spawn is unavailable. Keep isolated Git worktrees (`--subagent-worktree-isolation` behavior) for bounded implementation tasks.
+When spawning any subagent, set its short task label exactly to:
 
-## TUI Task Labels and Reporting
+`[<name> | <provider-name>] <concise action>`
 
-When spawning any subagent, **always** set its short task title / description to the roster-aware form:
-
-`[<Name> (<Role>) | <model-or-endpoint>] <concise action>`
-
-- `<Name>` and `<Role>` come from the roster: `Keaton (Lead)`, `Fenster (Frontend)`, `McManus (Backend)`, `Hockney (Tester)`, `Verbal (Scribe)`.
-- `<model-or-endpoint>` is that member's `primary` value: `muse-spark-1.3-contributor`, `muse-ember-1.0`, `local-coder`, etc. When work is delegated through `custom-coder`, append the actual `servedBy` from tool meta, e.g. `local-coder+grill-reviewer`. Do not guess a model from the role.
-- For generic helpers outside the roster (`worker-1`, `scout-1`, `plan-reviewer`), keep `[<agent-role> | <model-tag>] <action>` using `ember`, `spark`, or `native` tags.
-- Keep `<concise action>` under ~50 characters so the TUI footer (`└ ◈ <task> running <elapsed>`) does not truncate the useful part. Start with a verb; no trailing punctuation.
+- `<name>` is the member's lowercase name from `[squad.<name>]`.
+- `<provider-name>` is the provider actually serving the step: the member's `primary` for native work, or the HTTP provider that answered through `muse-squad` for delegated work. Use the provider name exactly as written in the TOML; never guess it from a charter or invent a model tag.
+- Keep the action under ~50 characters; start with a verb; no trailing punctuation.
+- Add no parenthetical text and no second field.
 
 Examples:
 
 ```text
-[Keaton (Lead) | muse-spark-1.3-contributor] Sequence wave dependencies
-[Fenster (Frontend) | local-coder] Build login form
-[McManus (Backend) | local-coder+grill-reviewer] Add retry queue
-[Hockney (Tester) | local-coder] Run regression suite
-[Verbal (Scribe) | muse-ember-1.0] Log wave decisions
-[worker-1 | ember] Apply scoped fix in api/
+[keaton | Muse-Spark] Sequence wave dependencies
+[fenster | Home-Ornith] Build login form
+[mcmanus | DeepSeek-Flash] Add retry queue
+[hockney | Home-Ornith] Run regression suite
+[verbal | Muse-Ember] Log wave decisions
 ```
 
-If work is done **inline** because subagent spawning failed, was rejected, or is unavailable, do not invent a spawn — report it in the summary as `[inline | native] <action>`.
+Always include a "Subagents / Providers" roster in wave, progress, and completion summaries. For each entry list the member name, provider, action, and outcome. For `muse-squad` tool calls, report the member, the provider shown in tool meta, and the outcome; if meta is unavailable, say so explicitly. When practical, include the member name and provider in execution-log entries.
 
-**Always include a "Subagents / Models" roster in your user-facing wave/progress and completion summaries** so the model is visible even if the TUI label omits it. For each helper list: name/role, model tag, action, and outcome/status. For `custom-coder` tool calls, report the actual `servedBy`, `servedModel`, `fallbackUsed`, and any `fallbackEndpoint` from tool result meta (not inferred from config/default) and the outcome (e.g. `custom-coder:generate_code | servedBy local-coder (<model>) — ok`). If result meta is unavailable, state that explicitly. When practical, include name/role and model tag in execution-log entries.
+## Provider limits, health, and member-scoped routing (read first)
 
-## Native Quota Fallback for Named Members
+At the start, call `muse-squad:list_providers` (or read `muse-squad.toml`) to learn each provider's `type`, `max_concurrency`, and `max_input_chars`. Use `muse-squad:member_status("<name>")` to inspect a member's chain before assigning work. Native providers are built into Muse and cannot be called by the MCP router; the router skips them and tries that member's HTTP providers in chain order.
 
-If a named member's native primary (for example `@keaton` on `muse-spark-1.3-contributor`) fails with a quota, rate-limit, or subscription error, the orchestrator must retry the same step through `custom-coder` using that member's `backup` as the endpoint: `generate_code` for implementation steps, `critique_plan` for reviews. Pass the backup as both `endpoint` and `fallback_endpoint`. Apply and verify the returned diff exactly as for any other `custom-coder` result. Do not treat the failed native turn as the member's result, silently switch to another native model, or mark the wave done until the retry succeeds or the gap is stated explicitly. If custom-coder is unavailable for that retry, warn clearly before falling back to inline/native work. Record the retry in the Subagents / Models roster and the execution log with the actual `servedBy` / `fallbackUsed` from tool meta.
+`muse-squad:generate_code` and `muse-squad:critique_plan` are member-scoped:
 
-Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` section - that section is the durable handoff record when resuming a long or interrupted session. Group independent tasks into successive waves and track each helper (spawned or inline) with its name/role and model tag for the roster.
+- `generate_code(member, prompt|task_spec, context|file_context, optional system/temperature/max_tokens)`
+- `critique_plan(member, plan_markdown, optional repo_context/temperature/max_tokens)`
 
-## Endpoint Health and Execution Mode (read first)
+The router resolves the named member's `primary` first, then its `fallback` providers in order. There is no global fallback and no silent model switching.
 
-At the start, call `custom-coder:list_endpoints` (or read `~/.config/muse/endpoints.json`) to learn `muse_models` limits and whether custom-coder is available.
+- **Native-primary member:** run the native subagent first. If it fails because of quota, rate limits, or subscription limits, retry that exact step through `muse-squad:generate_code` (implementation steps) or `muse-squad:critique_plan` (reviews) with `member="<name>"`. The router uses that member's HTTP fallbacks. Do not treat the failed native turn as the member's result.
+- **HTTP-primary member:** the generated wrapper pins a lightweight native runner and delegates heavy work to `muse-squad` with `member="<name>"`.
+- Parallel calls to `muse-squad` are safe: the router queues requests and serializes them per HTTP provider's `max_concurrency`. Do not add separate locking in members.
 
-- If custom-coder is unavailable, misconfigured, or not working properly (for example `available: false`, `ok: false`/`warning`, missing/unreadable config, or unreachable), **warn the user clearly** with the reported issue and continue in **native-only mode**: do not block execution. Have workers implement changes directly with native Muse tools/editing instead of calling `custom-coder:generate_code`, and skip `custom-coder` critiques. If a custom-coder call fails later at runtime, treat that the same way (warn and continue natively). Use sensible default concurrency if limits are unknown (for example at most 2 concurrent native workers of the same model) and batch into waves.
-- If custom-coder is available, use `custom-coder:generate_code` (endpoint `local-coder` when present) for heavy code generation when helpful: pass a bounded prompt plus relevant file context, then apply and verify the returned diff locally. For a named member, use that member's `primary` as `endpoint` and its `backup` as `fallback_endpoint` so the router does not traverse an unrelated global chain. Never spawn more simultaneous native subagents of a given model than `muse_models` allows (for example at most 4 `muse-ember-1.0` or 2 `muse-spark-1.3-contributor` workers). Batch waves to respect limits.
+**Errors stop the wave.** If any member chain returns a hard error, stop the current wave immediately, report the error and every attempted provider verbatim, and ask the user to fix that member's chain with `/squad-team`. Do not retry with a different member, a different provider, or inline work, and do not advance to the next wave.
 
-Multiple parallel workers may safely call `custom-coder` MCP tools concurrently when available: `bridge.js` queues requests FIFO and serializes them per endpoint's `max_concurrency` (local endpoints default to `1` to avoid GPU/RAM OOM). A queued call waits for a slot rather than failing over; fallback only happens after retries fail or the queue wait exceeds `queue_timeout_ms`. Do not implement separate locking in the workers.
+## Context size
 
-## Context Size (custom-coder, when available)
+Before each `generate_code` call, check the target HTTP provider's `max_input_chars`. Keep `file_context` (and any `repo_context`) to the smallest excerpts that explain the change — no whole-file dumps, logs, or unrelated tests. If the reply starts with the input-truncated warning, shorten the context and re-ask; do not apply a diff generated from cut-off context.
 
-Before each `generate_code` call, check the target endpoint's `max_input_chars` and `extra_body` context hints (such as `options.num_ctx`). Keep `file_context` (and any `repo_context`) to the smallest excerpts that explain the change - no whole-file dumps, logs, or unrelated tests. If the reply starts with the input-truncated warning, shorten the context and re-ask; do not apply a diff generated from cut-off context.
-
-## Patch Discipline (Diffs, Not Full Rewrites)
+## Patch discipline (diffs, not full rewrites)
 
 - Ask `generate_code` for a targeted unified diff (`git apply` format) for existing files. A single targeted function or block with its path and line range is acceptable when a diff is impractical; a full-file rewrite is not.
-- The orchestrator — `muse-ember-1.0`, or any model with native `Edit` tools — applies each hunk surgically with `Edit`, preserving the rest of the file. Do not overwrite whole files with local-model output.
-- Reject and re-prompt if the model returns a full file, truncated content, `...`/placeholders, or an unapplyable diff. Never "repair" omitted code by guessing.
-- Run Instant Diagnostics and then the Verification Gate after applying patches.
+- The orchestrator — the native runner in the wrapper, or any model with native `Edit` tools — applies each hunk surgically, preserving the rest of the file. Do not overwrite whole files with generated output.
+- Reject and re-prompt if the result is a full file, truncated content, `...`/placeholders, or an unapplyable diff. Never repair omitted code by guessing.
+- Run the fastest incremental check on changed files, then the Verification Gate after applying patches.
 
-## Verification Gate (Do Not Stop Until Verified)
+## Verification gate (do not stop until verified)
 
 You are not done and must not return control to the user while any `.muse/TODO.md` item is unchecked or while any verification command fails.
 
-After every wave — before advancing to the next wave and before reporting completion:
+Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` section; it is the durable handoff record when resuming a long or interrupted session. Group independent tasks into successive waves. After every wave — before advancing and before reporting completion:
 
-1. Update `.muse/TODO.md` (create it from the plan if it does not exist). Check off only items whose changes are applied and verified; leave or add `- [ ]` items for remaining or newly discovered work. Record the exact verification commands and their results in the checklist.
+1. Update `.muse/TODO.md` (create it from the plan if it does not exist). Check off only items whose changes are applied and verified; leave or add `- [ ]` items for remaining or newly discovered work. Record exact verification commands and results in the checklist.
 2. Run every verification command listed in `.muse/PLAN.md` from the repository root — for example `npm test`, `cargo check`, `pytest`, or `go test ./...`. If the plan lists none, detect the project's typechecker and test commands from its manifests, add them to `.muse/TODO.md`, and run them.
-3. If any command fails, fix the failure in another bounded wave (delegating to a `worker` where appropriate) and repeat this gate. Never mark an item done or claim success based on a partial pass.
-4. Append a short entry to the `## Execution Log & Decisions` section at the bottom of `.muse/PLAN.md` (create the section if absent). Record the wave number, what landed, architectural decisions and *why*, gotchas discovered, exact verification commands/results, and any remaining work or blockers. Append only — never rewrite or delete earlier entries — so the on-disk record survives compaction and session restarts. Ask `@verbal` (Scribe) to append durable decisions to `.muse/squad/decisions.md` and each member to append lasting learnings to its own `.muse/squad/history/<name>.md`.
-5. Only when all TODO items are checked and all verification commands pass, summarize what was verified and return control to the user, including the **Subagents / Models** roster for the run (per wave where useful).
+3. If any command fails, fix the failure in another bounded wave with the appropriate named member and repeat this gate. Never mark an item done or claim success based on a partial pass.
+4. Append a short entry to `## Execution Log & Decisions` at the bottom of `.muse/PLAN.md` (create the section if absent). Record the wave number, what landed, decisions and *why*, gotchas discovered, exact verification commands and results, and any remaining work or blockers. Append only — never rewrite or delete earlier entries. Ask `@verbal` to append durable decisions to `.muse/squad/decisions.md` and each member to append lasting learnings to its own `.muse/squad/history/<name>.md`.
+5. Only when all TODO items are checked and all verification commands pass, summarize what was verified and return control to the user, including the Subagents / Providers roster for the run.
 
-## Session Handoff Notes
+## Session handoff notes
 
 The `## Execution Log & Decisions` section in `.muse/PLAN.md` is authoritative state, not chat history. Keep entries short (a few bullets per wave) and append-only:
 
 ```markdown
 ## Execution Log & Decisions
 
-### Wave 2 — 2026-11-20
-- Landed: retry/backoff in mcp/bridge.js; endpoints seed config updated.
-- Decision: 4xx is non-retryable — an invalid key must fail fast, not burn fallback attempts. Reason: silent auth failures wasted a wave earlier.
-- Gotcha: fallback notice must stay in MCP `meta`, not tool text, or `git apply` breaks.
-- Verified: `scripts/test-install.sh` PASS; `node --check mcp/bridge.js` PASS.
-- Remaining: PowerShell installer still untested locally (no pwsh).
+### Wave 2 - 2026-11-21
+- Landed: retry/backoff in mcp/bridge.js; TOML defaults refreshed.
+- Decision: 4xx is non-retryable - an invalid key must fail fast, not burn chain attempts. Reason: silent auth failures wasted a wave earlier.
+- Gotcha: fallback notices belong in MCP `meta`, not tool text, or `git apply` breaks.
+- Verified: `node --check mcp/bridge.js` PASS; `npm test` PASS.
+- Remaining: Windows installer still untested locally (no pwsh).
 ```
 
 On resume, read this section first and continue from the last entry instead of re-deriving decisions from scratch. If a later wave reverses a decision, append a new entry saying so with the reason — do not edit history.
@@ -1142,31 +1110,18 @@ Install-File 'mcp/bridge.js' @'
 #!/usr/bin/env node
 'use strict';
 
-// MCP stdio server that routes code generation and plan critiques across
-// named self-hosted OpenAI-compatible endpoints. Zero npm dependencies.
-// Requires Node 18+ (uses global fetch and AbortController).
-// The config file is re-read on every tool call, so edits apply immediately.
+// MCP stdio server for the muse-squad roster. Every generation or critique is
+// scoped to a named squad member; the member's provider chain comes from
+// muse-squad.toml. Zero npm dependencies, Node 18+ (global fetch).
 
-const fs = require('fs');
-const os = require('os');
-const path = require('path');
+const configModule = require('./config.js');
 
-const SERVER_NAME = 'muse-squad-custom-coder';
-const SERVER_VERSION = '0.1.0';
-const CONFIG_FILE = (process.env.MODELS_CONFIG_FILE || '~/.config/muse/endpoints.json')
-  .replace(/^~(?=$|[\\/])/, os.homedir());
-const ENV_TIMEOUT = Number.parseInt(process.env.MUSE_CODER_TIMEOUT_MS || '', 10);
-const DEFAULT_TIMEOUT_MS = Number.isFinite(ENV_TIMEOUT) && ENV_TIMEOUT > 0 ? ENV_TIMEOUT : 600000;
-const DEFAULT_MAX_RETRIES = 2;
-const DEFAULT_QUEUE_TIMEOUT_MS = 300000;
-const DEFAULT_MAX_CONCURRENCY = 1;
-
-// Per-endpoint queue state survives config reloads so in-flight slot counts
-// are never reset while a request is still talking to an endpoint.
-const endpointQueues = new Map();
+const SERVER_NAME = 'muse-squad';
+const SERVER_VERSION = '0.3.0';
+const CONFIG_FILE = configModule.configPath({});
 
 const DEFAULT_SYSTEM = [
-  'You are a coding worker in a multi-agent software team.',
+  'You are a named squad member completing a bounded software task.',
   'For existing files, return ONLY a unified diff in `git apply` format with exact file paths and enough context lines to apply cleanly.',
   'If a diff is genuinely impractical, return ONLY the targeted function or block with its file path and line range - never the entire file.',
   'Never output a full-file rewrite, ellipses, placeholders, or truncation markers. Do not use markdown fences.',
@@ -1182,25 +1137,19 @@ const CRITIQUE_SYSTEM = [
   'Do not praise the plan, rewrite it, or modify any code.'
 ].join(' ');
 
-const ENDPOINT_PARAM = {
+const MEMBER_PARAM = {
   type: 'string',
-  description: 'Named endpoint alias from endpoints.json. Omit to use the configured default.'
-};
-
-const FALLBACK_ENDPOINT_PARAM = {
-  type: 'string',
-  description: 'Member-specific backup endpoint alias. When set, only this endpoint is tried after the primary, instead of the global fallback_order. Set to an empty string to disable MCP fallback (for native backups).'
+  description: 'Name of a squad member from muse-squad.toml.'
 };
 
 const TOOLS = [
   {
     name: 'generate_code',
-    description: 'Generate a targeted unified diff (or single function/block) with automatic retry and fallback. Never returns full-file rewrites.',
+    description: 'Generate a targeted unified diff (or single function/block) through a squad member\'s provider chain. Never returns full-file rewrites.',
     inputSchema: {
       type: 'object',
       properties: {
-        endpoint: ENDPOINT_PARAM,
-        fallback_endpoint: FALLBACK_ENDPOINT_PARAM,
+        member: MEMBER_PARAM,
         prompt: { type: 'string', description: 'Bounded implementation task to perform.' },
         task_spec: { type: 'string', description: 'Alias for prompt.' },
         context: { type: 'string', description: 'Relevant file contents or excerpts to work from.' },
@@ -1209,39 +1158,39 @@ const TOOLS = [
         temperature: { type: 'number', description: 'Optional sampling temperature override.' },
         max_tokens: { type: 'integer', description: 'Optional maximum tokens to generate.' }
       },
+      required: ['member'],
       anyOf: [{ required: ['prompt'] }, { required: ['task_spec'] }],
       additionalProperties: false
     }
   },
   {
     name: 'critique_plan',
-    description: 'Independently audit a plan for missing edge cases, security flaws, and broken assumptions, with retry and fallback.',
+    description: 'Audit a plan through a squad member\'s provider chain. Reports concrete risks without editing code.',
     inputSchema: {
       type: 'object',
       properties: {
-        endpoint: ENDPOINT_PARAM,
-        fallback_endpoint: FALLBACK_ENDPOINT_PARAM,
+        member: MEMBER_PARAM,
         plan_markdown: { type: 'string', description: 'Full markdown of .muse/PLAN.md to audit.' },
         repo_context: { type: 'string', description: 'Relevant repository files and structure the plan relies on.' },
         temperature: { type: 'number', description: 'Optional sampling temperature override.' },
         max_tokens: { type: 'integer', description: 'Optional maximum tokens to generate.' }
       },
-      required: ['plan_markdown'],
+      required: ['member', 'plan_markdown'],
       additionalProperties: false
     }
   },
   {
-    name: 'coder_status',
-    description: 'List configured endpoint aliases, default, fallback order, retry/queue limits, and live queue state. Keys are redacted. If endpoints are not configured or unreadable, returns a warning payload (available:false) instead of failing so callers can fall back to native Muse models.',
+    name: 'member_status',
+    description: 'Report squad members, their ordered provider chains, and live queue state. Keys are redacted. Omit member to list the whole squad.',
     inputSchema: {
       type: 'object',
-      properties: { endpoint: ENDPOINT_PARAM },
+      properties: { member: MEMBER_PARAM },
       additionalProperties: false
     }
   },
   {
-    name: 'list_endpoints',
-    description: 'Report every endpoint alias with its model, max_concurrency, max_tokens, max_input_chars, and extra_body keys, plus the muse_models native-subagent limits and queue settings. Keys are redacted. If endpoints are not configured or unreadable, returns a warning payload (available:false) instead of failing so callers can fall back to native Muse models.',
+    name: 'list_providers',
+    description: 'Report every configured provider with its model, limits, and live queue state, plus the current squad roster. Keys are redacted.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -1252,8 +1201,8 @@ const TOOLS = [
 
 const CONFIG_GUIDANCE = [
   `Expected config file: ${CONFIG_FILE}`,
-  'Create or fix endpoints.json with at least one endpoint (base_url, api_key, model).',
-  'Without working custom-coder endpoints, muse-squad skills can still run using native Muse models; custom-coder generation/critique tools will be unavailable until endpoints are configured.'
+  'Create or fix muse-squad.toml with at least one [providers.<Name>] table and one [squad.<name>] table.',
+  'Every member primary/fallback value must match a provider name exactly. Run node mcp/doctor.js for details.'
 ].join(' ');
 
 function log(message) {
@@ -1276,185 +1225,34 @@ function configError(message) {
   return new Error(`${message}\n${CONFIG_GUIDANCE}`);
 }
 
-function tryLoadConfig() {
+function loadConfigOrThrow() {
   try {
-    return { ok: true, config: loadConfig() };
+    return configModule.loadConfig();
   } catch (error) {
-    return {
-      ok: false,
-      error: error.message,
-      warning: `custom-coder endpoints are not configured or not working properly: ${error.message}. ${CONFIG_GUIDANCE}`
-    };
+    throw configError(error.message);
   }
 }
 
-function unavailableResult(reason) {
-  const payload = {
-    ok: false,
-    available: false,
-    configFile: CONFIG_FILE,
-    warning: reason.warning || `custom-coder endpoints are not configured or not working properly: ${reason.error}. ${CONFIG_GUIDANCE}`,
-    error: reason.error,
-    guidance: CONFIG_GUIDANCE
-  };
-  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], isError: false };
-}
-
-function loadConfig() {
-  let raw;
-  try {
-    raw = fs.readFileSync(CONFIG_FILE, 'utf8');
-  } catch (error) {
-    if (error && error.code === 'ENOENT') {
-      throw configError(`endpoint config not found at ${CONFIG_FILE}`);
-    }
-    throw configError(`cannot read endpoint config ${CONFIG_FILE}: ${error.message}`);
+function resolveMember(config, requested) {
+  if (typeof requested !== 'string' || !requested.trim()) {
+    throw new Error('"member" must be a non-empty squad member name');
   }
-
-  let config;
-  try {
-    config = JSON.parse(raw);
-  } catch (error) {
-    throw configError(`invalid JSON in ${CONFIG_FILE}: ${error.message}`);
-  }
-  if (!config || typeof config !== 'object' || Array.isArray(config)) {
-    throw configError(`${CONFIG_FILE}: top-level JSON value must be an object`);
-  }
-
-  const endpoints = config.endpoints;
-  if (!endpoints || typeof endpoints !== 'object' || Array.isArray(endpoints)) {
-    throw configError(`${CONFIG_FILE}: "endpoints" must be an object`);
-  }
-  const names = Object.keys(endpoints);
-  if (names.length === 0) throw configError(`${CONFIG_FILE}: "endpoints" must not be empty`);
-
-  for (const name of names) {
-    const endpoint = endpoints[name];
-    if (!endpoint || typeof endpoint !== 'object' || Array.isArray(endpoint)) {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" must be an object`);
-    }
-    if (typeof endpoint.base_url !== 'string' || !endpoint.base_url.trim()) {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" needs a non-empty "base_url"`);
-    }
-    if (typeof endpoint.api_key !== 'string') {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" needs "api_key"`);
-    }
-    if (typeof endpoint.model !== 'string' || !endpoint.model.trim()) {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" needs a non-empty "model"`);
-    }
-    if (endpoint.temperature !== undefined && typeof endpoint.temperature !== 'number') {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" temperature must be a number`);
-    }
-    if (endpoint.max_tokens !== undefined &&
-        (!Number.isInteger(endpoint.max_tokens) || endpoint.max_tokens < 1)) {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" max_tokens must be a positive integer`);
-    }
-    if (endpoint.max_input_chars !== undefined &&
-        (!Number.isInteger(endpoint.max_input_chars) || endpoint.max_input_chars < 1)) {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" max_input_chars must be a positive integer`);
-    }
-    if (endpoint.extra_body !== undefined &&
-        (!endpoint.extra_body || typeof endpoint.extra_body !== 'object' ||
-         Array.isArray(endpoint.extra_body))) {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" extra_body must be an object`);
-    }
-    const onContextExceeded = endpoint.on_context_exceeded === undefined
-      ? 'truncate'
-      : endpoint.on_context_exceeded;
-    if (onContextExceeded !== 'truncate' && onContextExceeded !== 'fallback') {
-      throw new Error(
-        `${CONFIG_FILE}: endpoint "${name}" on_context_exceeded must be "truncate" or "fallback"`
-      );
-    }
-    endpoint.on_context_exceeded = onContextExceeded; // normalize default for callers
-    const maxConcurrency = endpoint.max_concurrency === undefined
-      ? DEFAULT_MAX_CONCURRENCY
-      : endpoint.max_concurrency;
-    if (!Number.isInteger(maxConcurrency) || maxConcurrency < 1) {
-      throw new Error(`${CONFIG_FILE}: endpoint "${name}" max_concurrency must be a positive integer`);
-    }
-    endpoint.max_concurrency = maxConcurrency; // normalize default for callers
-  }
-
-  // Accept both our "default" and the example's "default_endpoint".
-  const defaultName = typeof config.default === 'string' && config.default
-    ? config.default
-    : (typeof config.default_endpoint === 'string' && config.default_endpoint
-      ? config.default_endpoint
-      : names[0]);
-  if (!Object.prototype.hasOwnProperty.call(endpoints, defaultName)) {
-    throw new Error(`${CONFIG_FILE}: default endpoint "${defaultName}" is not defined`);
-  }
-
-  let fallbackOrder = config.fallback_order === undefined ? names : config.fallback_order;
-  if (!Array.isArray(fallbackOrder) || fallbackOrder.some((name) => typeof name !== 'string')) {
-    throw new Error(`${CONFIG_FILE}: "fallback_order" must be an array of strings`);
-  }
-
-  const timeoutMs = config.timeout_ms === undefined
-    ? DEFAULT_TIMEOUT_MS
-    : config.timeout_ms;
-  if (typeof timeoutMs !== 'number' || !Number.isFinite(timeoutMs) || timeoutMs <= 0) {
-    throw new Error(`${CONFIG_FILE}: "timeout_ms" must be a positive number`);
-  }
-
-  const maxRetries = config.max_retries === undefined ? DEFAULT_MAX_RETRIES : config.max_retries;
-  if (!Number.isInteger(maxRetries) || maxRetries < 0) {
-    throw new Error(`${CONFIG_FILE}: "max_retries" must be a non-negative integer`);
-  }
-
-  const queueTimeoutMs = config.queue_timeout_ms === undefined
-    ? DEFAULT_QUEUE_TIMEOUT_MS
-    : config.queue_timeout_ms;
-  if (typeof queueTimeoutMs !== 'number' || !Number.isFinite(queueTimeoutMs) || queueTimeoutMs <= 0) {
-    throw new Error(`${CONFIG_FILE}: "queue_timeout_ms" must be a positive number`);
-  }
-
-  const museModels = config.muse_models === undefined ? {} : config.muse_models;
-  if (!museModels || typeof museModels !== 'object' || Array.isArray(museModels)) {
-    throw new Error(`${CONFIG_FILE}: "muse_models" must be an object`);
-  }
-  for (const [model, limit] of Object.entries(museModels)) {
-    if (!Number.isInteger(limit) || limit < 0) {
-      throw new Error(`${CONFIG_FILE}: muse_models["${model}"] must be a non-negative integer`);
-    }
-  }
-
-  return { endpoints, defaultName, fallbackOrder, timeoutMs, maxRetries, queueTimeoutMs, museModels };
-}
-
-function requireEndpoint(config, requested) {
-  const name = requested === undefined || requested === null || requested === ''
-    ? config.defaultName
-    : requested;
-  if (typeof name !== 'string') throw new Error('"endpoint" must be a string');
-  if (!Object.prototype.hasOwnProperty.call(config.endpoints, name)) {
-    throw new Error(`unknown endpoint "${name}". Available: ${Object.keys(config.endpoints).join(', ')}`);
-  }
-  return name;
-}
-
-// Resolves a member-specific backup chain. Omitted means "use the global
-// fallback_order"; "" means "no MCP fallback"; a name means "only this one".
-function parseFallbackEndpoint(config, requested) {
-  if (requested === undefined || requested === null) {
-    return { provided: false, name: null };
-  }
-  if (typeof requested !== 'string') {
-    throw new Error('"fallback_endpoint" must be a string');
-  }
-  if (requested === '') {
-    return { provided: true, name: null };
-  }
-  if (!Object.prototype.hasOwnProperty.call(config.endpoints, requested)) {
+  const member = config.squad.members[requested];
+  if (!member) {
     throw new Error(
-      `unknown fallback_endpoint "${requested}". Available: ${Object.keys(config.endpoints).join(', ')}`
+      `unknown squad member "${requested}". Available: ${Object.keys(config.squad.members).join(', ')}`
     );
   }
-  return { provided: true, name: requested };
+  const chain = [];
+  for (const name of [member.primary, ...member.fallback]) {
+    if (!chain.includes(name)) chain.push(name);
+  }
+  return { member, chain, providersByName: config.providers };
 }
 
-// --- Per-endpoint FIFO concurrency queues ---------------------------------
+// --- Per-provider FIFO concurrency queues ---------------------------------
+
+const providerQueues = new Map();
 
 function grantWaiters(state) {
   while (state.waiters.length > 0 && state.active < state.limit) {
@@ -1466,14 +1264,13 @@ function grantWaiters(state) {
 }
 
 function queueState(name, limit) {
-  let state = endpointQueues.get(name);
+  let state = providerQueues.get(name);
   if (!state) {
     state = { active: 0, limit, waiters: [] };
-    endpointQueues.set(name, state);
+    providerQueues.set(name, state);
   }
   if (state.limit !== limit) {
     // Hot reload: adopt the new limit without touching active slot counts.
-    // A raised limit may immediately unblock queued callers.
     state.limit = limit;
     grantWaiters(state);
   }
@@ -1501,18 +1298,16 @@ function acquireSlot(name, limit, queueTimeoutMs) {
       const index = state.waiters.indexOf(waiter);
       if (index === -1) return; // already granted
       state.waiters.splice(index, 1);
-      const error = new Error(
-        `queue timeout waiting for endpoint "${name}" after ${queueTimeoutMs}ms`
-      );
+      const error = new Error(`queue timeout waiting for provider "${name}" after ${queueTimeoutMs}ms`);
       error.queueTimeout = true;
-      error.retryable = false; // do not retry the same endpoint; let fallback decide
+      error.retryable = false; // let the member's next fallback decide
       reject(error);
     }, queueTimeoutMs);
   });
 }
 
 function queueSnapshot(name) {
-  const state = endpointQueues.get(name);
+  const state = providerQueues.get(name);
   return {
     activeCalls: state ? state.active : 0,
     queuedCalls: state ? state.waiters.length : 0
@@ -1528,15 +1323,15 @@ function isRetryable(error) {
   return true; // network failures and aborts
 }
 
-async function postChatOnce(endpoint, payload, timeoutMs) {
+async function postChatOnce(provider, payload) {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const timer = setTimeout(() => controller.abort(), provider.timeout_ms);
   let target;
   try {
-    target = new URL(`${endpoint.base_url.replace(/\/+$/, '')}/chat/completions`);
+    target = new URL(`${provider.base_url.replace(/\/+$/, '')}/chat/completions`);
   } catch (error) {
     clearTimeout(timer);
-    const invalid = new Error(`invalid base_url for "${endpoint.name}": ${error.message}`);
+    const invalid = new Error(`invalid base_url for "${provider.name}": ${error.message}`);
     invalid.retryable = false;
     throw invalid;
   }
@@ -1546,7 +1341,7 @@ async function postChatOnce(endpoint, payload, timeoutMs) {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        Authorization: `Bearer ${endpoint.api_key}`
+        Authorization: `Bearer ${provider.api_key || ''}`
       },
       body: JSON.stringify(payload),
       signal: controller.signal
@@ -1585,22 +1380,21 @@ async function postChatOnce(endpoint, payload, timeoutMs) {
   }
 }
 
-async function chatWithRetries(endpoint, payload, config) {
-  // One slot is held across the whole retry sequence for this endpoint, so a
-  // queued caller keeps its FIFO position and a slow retry cannot hog slots.
+async function chatWithRetries(provider, payload) {
+  // One slot is held across the whole retry sequence for this provider.
   const release = await acquireSlot(
-    endpoint.name,
-    endpoint.max_concurrency,
-    config.queueTimeoutMs
+    provider.name,
+    provider.max_concurrency,
+    provider.queue_timeout_ms
   );
   try {
     let lastError;
-    for (let attempt = 0; attempt <= config.maxRetries; attempt++) {
+    for (let attempt = 0; attempt <= provider.max_retries; attempt++) {
       try {
-        return await postChatOnce(endpoint, payload, config.timeoutMs);
+        return await postChatOnce(provider, payload);
       } catch (error) {
         lastError = error;
-        if (attempt >= config.maxRetries || !isRetryable(error)) break;
+        if (attempt >= provider.max_retries || !isRetryable(error)) break;
         await sleep(1000 * 2 ** attempt);
       }
     }
@@ -1625,23 +1419,22 @@ function redactExtra(extra) {
   return copy;
 }
 
-function buildPayload(endpoint, requestTemplate) {
+function buildPayload(provider, requestTemplate) {
   const { params } = requestTemplate;
   let system = requestTemplate.systemPrompt;
   let user = requestTemplate.userPrompt;
   let warning = '';
 
-  // KV-cache guard: keep oversized prompts away from small local contexts.
-  if (typeof endpoint.max_input_chars === 'number') {
-    const limit = endpoint.max_input_chars;
+  if (provider.max_input_chars !== undefined) {
+    const limit = provider.max_input_chars;
     const total = system.length + user.length;
     if (total > limit) {
-      if (endpoint.on_context_exceeded === 'fallback') {
+      if (provider.on_context_exceeded === 'fallback') {
         const error = new Error(
-          `input size ${total} exceeds max_input_chars ${limit} for endpoint "${endpoint.name}"`
+          `input size ${total} exceeds max_input_chars ${limit} for provider "${provider.name}"`
         );
         error.contextExceeded = true;
-        error.retryable = false; // let fallback try another endpoint, not a retry
+        error.retryable = false; // let the member's next fallback decide
         throw error;
       }
       if (system.length > limit) {
@@ -1650,26 +1443,24 @@ function buildPayload(endpoint, requestTemplate) {
       } else {
         user = user.slice(0, Math.max(0, limit - system.length));
       }
-      warning = `> *[Warning: Input truncated to max_input_chars for '${endpoint.name}']*\n\n`;
+      warning = `> *[Warning: Input truncated to max_input_chars for '${provider.name}']*\n\n`;
     }
   }
 
-  const extra = endpoint.extra_body && typeof endpoint.extra_body === 'object'
-    ? endpoint.extra_body
+  const extra = provider.extra_body && typeof provider.extra_body === 'object'
+    ? provider.extra_body
     : {};
-  const temperature = params.temperature === undefined
-    ? endpoint.temperature
-    : params.temperature;
+  const temperature = params.temperature === undefined ? provider.temperature : params.temperature;
   const maxTokens = params.max_tokens !== undefined
     ? params.max_tokens
-    : (Object.prototype.hasOwnProperty.call(extra, 'max_tokens') ? undefined : endpoint.max_tokens);
+    : (Object.prototype.hasOwnProperty.call(extra, 'max_tokens') ? undefined : provider.max_tokens);
 
   return {
     warning,
     payload: {
       ...extra, // backend-specific knobs first
       // Core fields are written last so a malformed extra_body cannot clobber them.
-      model: endpoint.model,
+      model: provider.model,
       messages: [
         { role: 'system', content: system },
         { role: 'user', content: user }
@@ -1681,109 +1472,150 @@ function buildPayload(endpoint, requestTemplate) {
   };
 }
 
-async function queryWithFallback(primaryName, requestTemplate, config, fallback = { provided: false, name: null }) {
-  const orderedNames = fallback.provided
-    ? (fallback.name ? [fallback.name] : [])
-    : config.fallbackOrder;
-  const candidates = [];
-  for (const name of [primaryName, ...orderedNames]) {
-    if (name && !candidates.includes(name)) candidates.push(name);
-  }
-
+async function queryWithMember(memberInfo, requestTemplate) {
   const attempts = [];
-  for (const name of candidates) {
-    const endpoint = config.endpoints[name];
-    if (!endpoint) {
-      attempts.push({ endpoint: name, error: 'not found in config' });
+  for (let index = 0; index < memberInfo.chain.length; index++) {
+    const name = memberInfo.chain[index];
+    const provider = memberInfo.providersByName[name];
+
+    if (!provider) {
+      attempts.push({ provider: name, error: 'provider not found in config' });
       continue;
     }
+    if (provider.type !== 'http') {
+      attempts.push({
+        provider: name,
+        type: 'native',
+        model: provider.model,
+        error: 'native providers cannot be called by the muse-squad MCP router'
+      });
+      continue;
+    }
+
     try {
-      // Build per endpoint: each fallback may have its own context limit,
-      // temperature, max_tokens, and extra_body.
-      const { payload, warning } = buildPayload({ ...endpoint, name }, requestTemplate);
-      const result = await chatWithRetries({ ...endpoint, name }, payload, config);
+      const { payload, warning } = buildPayload(provider, requestTemplate);
+      const result = await chatWithRetries(provider, payload);
       return {
         text: `${warning}${result.content}`,
         meta: {
-          primary: primaryName,
+          member: memberInfo.member.name,
+          primary: memberInfo.member.primary,
+          chain: memberInfo.chain,
           servedBy: name,
-          servedModel: endpoint.model,
+          servedProvider: name,
+          servedModel: provider.model,
           ...(result.upstreamModel ? { upstreamModel: result.upstreamModel } : {}),
           ...(result.usage ? { usage: result.usage } : {}),
-          fallbackUsed: name !== primaryName,
-          ...(fallback.provided ? { fallbackEndpoint: fallback.name, fallbackRestricted: true } : {}),
+          fallbackUsed: index > 0,
+          chainIndex: index,
           attempts
         }
       };
     } catch (error) {
-      attempts.push({ endpoint: name, model: endpoint.model, error: error.message });
+      attempts.push({ provider: name, type: 'http', model: provider.model, error: error.message });
     }
   }
-  throw new Error(`All endpoints failed:\n- ${attempts.map((item) => `${item.endpoint}: ${item.error}`).join('\n- ')}`);
+
+  throw new Error(
+    `Member "${memberInfo.member.name}" could not be served. Attempted providers:\n` +
+    attempts.map((item) => `- ${item.provider}${item.type ? ` (${item.type})` : ''}: ${item.error}`).join('\n')
+  );
+}
+
+function memberSummary(config, name) {
+  const selected = resolveMember(config, name);
+  const providers = selected.chain.map((providerName) => {
+    const provider = selected.providersByName[providerName];
+    return {
+      name: providerName,
+      type: provider.type,
+      model: provider.model,
+      callableByMcp: provider.type === 'http',
+      ...queueSnapshot(providerName)
+    };
+  });
+  return {
+    name: selected.member.name,
+    primary: selected.member.primary,
+    fallback: [...selected.member.fallback],
+    chain: selected.chain,
+    charter: selected.member.charter,
+    providers
+  };
+}
+
+function providerSummary(config, name) {
+  const provider = config.providers[name];
+  return {
+    name,
+    type: provider.type,
+    model: provider.model,
+    ...(provider.base_url === undefined ? {} : { baseUrl: provider.base_url }),
+    temperature: provider.temperature,
+    topP: provider.extra_body && provider.extra_body.top_p,
+    maxTokens: provider.max_tokens,
+    max_tokens: provider.max_tokens,
+    maxInputChars: provider.max_input_chars,
+    max_input_chars: provider.max_input_chars,
+    onContextExceeded: provider.on_context_exceeded,
+    on_context_exceeded: provider.on_context_exceeded,
+    extraBody: redactExtra(provider.extra_body),
+    extra_body: redactExtra(provider.extra_body),
+    maxConcurrency: provider.max_concurrency,
+    max_concurrency: provider.max_concurrency,
+    timeoutMs: provider.timeout_ms,
+    timeout_ms: provider.timeout_ms,
+    queueTimeoutMs: provider.queue_timeout_ms,
+    queue_timeout_ms: provider.queue_timeout_ms,
+    maxRetries: provider.max_retries,
+    max_retries: provider.max_retries,
+    apiKeyConfigured: provider.api_key === undefined ? false : Boolean(provider.api_key),
+    ...queueSnapshot(name)
+  };
 }
 
 async function callTool(name, args) {
   const params = args || {};
-  const loaded = tryLoadConfig();
-  if (!loaded.ok) {
-    if (name === 'coder_status' || name === 'list_endpoints') {
-      return unavailableResult(loaded);
-    }
-    throw new Error(loaded.warning);
-  }
-  const config = loaded.config;
+  const config = loadConfigOrThrow();
 
-  if (name === 'coder_status' || name === 'list_endpoints') {
-    const selected = name === 'coder_status' ? requireEndpoint(config, params.endpoint) : null;
-    const endpointInfo = (endpointName) => {
-      const endpoint = config.endpoints[endpointName];
-      return {
-        name: endpointName,
-        baseUrl: endpoint.base_url,
-        model: endpoint.model,
-        temperature: endpoint.temperature,
-        maxConcurrency: endpoint.max_concurrency,
-        max_concurrency: endpoint.max_concurrency,
-        maxTokens: endpoint.max_tokens,
-        max_tokens: endpoint.max_tokens,
-        maxInputChars: endpoint.max_input_chars,
-        max_input_chars: endpoint.max_input_chars,
-        onContextExceeded: endpoint.on_context_exceeded,
-        on_context_exceeded: endpoint.on_context_exceeded,
-        extraBody: redactExtra(endpoint.extra_body),
-        extra_body: redactExtra(endpoint.extra_body),
-        apiKeyConfigured: Boolean(endpoint.api_key),
-        ...queueSnapshot(endpointName)
-      };
-    };
-    const shared = {
+  if (name === 'member_status') {
+    const members = Object.keys(config.squad.members).map((memberName) =>
+      memberSummary(config, memberName)
+    );
+    const selected = params.member === undefined ? null : memberSummary(config, params.member);
+    const text = JSON.stringify({
       ok: true,
       available: true,
       configFile: CONFIG_FILE,
-      defaultEndpoint: config.defaultName,
-      fallbackOrder: config.fallbackOrder,
-      museModels: config.museModels,
-      muse_models: config.museModels,
-      maxRetries: config.maxRetries,
-      timeoutMs: config.timeoutMs,
-      queueTimeoutMs: config.queueTimeoutMs,
-      queue_timeout_ms: config.queueTimeoutMs
-    };
-    const text = name === 'list_endpoints'
-      ? JSON.stringify({
-        ...shared,
-        endpoints: Object.fromEntries(
-          Object.keys(config.endpoints).map((endpointName) => [
-            endpointName,
-            endpointInfo(endpointName)
-          ])
-        )
-      }, null, 2)
-      : JSON.stringify({
-        ...shared,
-        availableEndpoints: Object.keys(config.endpoints),
-        selected: endpointInfo(selected)
-      }, null, 2);
+      schema: config.schema,
+      squad: config.squad.name,
+      members,
+      ...(selected ? { selected } : {})
+    }, null, 2);
+    return { content: [{ type: 'text', text }] };
+  }
+
+  if (name === 'list_providers') {
+    const text = JSON.stringify({
+      ok: true,
+      available: true,
+      configFile: CONFIG_FILE,
+      schema: config.schema,
+      providers: Object.fromEntries(
+        Object.keys(config.providers).map((providerName) => [
+          providerName,
+          providerSummary(config, providerName)
+        ])
+      ),
+      members: Object.keys(config.squad.members).map((memberName) => {
+        const member = config.squad.members[memberName];
+        return {
+          name: memberName,
+          primary: member.primary,
+          fallback: [...member.fallback]
+        };
+      })
+    }, null, 2);
     return { content: [{ type: 'text', text }] };
   }
 
@@ -1791,8 +1623,7 @@ async function callTool(name, args) {
     if (typeof params.plan_markdown !== 'string' || params.plan_markdown.trim() === '') {
       throw new Error('critique_plan requires a non-empty "plan_markdown"');
     }
-    const primary = requireEndpoint(config, params.endpoint);
-    const fallback = parseFallbackEndpoint(config, params.fallback_endpoint);
+    const memberInfo = resolveMember(config, params.member);
     const user = [
       'PLAN MARKDOWN:',
       params.plan_markdown,
@@ -1802,12 +1633,11 @@ async function callTool(name, args) {
         ? params.repo_context
         : '(none provided)'
     ].join('\n');
-    const result = await queryWithFallback(
-      primary,
-      { systemPrompt: CRITIQUE_SYSTEM, userPrompt: user, params },
-      config,
-      fallback
-    );
+    const result = await queryWithMember(memberInfo, {
+      systemPrompt: CRITIQUE_SYSTEM,
+      userPrompt: user,
+      params
+    });
     return { content: [{ type: 'text', text: result.text }], meta: result.meta };
   }
 
@@ -1817,18 +1647,16 @@ async function callTool(name, args) {
       throw new Error('generate_code requires a non-empty "prompt" (or "task_spec")');
     }
     const context = typeof params.context === 'string' ? params.context : params.file_context;
-    const primary = requireEndpoint(config, params.endpoint);
-    const fallback = parseFallbackEndpoint(config, params.fallback_endpoint);
+    const memberInfo = resolveMember(config, params.member);
     const system = typeof params.system === 'string' && params.system.trim() ? params.system : DEFAULT_SYSTEM;
     const user = typeof context === 'string' && context.trim()
       ? `TASK:\n${prompt}\n\nRELEVANT CONTEXT:\n${context}`
       : `TASK:\n${prompt}`;
-    const result = await queryWithFallback(
-      primary,
-      { systemPrompt: system, userPrompt: user, params },
-      config,
-      fallback
-    );
+    const result = await queryWithMember(memberInfo, {
+      systemPrompt: system,
+      userPrompt: user,
+      params
+    });
     return { content: [{ type: 'text', text: result.text }], meta: result.meta };
   }
 
@@ -1897,13 +1725,534 @@ process.stdin.on('data', (chunk) => {
   while ((newline = buffer.indexOf('\n')) !== -1) {
     const line = buffer.slice(0, newline).trim();
     buffer = buffer.slice(newline + 1);
-    if (line) {
-      void handleLine(line);
-    }
+    if (line) void handleLine(line);
   }
 });
-process.stdin.on('end', () => process.exit(0));
-process.on('uncaughtException', (error) => log(`uncaught: ${error.message}`));
+
+module.exports = {
+  CONFIG_FILE,
+  SERVER_NAME,
+  SERVER_VERSION,
+  TOOLS,
+  callTool,
+  handleLine,
+  resolveMember
+};
+'@
+Install-File 'mcp/config.js' @'
+#!/usr/bin/env node
+'use strict';
+
+// Zero-dependency reader for muse-squad.toml.
+// Implements the small TOML subset used by muse-squad and validates the
+// single-file config so every other tool can trust the shape.
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const SCHEMA = 1;
+const PROVIDER_NAME_RE = /^[A-Za-z0-9._-]+$/;
+const MEMBER_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
+
+const PROVIDER_KEYS = new Set([
+  'type', 'base_url', 'api_key', 'model', 'temperature', 'top_p',
+  'max_tokens', 'max_input_chars', 'on_context_exceeded', 'extra_body',
+  'max_concurrency', 'timeout_ms', 'queue_timeout_ms', 'max_retries'
+]);
+const SQUAD_KEYS = new Set(['name', 'memory_dir']);
+const MEMBER_KEYS = new Set(['primary', 'fallback', 'charter']);
+
+function expandHome(value) {
+  return String(value).replace(/^~(?=$|[\\/])/, os.homedir());
+}
+
+function configPath(options = {}) {
+  const configDir = expandHome(options.config_dir || process.env.MUSE_CONFIG_DIR ||
+    path.join(os.homedir(), '.config', 'muse'));
+  return expandHome(options.config_file || process.env.MUSE_SQUAD_CONFIG_FILE ||
+    path.join(configDir, 'muse-squad.toml'));
+}
+
+function stripComment(text) {
+  let quote = null;
+  let escaped = false;
+  for (let i = 0; i < text.length; i++) {
+    const char = text[i];
+    if (escaped) {
+      escaped = false;
+      continue;
+    }
+    if (char === '\\' && quote === '"') {
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      continue;
+    }
+    if (char === '#') return text.slice(0, i);
+  }
+  return text;
+}
+
+function decodeBasic(value) {
+  let out = '';
+  for (let i = 0; i < value.length; i++) {
+    const char = value[i];
+    if (char !== '\\' || i + 1 >= value.length) {
+      out += char;
+      continue;
+    }
+    const next = value[++i];
+    const decoded = {
+      n: '\n',
+      t: '\t',
+      r: '\r',
+      b: '\b',
+      f: '\f',
+      '"': '"',
+      '\\': '\\'
+    }[next];
+    out += decoded === undefined ? `\\${next}` : decoded;
+  }
+  return out;
+}
+
+function parseScalar(raw, file, lineNo) {
+  const text = String(raw).trim();
+  if (!text) throw new Error(`${file}:${lineNo}: empty value`);
+
+  if (text === 'true') return true;
+  if (text === 'false') return false;
+
+  if (/^-?\d+$/.test(text)) {
+    const value = Number(text);
+    if (!Number.isSafeInteger(value)) throw new Error(`${file}:${lineNo}: integer out of range`);
+    return value;
+  }
+  if (/^-?\d+\.\d+$/.test(text)) {
+    const value = Number(text);
+    if (!Number.isFinite(value)) throw new Error(`${file}:${lineNo}: invalid number`);
+    return value;
+  }
+
+  if (text.startsWith('"""')) {
+    if (!text.endsWith('"""') || text.length < 6) {
+      throw new Error(`${file}:${lineNo}: unterminated multi-line string`);
+    }
+    return decodeBasic(text.slice(3, -3).replace(/^\r?\n/, ''));
+  }
+  if (text.startsWith("'''")) {
+    if (!text.endsWith("'''") || text.length < 6) {
+      throw new Error(`${file}:${lineNo}: unterminated multi-line string`);
+    }
+    return text.slice(3, -3).replace(/^\r?\n/, '');
+  }
+  if (text.startsWith('"')) {
+    if (!text.endsWith('"') || text.length < 2) {
+      throw new Error(`${file}:${lineNo}: unterminated string`);
+    }
+    return decodeBasic(text.slice(1, -1));
+  }
+  if (text.startsWith("'")) {
+    if (!text.endsWith("'") || text.length < 2) {
+      throw new Error(`${file}:${lineNo}: unterminated string`);
+    }
+    return text.slice(1, -1);
+  }
+
+  throw new Error(`${file}:${lineNo}: values must be quoted strings, numbers, booleans, or arrays`);
+}
+
+function splitArray(text, file, lineNo) {
+  const inner = text.slice(1, -1);
+  const items = [];
+  let current = '';
+  let quote = null;
+  let escaped = false;
+  for (const char of inner) {
+    if (escaped) {
+      current += char;
+      escaped = false;
+      continue;
+    }
+    if (char === '\\' && quote === '"') {
+      current += char;
+      escaped = true;
+      continue;
+    }
+    if (quote) {
+      current += char;
+      if (char === quote) quote = null;
+      continue;
+    }
+    if (char === '"' || char === "'") {
+      quote = char;
+      current += char;
+      continue;
+    }
+    if (char === ',') {
+      items.push(current.trim());
+      current = '';
+      continue;
+    }
+    current += char;
+  }
+  if (quote) throw new Error(`${file}:${lineNo}: unterminated string in array`);
+  if (current.trim()) items.push(current.trim());
+  return items;
+}
+
+function parseToml(raw, file) {
+  const lines = String(raw).replace(/^\uFEFF/, '').split(/\r?\n/);
+  const root = {};
+  let table = root;
+
+  for (let i = 0; i < lines.length; i++) {
+    const lineNo = i + 1;
+    const line = lines[i];
+    const trimmed = stripComment(line).trim();
+    if (!trimmed) continue;
+
+    const tableMatch = trimmed.match(/^\[([^\[\]]+)\]$/);
+    if (tableMatch) {
+      const parts = tableMatch[1].trim().split('.').map((part) => part.trim());
+      if (parts.some((part) => !part)) throw new Error(`${file}:${lineNo}: invalid table name`);
+      table = root;
+      for (const part of parts) {
+        if (table[part] === undefined) table[part] = {};
+        if (!table[part] || typeof table[part] !== 'object' || Array.isArray(table[part])) {
+          throw new Error(`${file}:${lineNo}: table conflict at ${part}`);
+        }
+        table = table[part];
+      }
+      continue;
+    }
+
+    const keyMatch = line.match(/^\s*([A-Za-z0-9_.-]+)\s*=\s*([\s\S]*)$/);
+    if (!keyMatch) throw new Error(`${file}:${lineNo}: cannot parse line: ${line}`);
+    const key = keyMatch[1];
+    let valueText = stripComment(keyMatch[2]).trim();
+    const rawValueText = keyMatch[2].trim();
+
+    const multilineMatch = rawValueText.match(/^("""|''')/);
+    if (multilineMatch && rawValueText.indexOf(multilineMatch[1], 3) === -1) {
+      const delimiter = multilineMatch[1];
+      const collected = [rawValueText.slice(3)];
+      let closed = false;
+      while (++i < lines.length) {
+        const next = lines[i];
+        const end = next.indexOf(delimiter);
+        if (end >= 0) {
+          collected.push(next.slice(0, end));
+          closed = true;
+          break;
+        }
+        collected.push(next);
+      }
+      if (!closed) throw new Error(`${file}:${lineNo}: unterminated multi-line string`);
+      valueText = `${delimiter}${collected.join('\n')}${delimiter}`;
+    }
+
+    if (valueText.startsWith('[')) {
+      if (!valueText.endsWith(']')) throw new Error(`${file}:${lineNo}: unterminated array`);
+      table[key] = splitArray(valueText, file, lineNo).map((item) => parseScalar(item, file, lineNo));
+    } else {
+      table[key] = parseScalar(valueText, file, lineNo);
+    }
+  }
+  return root;
+}
+
+function expandEnv(value, file, keyPath) {
+  if (Array.isArray(value)) return value.map((item) => expandEnv(item, file, keyPath));
+  if (value && typeof value === 'object') {
+    const copy = {};
+    for (const [key, item] of Object.entries(value)) {
+      copy[key] = expandEnv(item, file, keyPath ? `${keyPath}.${key}` : key);
+    }
+    return copy;
+  }
+  if (typeof value !== 'string') return value;
+  const key = String(keyPath || '').split('.').pop();
+  if (key !== 'api_key' || !value.includes('${')) return value;
+  return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (match, name) => {
+    const resolved = process.env[name];
+    if (resolved === undefined || resolved === '') {
+      throw new Error(`${file}: ${keyPath} references unset environment variable ${name}`);
+    }
+    return resolved;
+  });
+}
+
+function requireObject(value, label) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    throw new Error(`${label} must be a table`);
+  }
+  return value;
+}
+
+function requireString(value, label, { allowEmpty = false } = {}) {
+  if (typeof value !== 'string' || (!allowEmpty && !value.trim())) {
+    throw new Error(`${label} must be a non-empty string`);
+  }
+  return value;
+}
+
+function requireInteger(value, label, { min = 1, fallback } = {}) {
+  if (value === undefined && fallback !== undefined) return fallback;
+  if (!Number.isInteger(value) || value < min) {
+    throw new Error(`${label} must be an integer >= ${min}`);
+  }
+  return value;
+}
+
+function requireNumber(value, label, { min = 0, fallback } = {}) {
+  if (value === undefined && fallback !== undefined) return fallback;
+  if (typeof value !== 'number' || !Number.isFinite(value) || value <= min) {
+    throw new Error(`${label} must be a number > ${min}`);
+  }
+  return value;
+}
+
+function checkKeys(table, allowed, label) {
+  for (const key of Object.keys(table)) {
+    if (!allowed.has(key)) throw new Error(`${label}: unknown setting "${key}"`);
+  }
+}
+
+function normalizeProvider(name, raw, file) {
+  const label = `${file}: provider "${name}"`;
+  requireObject(raw, label);
+  checkKeys(raw, PROVIDER_KEYS, label);
+
+  const type = requireString(raw.type, `${label}.type`);
+  if (type !== 'http' && type !== 'native') {
+    throw new Error(`${label}.type must be "http" or "native"`);
+  }
+  if (type === 'native' && (raw.base_url !== undefined || raw.api_key !== undefined)) {
+    throw new Error(`${label}: native providers cannot declare base_url or api_key`);
+  }
+
+  const extraBody = raw.extra_body === undefined ? {} : raw.extra_body;
+  requireObject(extraBody, `${label}.extra_body`);
+  if (raw.top_p !== undefined && extraBody.top_p === undefined) {
+    extraBody.top_p = requireNumber(raw.top_p, `${label}.top_p`, { min: -Infinity });
+  }
+
+  const provider = {
+    name,
+    type,
+    model: requireString(raw.model, `${label}.model`),
+    temperature: raw.temperature === undefined
+      ? undefined
+      : requireNumber(raw.temperature, `${label}.temperature`, { min: -Infinity }),
+    max_tokens: raw.max_tokens === undefined
+      ? undefined
+      : requireInteger(raw.max_tokens, `${label}.max_tokens`),
+    max_input_chars: raw.max_input_chars === undefined
+      ? undefined
+      : requireInteger(raw.max_input_chars, `${label}.max_input_chars`),
+    on_context_exceeded: raw.on_context_exceeded === undefined ? 'truncate' : raw.on_context_exceeded,
+    extra_body: JSON.parse(JSON.stringify(extraBody)),
+    max_concurrency: requireInteger(raw.max_concurrency, `${label}.max_concurrency`, { fallback: 1 }),
+    timeout_ms: requireInteger(raw.timeout_ms, `${label}.timeout_ms`, { fallback: 600000 }),
+    queue_timeout_ms: requireInteger(raw.queue_timeout_ms, `${label}.queue_timeout_ms`, { fallback: 300000 }),
+    max_retries: requireInteger(raw.max_retries, `${label}.max_retries`, { min: 0, fallback: 2 })
+  };
+
+  if (provider.on_context_exceeded !== 'truncate' && provider.on_context_exceeded !== 'fallback') {
+    throw new Error(`${label}.on_context_exceeded must be "truncate" or "fallback"`);
+  }
+  if (type === 'http') {
+    provider.base_url = requireString(raw.base_url, `${label}.base_url`);
+    provider.api_key = raw.api_key === undefined
+      ? ''
+      : requireString(raw.api_key, `${label}.api_key`, { allowEmpty: true });
+  }
+  return provider;
+}
+
+function normalizeMember(name, raw, file) {
+  const label = `${file}: member "${name}"`;
+  requireObject(raw, label);
+  checkKeys(raw, MEMBER_KEYS, label);
+
+  const fallback = raw.fallback === undefined ? [] : raw.fallback;
+  if (!Array.isArray(fallback) || fallback.some((item) => typeof item !== 'string' || !item.trim())) {
+    throw new Error(`${label}.fallback must be an array of provider names`);
+  }
+  const primary = requireString(raw.primary, `${label}.primary`);
+  if (fallback.includes(primary)) {
+    throw new Error(`${label}.fallback must not repeat the primary provider`);
+  }
+  if (new Set(fallback).size !== fallback.length) {
+    throw new Error(`${label}.fallback must not contain duplicate providers`);
+  }
+  return {
+    name,
+    primary,
+    fallback: [...fallback],
+    charter: requireString(raw.charter, `${label}.charter`)
+  };
+}
+
+function validateConfig(raw, file) {
+  checkKeys(raw, new Set(['schema', 'providers', 'squad']), file);
+  if (raw.schema !== SCHEMA) throw new Error(`${file}: schema must be ${SCHEMA}`);
+
+  const providerTable = requireObject(raw.providers, `${file}: providers`);
+  const providerNames = Object.keys(providerTable);
+  if (providerNames.length === 0) throw new Error(`${file}: at least one provider is required`);
+  const providers = {};
+  for (const name of providerNames) {
+    if (!PROVIDER_NAME_RE.test(name)) throw new Error(`${file}: invalid provider name "${name}"`);
+    providers[name] = normalizeProvider(name, providerTable[name], file);
+  }
+
+  const squadTable = requireObject(raw.squad, `${file}: squad`);
+  const memberNames = Object.keys(squadTable).filter(
+    (key) => !SQUAD_KEYS.has(key) && MEMBER_NAME_RE.test(key)
+  );
+  for (const key of Object.keys(squadTable)) {
+    if (!SQUAD_KEYS.has(key) && !memberNames.includes(key)) {
+      throw new Error(`${file}: squad: unknown setting "${key}"`);
+    }
+  }
+  if (memberNames.length === 0) throw new Error(`${file}: at least one squad member is required`);
+  const members = {};
+  for (const name of memberNames) {
+    members[name] = normalizeMember(name, squadTable[name], file);
+  }
+
+  for (const member of Object.values(members)) {
+    for (const providerName of [member.primary, ...member.fallback]) {
+      if (!Object.prototype.hasOwnProperty.call(providers, providerName)) {
+        throw new Error(`${file}: member "${member.name}" references unknown provider "${providerName}"`);
+      }
+    }
+  }
+
+  return {
+    schema: SCHEMA,
+    file,
+    squad: {
+      name: typeof squadTable.name === 'string' && squadTable.name ? squadTable.name : 'Muse Squad',
+      memory_dir: typeof squadTable.memory_dir === 'string' && squadTable.memory_dir
+        ? squadTable.memory_dir
+        : '.muse/squad',
+      members
+    },
+    providers
+  };
+}
+
+function loadConfig(options = {}) {
+  const file = configPath(options);
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    if (error && error.code === 'ENOENT') throw new Error(`config file not found: ${file}`);
+    throw new Error(`cannot read ${file}: ${error.message}`);
+  }
+  const parsed = parseToml(raw, file);
+  return validateConfig(expandEnv(parsed, file, ''), file);
+}
+
+function redactSecrets(value) {
+  if (Array.isArray(value)) return value.map(redactSecrets);
+  if (value && typeof value === 'object') {
+    const copy = {};
+    for (const [key, item] of Object.entries(value)) {
+      if (/^(api[_-]?key|authorization|secret|password|token)$/i.test(key)) {
+        copy[key] = item ? '<redacted>' : '';
+      } else {
+        copy[key] = redactSecrets(item);
+      }
+    }
+    return copy;
+  }
+  return value;
+}
+
+function redactConfig(config) {
+  return redactSecrets(JSON.parse(JSON.stringify(config)));
+}
+
+const USAGE = [
+  'Usage: node config.js [options]',
+  '',
+  'Options:',
+  '  --config-dir PATH   Muse config directory (default: ~/.config/muse)',
+  '  --dir PATH          Alias for --config-dir',
+  '  --file PATH         Explicit config file',
+  '  --json              Emit the parsed config as JSON',
+  '  --list-providers    Emit provider names, one per line',
+  '  --show-secrets      Include api_key values in JSON output',
+  '  --help, -h          Show this help',
+  '',
+  'Environment: MUSE_CONFIG_DIR, MUSE_SQUAD_CONFIG_FILE'
+].join('\n');
+
+function parseArgs(argv) {
+  const opts = { json: false, listProviders: false, showSecrets: false };
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--help' || arg === '-h') opts.help = true;
+    else if (arg === '--json') opts.json = true;
+    else if (arg === '--list-providers') opts.listProviders = true;
+    else if (arg === '--show-secrets') opts.showSecrets = true;
+    else if (arg === '--config-dir' || arg === '--dir' || arg === '--file') {
+      const value = argv[++i];
+      if (!value) throw new Error(`${arg} requires a value`);
+      if (arg === '--file') opts.config_file = value;
+      else opts.config_dir = value;
+    } else {
+      throw new Error(`unknown option: ${arg}`);
+    }
+  }
+  return opts;
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  if (opts.help) {
+    process.stdout.write(`${USAGE}\n`);
+    return;
+  }
+  const config = loadConfig(opts);
+  if (opts.listProviders) {
+    process.stdout.write(`${Object.keys(config.providers).join('\n')}\n`);
+  } else if (opts.json) {
+    const output = opts.showSecrets ? config : redactConfig(config);
+    process.stdout.write(`${JSON.stringify(output, null, 2)}\n`);
+  }
+}
+
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write(`config: ${error.message}\n`);
+    process.exitCode = 2;
+  }
+}
+
+module.exports = {
+  SCHEMA,
+  configPath,
+  expandHome,
+  loadConfig,
+  parseToml,
+  redactConfig,
+  validateConfig
+};
 '@
 Install-File 'mcp/doctor.js' @'
 #!/usr/bin/env node
@@ -1915,14 +2264,16 @@ Install-File 'mcp/doctor.js' @'
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const configModule = require('./config.js');
 const {
   GENERATED_MARKER,
-  endpointAliases,
   buildRoster,
-  buildWrapper,
-  expandHome
+  buildWrapper
 } = require('./sync-team.js');
 
+const SERVER_NAME = 'muse-squad';
+const LEGACY_SERVER = 'custom-coder';
+const GENERIC_AGENTS = ['worker', 'plan-reviewer', 'general-purpose'];
 const DEFAULT_TIMEOUT_MS = 5000;
 const USAGE = [
   'Usage: node doctor.js [options]',
@@ -1930,11 +2281,12 @@ const USAGE = [
   'Options:',
   '  --config-dir PATH   Muse config directory (default: ~/.config/muse)',
   '  --dir PATH          Alias for --config-dir',
-  '  --timeout-ms N      Per-endpoint HTTP timeout (default: 5000)',
+  '  --file PATH         Explicit muse-squad.toml path',
+  '  --timeout-ms N      Per-provider HTTP timeout (default: 5000)',
   '  --json              Emit a JSON report',
   '  --help, -h          Show this help',
   '',
-  'Environment: MUSE_CONFIG_DIR, MODELS_CONFIG_FILE'
+  'Environment: MUSE_CONFIG_DIR, MUSE_SQUAD_CONFIG_FILE'
 ].join('\n');
 
 function parseArgs(argv) {
@@ -1945,7 +2297,7 @@ function parseArgs(argv) {
       opts.help = true;
     } else if (arg === '--json') {
       opts.json = true;
-    } else if (arg === '--config-dir' || arg === '--dir' || arg === '--timeout-ms') {
+    } else if (arg === '--config-dir' || arg === '--dir' || arg === '--file' || arg === '--timeout-ms') {
       const value = argv[++i];
       if (!value) throw new Error(`${arg} requires a value`);
       if (arg === '--timeout-ms') {
@@ -1954,6 +2306,8 @@ function parseArgs(argv) {
           throw new Error('--timeout-ms must be a positive integer');
         }
         opts.timeout_ms = timeout;
+      } else if (arg === '--file') {
+        opts.config_file = value;
       } else {
         opts.config_dir = value;
       }
@@ -1985,7 +2339,7 @@ function redact(value, secrets) {
   return text;
 }
 
-function checkSettings(configDir) {
+function checkSettings(configDir, configFile) {
   const settingsFile = path.join(configDir, 'settings.json');
   const loaded = loadJson(settingsFile);
   if (loaded.error) {
@@ -1996,15 +2350,16 @@ function checkSettings(configDir) {
         : `cannot parse ${settingsFile}: ${loaded.error}`
     };
   }
+
   const settings = loaded.data;
   const servers = settings && settings.mcpServers;
   const entry = servers && typeof servers === 'object' && !Array.isArray(servers)
-    ? servers['custom-coder']
+    ? servers[SERVER_NAME]
     : null;
   if (!entry || typeof entry !== 'object') {
     return {
       name: 'settings.json', status: 'MISSING', ok: false,
-      detail: 'custom-coder is not registered under mcpServers'
+      detail: `${SERVER_NAME} is not registered under mcpServers`
     };
   }
 
@@ -2013,16 +2368,19 @@ function checkSettings(configDir) {
   const foundBridge = args.find((arg) => path.resolve(String(arg)) === path.resolve(bridge));
   const commandName = path.basename(String(entry.command || '')).toLowerCase();
   const commandOk = commandName === 'node' || commandName === 'node.exe';
-  const expectedConfig = path.join(configDir, 'endpoints.json');
-  const configuredEnv = entry.env && entry.env.MODELS_CONFIG_FILE;
-  const configOk = !configuredEnv ||
-    path.resolve(expandHome(configuredEnv)) === path.resolve(expectedConfig);
-  const ok = Boolean(foundBridge && commandOk && configOk);
+  const configuredEnv = entry.env && entry.env.MUSE_SQUAD_CONFIG_FILE;
+  const configOk = Boolean(configuredEnv) &&
+    path.resolve(configModule.expandHome(configuredEnv)) === path.resolve(configFile);
+  const legacyRegistered = (servers && Object.prototype.hasOwnProperty.call(servers, LEGACY_SERVER)) ||
+    (settings.mcp_servers && Object.prototype.hasOwnProperty.call(settings.mcp_servers, LEGACY_SERVER));
+  const ok = Boolean(foundBridge && commandOk && configOk && !legacyRegistered);
+
   const bits = [
     `command=${entry.command || '(none)'}`,
-    `bridge=${foundBridge || '(missing)'}`
+    `bridge=${foundBridge || '(missing)'}`,
+    `config=${configuredEnv || '(missing)'}`
   ];
-  if (!configOk) bits.push(`config=${configuredEnv}`);
+  if (legacyRegistered) bits.push(`legacy ${LEGACY_SERVER} still registered`);
   return { name: 'settings.json', status: ok ? 'OK' : 'BAD', ok, detail: bits.join(' ') };
 }
 
@@ -2033,37 +2391,32 @@ function modelsUrl(baseUrl) {
   return `${trimmed}/v1/models`;
 }
 
-async function checkEndpoints(configFile, timeoutMs, secrets) {
-  const loaded = loadJson(configFile);
-  if (loaded.error) {
+async function checkProviders(config, timeoutMs, secrets) {
+  if (!config) {
     return [{
-      alias: 'endpoints.json', status: 'MISSING', ok: false,
-      detail: loaded.error === 'file not found'
-        ? `${configFile} not found`
-        : `cannot parse ${configFile}: ${loaded.error}`
+      provider: '(config)', status: 'BAD', ok: false,
+      detail: 'provider check skipped because the config is invalid'
     }];
-  }
-  const endpoints = loaded.data && loaded.data.endpoints;
-  if (!endpoints || typeof endpoints !== 'object' || Array.isArray(endpoints) ||
-      Object.keys(endpoints).length === 0) {
-    return [{ alias: 'endpoints.json', status: 'EMPTY', ok: false, detail: 'no endpoints configured' }];
-  }
-
-  for (const endpoint of Object.values(endpoints)) {
-    if (endpoint && typeof endpoint === 'object' && endpoint.api_key) {
-      secrets.add(String(endpoint.api_key));
-    }
   }
 
   const results = [];
-  for (const [alias, endpoint] of Object.entries(endpoints)) {
-    if (!endpoint || typeof endpoint !== 'object' || !endpoint.base_url) {
-      results.push({ alias, status: 'BAD', ok: false, detail: 'missing base_url' });
+  for (const provider of Object.values(config.providers)) {
+    for (const secret of [provider.api_key]) {
+      if (secret) secrets.add(String(secret));
+    }
+
+    if (provider.type === 'native') {
+      results.push({
+        provider: provider.name,
+        status: 'NATIVE',
+        ok: true,
+        detail: `model ${provider.model} (not pinged; advisory max_concurrency ${provider.max_concurrency})`
+      });
       continue;
     }
-    const url = modelsUrl(endpoint.base_url);
-    const headers = {};
-    if (endpoint.api_key) headers.Authorization = `Bearer ${endpoint.api_key}`;
+
+    const url = modelsUrl(provider.base_url);
+    const headers = provider.api_key ? { Authorization: `Bearer ${provider.api_key}` } : {};
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -2078,16 +2431,18 @@ async function checkEndpoints(configFile, timeoutMs, secrets) {
       const status = response.ok ? 'OK'
         : (response.status === 401 || response.status === 403 ? 'AUTH' : 'HTTP');
       results.push({
-        alias, status, ok: response.ok,
+        provider: provider.name,
+        status,
+        ok: response.ok,
         detail: redact(`${url} ${response.status}${hint}`, secrets)
       });
     } catch (error) {
       const timedOut = error && error.name === 'AbortError';
       results.push({
-        alias,
+        provider: provider.name,
         status: timedOut ? 'TIMEOUT' : 'DOWN',
         ok: false,
-        detail: `${url} ${redact(error && error.message || error, secrets)}`
+        detail: redact(`${url} ${error && error.message || error}`, secrets)
       });
     } finally {
       clearTimeout(timer);
@@ -2096,64 +2451,45 @@ async function checkEndpoints(configFile, timeoutMs, secrets) {
   return results;
 }
 
-function checkRoster(configDir, endpointsFile) {
-  const teamFile = path.join(configDir, 'squad-team.json');
-  const loaded = loadJson(teamFile);
-  if (loaded.error) {
+function checkRoster(config, configFile, configDir) {
+  if (!config) {
     return {
-      name: 'squad-team.json', status: 'MISSING', ok: false,
-      detail: loaded.error === 'file not found'
-        ? `${teamFile} not found`
-        : `cannot parse ${teamFile}: ${loaded.error}`
+      name: 'muse-squad.toml', status: 'SKIP', ok: false,
+      detail: 'roster check skipped because the config is invalid'
     };
   }
-  const team = loaded.data;
-  if (!team || !Array.isArray(team.members) || team.members.length === 0) {
-    return {
-      name: 'squad-team.json', status: 'BAD', ok: false,
-      detail: 'squad-team.json has no members'
-    };
-  }
-  const endpointData = loadJson(endpointsFile).data || null;
-  const aliases = endpointAliases(endpointData);
-  const issues = [];
-  const expectedNames = new Set();
 
-  for (const member of team.members) {
-    const name = member && member.name;
-    if (typeof name !== 'string' || !name) {
-      issues.push('member without a name');
-      continue;
-    }
-    expectedNames.add(name);
-    try {
-      const wrapper = path.join(configDir, 'agents', `${name}.md`);
-      if (!fs.existsSync(wrapper)) {
-        issues.push(`@${name} wrapper missing`);
-        continue;
-      }
-      const expected = buildWrapper(member, team, aliases);
-      const actual = fs.readFileSync(wrapper, 'utf8');
-      if (normalized(actual) !== normalized(expected)) {
-        issues.push(`@${name} wrapper out of sync`);
-      }
-    } catch (error) {
-      issues.push(`@${name} cannot verify: ${error.message}`);
-    }
-  }
+  const issues = [];
+  const expectedNames = new Set(Object.keys(config.squad.members));
 
   const roster = path.join(configDir, 'squad', 'team.md');
   try {
     if (!fs.existsSync(roster)) {
       issues.push('squad/team.md missing');
     } else {
-      const expected = buildRoster(team, team.members, aliases, teamFile);
+      const expected = buildRoster(config, configFile);
       if (normalized(fs.readFileSync(roster, 'utf8')) !== normalized(expected)) {
         issues.push('squad/team.md out of sync');
       }
     }
   } catch (error) {
     issues.push(`squad/team.md cannot verify: ${error.message}`);
+  }
+
+  for (const name of expectedNames) {
+    try {
+      const wrapper = path.join(configDir, 'agents', `${name}.md`);
+      if (!fs.existsSync(wrapper)) {
+        issues.push(`@${name} wrapper missing`);
+        continue;
+      }
+      const expected = buildWrapper(config, name, configFile);
+      if (normalized(fs.readFileSync(wrapper, 'utf8')) !== normalized(expected)) {
+        issues.push(`@${name} wrapper out of sync`);
+      }
+    } catch (error) {
+      issues.push(`@${name} cannot verify: ${error.message}`);
+    }
   }
 
   const agentsDir = path.join(configDir, 'agents');
@@ -2167,13 +2503,19 @@ function checkRoster(configDir, endpointsFile) {
     }
   }
 
+  for (const name of GENERIC_AGENTS) {
+    if (fs.existsSync(path.join(agentsDir, `${name}.md`))) {
+      issues.push(`generic agent ${name}.md still present`);
+    }
+  }
+
   const ok = issues.length === 0;
   return {
-    name: 'squad-team.json',
+    name: 'muse-squad.toml',
     status: ok ? 'OK' : 'BAD',
     ok,
     detail: ok
-      ? `${team.members.length} members, wrappers and roster in sync`
+      ? `${expectedNames.size} members; roster and wrappers in sync; no generic agents`
       : issues.join('; ')
   };
 }
@@ -2182,9 +2524,10 @@ function renderText(report) {
   const pad = (value, size) => String(value).padEnd(size);
   const lines = ['squad-doctor', ''];
   lines.push(`  ${pad(report.checks.settings.name, 16)} ${pad(report.checks.settings.status, 7)} ${report.checks.settings.detail}`);
-  lines.push('  endpoints');
-  for (const endpoint of report.checks.endpoints) {
-    lines.push(`    ${pad(endpoint.alias, 16)} ${pad(endpoint.status, 7)} ${endpoint.detail}`);
+  lines.push(`  ${pad(report.checks.config.name, 16)} ${pad(report.checks.config.status, 7)} ${report.checks.config.detail}`);
+  lines.push('  providers');
+  for (const provider of report.checks.providers) {
+    lines.push(`    ${pad(provider.provider, 16)} ${pad(provider.status, 7)} ${provider.detail}`);
   }
   lines.push(`  ${pad(report.checks.roster.name, 16)} ${pad(report.checks.roster.status, 7)} ${report.checks.roster.detail}`);
   lines.push('');
@@ -2201,17 +2544,35 @@ async function main() {
     return;
   }
 
-  const configDir = expandHome(opts.config_dir || process.env.MUSE_CONFIG_DIR ||
+  const configDir = configModule.expandHome(opts.config_dir || process.env.MUSE_CONFIG_DIR ||
     path.join(os.homedir(), '.config', 'muse'));
-  const endpointsFile = expandHome(process.env.MODELS_CONFIG_FILE ||
-    path.join(configDir, 'endpoints.json'));
+  const configFile = configModule.configPath(opts);
   const secrets = new Set();
 
-  const settings = checkSettings(configDir);
-  const endpoints = await checkEndpoints(endpointsFile, opts.timeout_ms, secrets);
-  const roster = checkRoster(configDir, endpointsFile);
-  const checks = { settings, endpoints, roster };
-  const problems = [settings, ...endpoints, roster].filter((check) => !check.ok).length;
+  let config = null;
+  let configCheck;
+  try {
+    config = configModule.loadConfig({ config_file: configFile });
+    for (const provider of Object.values(config.providers)) {
+      if (provider.api_key) secrets.add(String(provider.api_key));
+    }
+    configCheck = {
+      name: 'muse-squad.toml',
+      status: 'OK',
+      ok: true,
+      detail: `${Object.keys(config.providers).length} providers, ${Object.keys(config.squad.members).length} members, schema ${config.schema}`
+    };
+  } catch (error) {
+    configCheck = {
+      name: 'muse-squad.toml', status: 'BAD', ok: false, detail: error.message
+    };
+  }
+
+  const settings = checkSettings(configDir, configFile);
+  const providers = await checkProviders(config, opts.timeout_ms, secrets);
+  const roster = checkRoster(config, configFile, configDir);
+  const checks = { settings, config: configCheck, providers, roster };
+  const problems = [settings, configCheck, ...providers, roster].filter((check) => !check.ok).length;
   const report = { ok: problems === 0, problems, checks };
 
   process.stdout.write(opts.json ? `${JSON.stringify(report, null, 2)}\n` : renderText(report));
@@ -2227,11 +2588,14 @@ Install-File 'mcp/register-settings.js' @'
 #!/usr/bin/env node
 'use strict';
 
-// Merges the custom-coder MCP entry into Muse Code's settings.json without
+// Merges the muse-squad MCP entry into Muse Code's settings.json without
 // disturbing any other settings or MCP servers.
 
 const fs = require('fs');
 const path = require('path');
+
+const SERVER_NAME = 'muse-squad';
+const LEGACY_SERVER = 'custom-coder';
 
 function option(flag) {
   const index = process.argv.indexOf(flag);
@@ -2291,30 +2655,39 @@ function main() {
     : null;
 
   if (unregister) {
-    const removedCurrent = Object.prototype.hasOwnProperty.call(settings.mcpServers, 'custom-coder');
-    const removedLegacy = !!(legacy && Object.prototype.hasOwnProperty.call(legacy, 'custom-coder'));
+    const removedCurrent = Object.prototype.hasOwnProperty.call(settings.mcpServers, SERVER_NAME);
+    const removedLegacy = Object.prototype.hasOwnProperty.call(settings.mcpServers, LEGACY_SERVER) ||
+      !!(legacy && Object.prototype.hasOwnProperty.call(legacy, LEGACY_SERVER));
     if (!removedCurrent && !removedLegacy) {
-      console.log('  unchanged  custom-coder not registered');
+      console.log(`  unchanged  ${SERVER_NAME} not registered`);
       return;
     }
-    if (removedCurrent) delete settings.mcpServers['custom-coder'];
-    if (removedLegacy) delete legacy['custom-coder'];
+    if (removedCurrent) delete settings.mcpServers[SERVER_NAME];
+    if (Object.prototype.hasOwnProperty.call(settings.mcpServers, LEGACY_SERVER)) {
+      delete settings.mcpServers[LEGACY_SERVER];
+    }
+    if (legacy && Object.prototype.hasOwnProperty.call(legacy, LEGACY_SERVER)) {
+      delete legacy[LEGACY_SERVER];
+    }
   } else {
     if (!bridgePath || !configFile) {
       console.error('register-settings.js: --bridge and --config-file are required');
       process.exit(2);
     }
-    settings.mcpServers['custom-coder'] = {
+    settings.mcpServers[SERVER_NAME] = {
       transport: 'stdio',
       command: 'node',
       args: [bridgePath],
       env: {
-        MODELS_CONFIG_FILE: configFile
+        MUSE_SQUAD_CONFIG_FILE: configFile
       },
       mode: 'optional'
     };
-    if (legacy && Object.prototype.hasOwnProperty.call(legacy, 'custom-coder')) {
-      delete legacy['custom-coder'];
+    if (Object.prototype.hasOwnProperty.call(settings.mcpServers, LEGACY_SERVER)) {
+      delete settings.mcpServers[LEGACY_SERVER];
+    }
+    if (legacy && Object.prototype.hasOwnProperty.call(legacy, LEGACY_SERVER)) {
+      delete legacy[LEGACY_SERVER];
     }
   }
 
@@ -2335,7 +2708,7 @@ function main() {
     console.log(`  backed up  ${settingsPath} -> ${backup}`);
   }
   writeSettings(settings);
-  console.log(`  ${unregister ? 'unregistered' : 'registered'}  custom-coder in ${settingsPath}`);
+  console.log(`  ${unregister ? 'unregistered' : 'registered'}  ${SERVER_NAME} in ${settingsPath}`);
 }
 
 try {
@@ -2349,17 +2722,16 @@ Install-File 'mcp/sync-team.js' @'
 #!/usr/bin/env node
 'use strict';
 
-// Materializes the persistent named team from squad-team.json into native
-// Muse agent wrappers and a human-readable roster. Zero npm dependencies.
+// Materializes the single muse-squad.toml roster into native Muse agent
+// wrappers and a human-readable roster. Zero npm dependencies.
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const configModule = require('./config.js');
 
 const GENERATED_MARKER =
-  '<!-- Generated by muse-squad sync-team.js; edit squad-team.json and re-run the installer. -->';
-const RESERVED_AGENTS = new Set(['worker', 'plan-reviewer', 'general-purpose']);
-const NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
+  '<!-- Generated by muse-squad sync-team.js; edit muse-squad.toml and re-run the installer. -->';
 const RUNNER_MODEL = 'muse-ember-1.0';
 
 function die(message) {
@@ -2367,12 +2739,12 @@ function die(message) {
   process.exit(1);
 }
 
-function warn(message) {
-  process.stderr.write(`sync-team: warning: ${message}\n`);
-}
-
 function log(message) {
   process.stdout.write(`${message}\n`);
+}
+
+function warn(message) {
+  process.stderr.write(`sync-team: warning: ${message}\n`);
 }
 
 function expandHome(value) {
@@ -2385,33 +2757,24 @@ const USAGE = [
   'Options:',
   '  --config-dir PATH   Muse config directory (default: ~/.config/muse)',
   '  --dir PATH          Alias for --config-dir',
-  '  --team-file PATH    Roster JSON (default: <config-dir>/squad-team.json)',
-  '  --endpoints-file PATH  endpoints.json (default: <config-dir>/endpoints.json)',
-  '  --project-name NAME Override project name used for projects{} overrides',
-  '  --project-dir PATH  Repo root for project-scoped overrides (default: cwd)',
+  '  --file PATH         Explicit muse-squad.toml path',
   '  --uninstall         Remove only generated wrappers and roster',
   '  --help, -h          Show this help',
   '',
-  'Environment: MUSE_CONFIG_DIR, SQUAD_TEAM_FILE, MODELS_CONFIG_FILE'
+  'Environment: MUSE_CONFIG_DIR, MUSE_SQUAD_CONFIG_FILE'
 ].join('\n');
 
 function parseArgs(argv) {
   const opts = {};
-  const valueFlags = new Set([
-    '--config-dir', '--dir', '--team-file', '--endpoints-file', '--project-name', '--project-dir'
-  ]);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
-    if (arg === '--uninstall') {
-      opts.uninstall = true;
-    } else if (arg === '--help' || arg === '-h') {
-      opts.help = true;
-    } else if (valueFlags.has(arg)) {
+    if (arg === '--uninstall') opts.uninstall = true;
+    else if (arg === '--help' || arg === '-h') opts.help = true;
+    else if (arg === '--config-dir' || arg === '--dir' || arg === '--file') {
       const value = argv[++i];
       if (!value) die(`${arg} requires a value`);
-      const key = arg.replace(/^--/, '').replace(/-/g, '_');
-      opts[key] = value;
-      if (arg === '--dir') opts.config_dir = value;
+      if (arg === '--file') opts.config_file = value;
+      else opts.config_dir = value;
     } else {
       die(`unknown option: ${arg}`);
     }
@@ -2419,186 +2782,129 @@ function parseArgs(argv) {
   return opts;
 }
 
-function readJson(file, label, required) {
-  if (!fs.existsSync(file)) {
-    if (required) die(`${label} not found: ${file}`);
-    warn(`${label} not found: ${file}; classifying non-muse values as custom-coder aliases`);
-    return null;
-  }
-  let raw;
-  try {
-    raw = fs.readFileSync(file, 'utf8');
-  } catch (error) {
-    if (required) die(`cannot read ${label} ${file}: ${error.message}`);
-    warn(`cannot read ${label} ${file}: ${error.message}`);
-    return null;
-  }
-  try {
-    return JSON.parse(raw);
-  } catch (error) {
-    if (required) die(`invalid JSON in ${label} ${file}: ${error.message}`);
-    warn(`invalid JSON in ${label} ${file}: ${error.message}`);
-    return null;
-  }
-}
-
-function endpointAliases(endpoints) {
-  if (!endpoints || !endpoints.endpoints || typeof endpoints.endpoints !== 'object') {
-    return null;
-  }
-  return new Set(Object.keys(endpoints.endpoints));
-}
-
-function kindOf(value, aliases) {
-  if (aliases && aliases.has(value)) return 'endpoint';
-  if (!aliases && !/^muse-/.test(value)) return 'endpoint';
-  return 'native';
-}
-
-function validateMembers(members) {
-  if (!Array.isArray(members) || members.length === 0) {
-    die('squad-team.json must contain a non-empty "members" array');
-  }
-  const seen = new Set();
-  for (const member of members) {
-    if (!member || typeof member !== 'object') die('each member must be an object');
-    if (typeof member.name !== 'string' || !NAME_RE.test(member.name)) {
-      die(`member name must be a lowercase slug: ${JSON.stringify(member.name)}`);
-    }
-    if (RESERVED_AGENTS.has(member.name)) {
-      die(`member name "${member.name}" is reserved for a generic agent`);
-    }
-    if (seen.has(member.name)) die(`duplicate member name: ${member.name}`);
-    seen.add(member.name);
-    if (typeof member.display_name !== 'string' || !member.display_name) {
-      die(`member ${member.name} needs a display_name`);
-    }
-    if (typeof member.role !== 'string' || !member.role.trim()) {
-      die(`member ${member.name} needs a non-empty "role"`);
-    }
-    for (const field of ['responsibility', 'primary', 'backup', 'charter']) {
-      if (typeof member[field] !== 'string' || !member[field]) {
-        die(`member ${member.name} needs a non-empty "${field}"`);
-      }
-    }
-  }
-}
-
-function findProjectOverride(team, projectName, cwd) {
-  const projects = team.projects && typeof team.projects === 'object' ? team.projects : {};
-  const keys = [cwd, projectName].filter(Boolean);
-  let found = null;
-  for (const key of keys) {
-    const override = projects[key];
-    if (override && typeof override === 'object') found = { key, override };
-  }
-  return found;
-}
-
-function applyProjectOverride(team, override) {
-  let merged = { ...team };
-  if (typeof override.team_name === 'string') merged.team_name = override.team_name;
-  if (override.members && typeof override.members === 'object') {
-    merged.members = merged.members.map((member) => {
-      const patch = override.members[member.name];
-      return patch && typeof patch === 'object' ? { ...member, ...patch } : member;
-    });
-  }
-  return merged;
-}
-
 function escapeCell(value) {
   return String(value).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
 
-function buildRoster(team, members, aliases, teamFile, options = {}) {
-  const teamName = typeof team.team_name === 'string' && team.team_name
-    ? team.team_name
-    : 'Muse Squad';
-  const memoryDir = typeof team.memory_dir === 'string' && team.memory_dir
-    ? team.memory_dir
-    : '.muse/squad';
+function firstSentence(text) {
+  const flat = String(text).replace(/\s+/g, ' ').trim();
+  const match = flat.match(/^.*?[.!?](?=\s|$)/);
+  return (match ? match[0] : flat).slice(0, 200);
+}
+
+function chain(config, member) {
+  const names = [member.primary, ...member.fallback];
+  return [...new Set(names)];
+}
+
+function chainLabel(config, member) {
+  return chain(config, member)
+    .map((name) => {
+      const provider = config.providers[name];
+      return `\`${name}\` (${provider.type})`;
+    })
+    .join(' -> ');
+}
+
+function buildRoster(config, configFile) {
+  const file = path.basename(configFile || 'muse-squad.toml');
   const lines = [
-    `# ${teamName}`,
+    `# ${config.squad.name}`,
     '',
     GENERATED_MARKER,
-    ...(options.projectKey
-      ? [`Project override: \`${options.projectKey}\`. Read this roster instead of the global one in this repository.`]
-      : []),
     '',
-    `Generated from \`${path.basename(teamFile)}\` by \`mcp/sync-team.js\`. ` +
-      'Edit the roster config and re-run the installer instead of editing this file.',
+    `Generated from \`${file}\` by \`mcp/sync-team.js\`. ` +
+      'Edit the config and re-run the installer instead of editing this file.',
     '',
-    '| @name | Role | Primary | Backup | Scope |',
-    '| --- | --- | --- | --- | --- |'
+    '| @name | Primary | Fallback | Focus |',
+    '| --- | --- | --- | --- |'
   ];
-  for (const member of members) {
-    const primaryKind = kindOf(member.primary, aliases) === 'endpoint' ? 'custom-coder' : 'native';
-    const backupKind = kindOf(member.backup, aliases) === 'endpoint' ? 'custom-coder' : 'native';
+
+  for (const member of Object.values(config.squad.members)) {
+    const primary = config.providers[member.primary];
+    const fallbacks = member.fallback.length
+      ? member.fallback.map((name) => `\`${name}\``).join(', ')
+      : '(none)';
     lines.push(
-      `| @${member.name} | ${escapeCell(member.role)} | ` +
-      `\`${member.primary}\` (${primaryKind}) | ` +
-      `\`${member.backup}\` (${backupKind}) | ${escapeCell(member.responsibility)} |`
+      `| @${member.name} | \`${member.primary}\` (${primary.type}) | ${fallbacks} | ` +
+      `${escapeCell(firstSentence(member.charter))} |`
     );
   }
+
   lines.push(
     '',
     '## Invoking members',
     '',
     'Mention `@<name>` in normal chat or spawn that named agent from `/squad-plan` and ' +
-      '`/squad-execute`. Each wrapper reads the shared decisions log and its own history ' +
-      'before work, and appends lasting learnings when done.',
+      '`/squad-execute`. Every task belongs to a named squad member; there are no generic helpers.',
+    '',
+    'Each wrapper reads the shared decisions log and its own history before work, then appends ' +
+      'lasting learnings when done.',
     '',
     '## Project memory',
     '',
-    `- \`${memoryDir}/decisions.md\` - shared architectural decisions, appended by the Scribe and waves.`,
-    `- \`${memoryDir}/history/<name>.md\` - per-member conventions, file maps, and gotchas.`,
+    `- \`${config.squad.memory_dir}/decisions.md\` - shared architectural decisions.`,
+    `- \`${config.squad.memory_dir}/history/<name>.md\` - per-member conventions, file maps, and gotchas.`,
     '',
     'Create the directory and both paths on first use in a repository if they do not exist yet.'
   );
   return `${lines.join('\n')}\n`;
 }
 
-function buildWrapper(member, team, aliases, options = {}) {
-  const primaryKind = kindOf(member.primary, aliases);
-  const backupKind = kindOf(member.backup, aliases);
-  const memoryDir = typeof team.memory_dir === 'string' && team.memory_dir
-    ? team.memory_dir
-    : '.muse/squad';
-  const decisions = `${memoryDir}/decisions.md`;
-  const history = `${memoryDir}/history/${member.name}.md`;
-  const runnerModel = primaryKind === 'endpoint' ? RUNNER_MODEL : member.primary;
-  const tag = member.primary;
+function buildWrapper(config, memberName, configFile) {
+  const member = config.squad.members[memberName];
+  if (!member) throw new Error(`unknown member "${memberName}"`);
 
+  const primary = config.providers[member.primary];
+  const runnerModel = primary.type === 'http' ? RUNNER_MODEL : primary.model;
+  const decisions = `${config.squad.memory_dir}/decisions.md`;
+  const history = `${config.squad.memory_dir}/history/${member.name}.md`;
+  const chainNames = chain(config, member);
   const routing = [];
-  if (primaryKind === 'endpoint') {
+
+  routing.push(`Provider chain: ${chainLabel(config, member)}.`);
+
+  if (primary.type === 'native') {
     routing.push(
-      `- Primary: \`${member.primary}\` (custom-coder endpoint). The \`model: ${RUNNER_MODEL}\` frontmatter makes this a lightweight tool-runner; delegate heavy code generation or plan critique to the MCP tool.`,
-      `- Call \`custom-coder:generate_code\` (or \`critique_plan\` for plans) with \`endpoint="${member.primary}"\`.`,
-      `- Pass \`fallback_endpoint="${member.backup}"\` on that call so the router tries only this member's backup, never the global \`fallback_order\`.`
+      `- Primary \`${member.primary}\` is a native Muse model and is pinned in frontmatter.`,
+      `- If this native turn fails because of quota, rate limits, or subscription limits, retry the SAME STEP through \`muse-squad:generate_code\` (or \`muse-squad:critique_plan\` for plans) with \`member="${member.name}"\`.`,
+      '- The router skips native providers it cannot call and tries the first HTTP provider in this member\'s chain.'
     );
-    if (backupKind === 'native') {
-      routing.push(
-        `- Backup \`${member.backup}\` is a native Muse model: if the MCP call cannot be served, pass \`fallback_endpoint=""\` to disable MCP fallback and continue natively on \`${member.backup}\`.`
-      );
-    }
   } else {
     routing.push(
-      `- Primary: \`${member.primary}\` (native Muse model), pinned in frontmatter.`,
-      `- If this native turn fails with a quota, rate-limit, or subscription error, the orchestrator must retry the same step through \`custom-coder\` using backup \`${member.backup}\` (see below) instead of treating the failed turn as this member's result or silently switching models.`
+      `- Primary \`${member.primary}\` is an HTTP provider. The \`model: ${RUNNER_MODEL}\` frontmatter makes this a lightweight tool-runner; delegate heavy code generation to \`muse-squad:generate_code\` or plan critique to \`muse-squad:critique_plan\` with \`member="${member.name}"\`.`
     );
-    if (backupKind === 'endpoint') {
+  }
+
+  for (const name of member.fallback) {
+    const provider = config.providers[name];
+    if (provider.type === 'http') {
       routing.push(
-        `- Backup \`${member.backup}\` is a custom-coder endpoint: for code edits call \`custom-coder:generate_code\`, and for plans/reviews call \`custom-coder:critique_plan\`, with \`endpoint="${member.backup}"\` and \`fallback_endpoint="${member.backup}"\` so only this member's backup chain is used. Report \`servedBy\`, \`servedModel\`, and \`fallbackUsed\` from MCP meta.`
+        `- Fallback \`${name}\` is an HTTP provider in this member's chain; the router tries it automatically after an earlier provider fails.`
       );
     } else {
       routing.push(
-        `- Backup \`${member.backup}\` is also a native Muse model: retry the same step as a new native subagent on \`${member.backup}\` and note the switch; do not use custom-coder for this member's fallback.`
+        `- Fallback \`${name}\` is native model \`${provider.model}\`. If the router has exhausted the HTTP providers in this chain, retry the same step natively on that model and note the switch.`
       );
     }
   }
 
-  const description = `Copilot Squad ${member.role}. Use proactively for ${member.responsibility.toLowerCase()}. Invoke as @${member.name}.`;
+  if (member.fallback.length === 0) {
+    routing.push(
+      '- This member has no fallback. If its provider fails, stop and report the error; do not switch models or work inline.'
+    );
+  } else {
+    routing.push(
+      '- Never use a provider, model, or inline work outside this member\'s chain. If every provider in the chain fails, stop and report the error.'
+    );
+  }
+
+  routing.push(
+    'Report actual `servedBy`, `servedProvider`, `servedModel`, `fallbackUsed`, and `attempts` from tool meta; never infer who answered.'
+  );
+
+  const file = path.basename(configFile || 'muse-squad.toml');
+  const description = `Use proactively for ${firstSentence(member.charter)} Invoke as @${member.name}.`;
   const lines = [
     '---',
     `name: ${member.name}`,
@@ -2606,36 +2912,27 @@ function buildWrapper(member, team, aliases, options = {}) {
     `model: ${runnerModel}`,
     '---',
     GENERATED_MARKER,
-    ...(options.projectKey
-      ? [`Project override: \`${options.projectKey}\`. Muse loads this project definition before the global user agent.`]
-      : []),
     '',
-    `# @${member.name} - ${member.display_name} (${member.role})`,
+    `# @${member.name}`,
     '',
-    `You are ${member.display_name}, the ${member.role} member of Copilot Squad.`,
+    `You are @${member.name}, a named member of ${config.squad.name}. All work assigned to you must follow your charter and provider chain.`,
     '',
     '## Charter',
     '',
-    member.charter,
+    member.charter.trim(),
     '',
     '## Routing',
     '',
-    `Use this agent for: ${member.responsibility}.`,
-    'Mention `@' + member.name + '` in normal chat, or spawn this named agent from the squad slash commands.',
-    '',
-    '## Model routing and backup chain',
-    '',
     ...routing,
-    'Report the actual `servedBy`, `servedModel`, and `fallbackUsed` from tool meta; never infer who answered from config.',
     '',
     '## Project memory',
     '',
-    `Before starting, read \`${decisions}\` and \`${history}\` when present. If \`${memoryDir}/\` does not exist in this repository, create it with \`${decisions}\` and an empty \`history/\` directory before proceeding.`,
+    `Before starting, read \`${decisions}\` and \`${history}\` when present. If \`${config.squad.memory_dir}/\` does not exist in this repository, create it with \`${decisions}\` and an empty \`history/\` directory before proceeding.`,
     `When finished, append only concise lasting learnings to \`${history}\` - file conventions, gotchas, and decisions that matter next time. Never rewrite earlier notes.`,
     '',
     '## TUI label',
     '',
-    `Use the short task title \`[${member.display_name} (${member.role}) | ${tag}] <action>\` with the action under ~50 characters.`
+    `Use the short task title \`[${member.name} | ${member.primary}] <action>\` with the action under ~50 characters.`
   ];
   return `${lines.join('\n')}\n`;
 }
@@ -2644,7 +2941,7 @@ function normalized(content) {
   return String(content).replace(/\r?\n+$/, '') + '\n';
 }
 
-function writeIfChanged(dest, content, label) {
+function writeIfChanged(dest, content) {
   fs.mkdirSync(path.dirname(dest), { recursive: true });
   const updated = normalized(content);
   let existing = null;
@@ -2657,24 +2954,11 @@ function writeIfChanged(dest, content, label) {
   log(`  ${existing === null ? 'generated' : 'updated'}  ${dest}`);
 }
 
-function removeIfGenerated(dest, label, quiet = false) {
-  if (!fs.existsSync(dest)) {
-    if (!quiet) log(`  absent     ${dest}`);
-    return;
-  }
-  const content = fs.readFileSync(dest, 'utf8');
-  if (!content.includes(GENERATED_MARKER)) {
-    if (!quiet) log(`  kept       ${dest} (not generated by muse-squad)`);
-    return;
-  }
-  fs.unlinkSync(dest);
-  log(`  removed    ${label}: ${dest}`);
-}
-
 function removeGeneratedAgents(agentsDir, keepNames = null) {
   if (!fs.existsSync(agentsDir)) return;
   for (const entry of fs.readdirSync(agentsDir)) {
     if (!entry.endsWith('.md')) continue;
+    if (keepNames && keepNames.has(path.basename(entry, '.md'))) continue;
     const dest = path.join(agentsDir, entry);
     let content;
     try {
@@ -2684,7 +2968,6 @@ function removeGeneratedAgents(agentsDir, keepNames = null) {
       continue;
     }
     if (!content.includes(GENERATED_MARKER)) continue;
-    if (keepNames && keepNames.has(path.basename(entry, '.md'))) continue;
     try {
       fs.unlinkSync(dest);
       log(`  removed    ${dest}`);
@@ -2692,6 +2975,20 @@ function removeGeneratedAgents(agentsDir, keepNames = null) {
       warn(`cannot remove ${dest}: ${error.message}`);
     }
   }
+}
+
+function removeIfGenerated(dest, label) {
+  if (!fs.existsSync(dest)) {
+    log(`  absent     ${dest}`);
+    return;
+  }
+  const content = fs.readFileSync(dest, 'utf8');
+  if (!content.includes(GENERATED_MARKER)) {
+    log(`  kept       ${dest} (not generated by muse-squad)`);
+    return;
+  }
+  fs.unlinkSync(dest);
+  log(`  removed    ${label}: ${dest}`);
 }
 
 function removeEmptyDir(dir) {
@@ -2702,18 +2999,12 @@ function removeEmptyDir(dir) {
   }
 }
 
-function uninstall(configDir, teamFile, projectRoot) {
-  // Scan by marker instead of trusting squad-team.json: a deleted or edited
-  // roster must not leave stale generated wrappers behind on uninstall.
-  void teamFile;
+function uninstall(configDir) {
+  // Scan by marker instead of trusting config: a deleted or edited roster must
+  // not leave stale generated wrappers behind on uninstall.
   removeGeneratedAgents(path.join(configDir, 'agents'));
   removeIfGenerated(path.join(configDir, 'squad', 'team.md'), 'team.md');
   removeEmptyDir(path.join(configDir, 'squad'));
-  if (projectRoot) {
-    removeGeneratedAgents(path.join(projectRoot, '.agents', 'agents'));
-    removeIfGenerated(path.join(projectRoot, '.agents', 'squad', 'team.md'), 'project team.md', true);
-    removeEmptyDir(path.join(projectRoot, '.agents', 'squad'));
-  }
 }
 
 function main() {
@@ -2725,236 +3016,190 @@ function main() {
 
   const configDir = expandHome(opts.config_dir || process.env.MUSE_CONFIG_DIR ||
     path.join(os.homedir(), '.config', 'muse'));
-  const teamFile = expandHome(opts.team_file || process.env.SQUAD_TEAM_FILE ||
-    path.join(configDir, 'squad-team.json'));
-  const endpointsFile = expandHome(opts.endpoints_file || process.env.MODELS_CONFIG_FILE ||
-    path.join(configDir, 'endpoints.json'));
-  const projectRoot = expandHome(opts.project_dir || process.cwd());
-  const projectName = opts.project_name || path.basename(projectRoot);
+  const configFile = configModule.configPath(opts);
 
   if (opts.uninstall) {
-    uninstall(configDir, teamFile, projectRoot);
+    uninstall(configDir);
     return;
   }
 
-  const team = readJson(teamFile, 'squad-team.json', true);
-  validateMembers(team.members);
-  const aliases = endpointAliases(readJson(endpointsFile, 'endpoints.json', false));
-  const globalNames = new Set(team.members.map((member) => member.name));
+  const config = configModule.loadConfig({ config_file: configFile });
+  const memberNames = Object.keys(config.squad.members);
+  log(`sync-team: ${memberNames.length} members`);
 
-  // Global artifacts always come from the base roster. Project overrides are
-  // materialized separately so one repo cannot leak a model choice into every
-  // other repo.
-  log(`sync-team: ${team.members.length} members, global`);
   writeIfChanged(
     path.join(configDir, 'squad', 'team.md'),
-    buildRoster(team, team.members, aliases, teamFile)
+    buildRoster(config, configFile)
   );
-  for (const member of team.members) {
+  for (const name of memberNames) {
     writeIfChanged(
-      path.join(configDir, 'agents', `${member.name}.md`),
-      buildWrapper(member, team, aliases)
+      path.join(configDir, 'agents', `${name}.md`),
+      buildWrapper(config, name, configFile)
     );
   }
-  removeGeneratedAgents(path.join(configDir, 'agents'), globalNames);
-
-  const projectAgentsDir = path.join(projectRoot, '.agents', 'agents');
-  const projectRoster = path.join(projectRoot, '.agents', 'squad', 'team.md');
-  const found = findProjectOverride(team, projectName, projectRoot);
-  if (!found) {
-    removeGeneratedAgents(projectAgentsDir);
-    removeIfGenerated(projectRoster, 'project team.md', true);
-    return;
-  }
-
-  const projectTeam = applyProjectOverride(team, found.override);
-  validateMembers(projectTeam.members);
-  const patches = found.override.members && typeof found.override.members === 'object'
-    ? found.override.members
-    : {};
-  for (const key of Object.keys(patches)) {
-    if (!globalNames.has(key)) warn(`project override ${found.key} patches unknown member ${key}`);
-  }
-  const patchedNames = new Set(
-    projectTeam.members
-      .filter((member) => patches[member.name] && typeof patches[member.name] === 'object')
-      .map((member) => member.name)
-  );
-
-  log(`sync-team: project override ${found.key} -> ${projectRoot}`);
-  writeIfChanged(
-    projectRoster,
-    buildRoster(projectTeam, projectTeam.members, aliases, teamFile, { projectKey: found.key })
-  );
-  for (const member of projectTeam.members) {
-    if (!patchedNames.has(member.name)) continue;
-    writeIfChanged(
-      path.join(projectAgentsDir, `${member.name}.md`),
-      buildWrapper(member, projectTeam, aliases, { projectKey: found.key })
-    );
-  }
-  removeGeneratedAgents(projectAgentsDir, patchedNames);
+  removeGeneratedAgents(path.join(configDir, 'agents'), new Set(memberNames));
 }
 
-if (require.main === module) main();
+if (require.main === module) {
+  try {
+    main();
+  } catch (error) {
+    process.stderr.write(`sync-team: ${error && error.message || error}\n`);
+    process.exitCode = 1;
+  }
+}
 
 module.exports = {
   GENERATED_MARKER,
   RUNNER_MODEL,
-  endpointAliases,
   buildRoster,
   buildWrapper,
   expandHome,
-  findProjectOverride,
-  applyProjectOverride,
-  readJson
+  chain,
+  uninstall
 };
 '@
-Install-Endpoints-Config @'
-{
-  "schema_version": 1,
-  "default": "local-coder",
-  "fallback_order": ["local-coder", "grill-reviewer"],
-  "muse_models": {
-    "muse-ember-1.0": 4,
-    "muse-spark-1.3-contributor": 2
-  },
-  "timeout_ms": 600000,
-  "queue_timeout_ms": 300000,
-  "max_retries": 2,
-  "endpoints": {
-    "local-coder": {
-      "base_url": "http://127.0.0.1:8000/v1",
-      "api_key": "local-key",
-      "model": "local-llama/Ornith-1.5-35B-A3B-MLX-4bit",
-      "temperature": 0.2,
-      "max_concurrency": 1,
-      "max_tokens": 8192,
-      "max_input_chars": 96000,
-      "extra_body": { "top_p": 0.9 },
-      "on_context_exceeded": "truncate"
-    },
-    "grill-reviewer": {
-      "base_url": "http://127.0.0.1:8000/v1",
-      "api_key": "local-key",
-      "model": "ornith-1.5-35b",
-      "temperature": 0.3,
-      "max_concurrency": 1,
-      "max_tokens": 4096,
-      "max_input_chars": 96000,
-      "extra_body": { "top_p": 0.9 },
-      "on_context_exceeded": "truncate"
-    }
-  }
-}
-'@
-function Get-Team-Defaults {
+  Uninstall-File 'agents/plan-reviewer.md'
+  Uninstall-File 'agents/general-purpose.md'
+  Uninstall-File 'agents/worker.md'
+function Get-Config-Defaults {
   @'
-{
-  "schema_version": 1,
-  "team_name": "Copilot Squad",
-  "memory_dir": ".muse/squad",
-  "members": [
-    {
-      "name": "keaton",
-      "display_name": "Keaton",
-      "role": "Lead",
-      "responsibility": "Architecture, task decomposition, and adversarial plan review",
-      "primary": "muse-spark-1.3-contributor",
-      "backup": "grill-reviewer",
-      "charter": "Domain expertise: system architecture, dependency order, risk analysis, and decision-complete planning. Voice: concise, decisive, and evidence-first; ask for the exact file or command instead of guessing. Guardrails: do not edit product code while planning, cite concrete files and verification steps, and surface ambiguity before it becomes an implementation assumption."
-    },
-    {
-      "name": "fenster",
-      "display_name": "Fenster",
-      "role": "Frontend",
-      "responsibility": "UI components, styles, accessibility, and client-side state",
-      "primary": "local-coder",
-      "backup": "muse-ember-1.0",
-      "charter": "Domain expertise: UI components, styling systems, accessibility, and browser-side state. Voice: pragmatic and detail-oriented; describe the visible behavior a change should produce. Guardrails: stay inside frontend files, preserve existing design tokens and conventions, and never introduce a new framework or dependency without explicit approval."
-    },
-    {
-      "name": "mcmanus",
-      "display_name": "McManus",
-      "role": "Backend",
-      "responsibility": "APIs, persistence, server-side logic, and data migrations",
-      "primary": "local-coder",
-      "backup": "grill-reviewer",
-      "charter": "Domain expertise: APIs, persistence layers, server-side logic, and safe data migrations. Voice: precise and failure-mode first; name the error path before the happy path. Guardrails: keep changes scoped to backend files, preserve public contracts unless the plan says otherwise, and never write a destructive migration without a rollback path."
-    },
-    {
-      "name": "hockney",
-      "display_name": "Hockney",
-      "role": "Tester",
-      "responsibility": "Verification, test suites, regression coverage, and CI checks",
-      "primary": "local-coder",
-      "backup": "muse-ember-1.0",
-      "charter": "Domain expertise: unit and integration tests, regression analysis, and CI verification. Voice: skeptical and evidence-driven; report exact commands and results. Guardrails: never weaken or delete a test to make a run pass, add a regression test for every fixed bug, and do not claim success from a partial pass."
-    },
-    {
-      "name": "verbal",
-      "display_name": "Verbal",
-      "role": "Scribe",
-      "responsibility": "Durable decisions log, handoff notes, and per-member project memory",
-      "primary": "muse-ember-1.0",
-      "backup": "local-coder",
-      "charter": "Domain expertise: architectural decision records, execution logs, and durable project conventions. Voice: terse and factual; record why a decision was made, not just what happened. Guardrails: append only, never invent decisions, never rewrite earlier history, and keep every entry short enough to survive context compaction."
-    }
-  ],
-  "projects": {}
-}
+# muse-squad configuration - schema = 1
+# Single source of truth. Edit by hand or with /squad-team.
+# There is no second config file and no migration step.
+
+schema = 1
+
+# =============================== AI Providers ===============================
+# Provider names may contain letters, numbers, dot (.), underscore (_), and
+# hyphen (-). Members reference them exactly as written here.
+#
+# type = "native"  Built-in Muse model. The MCP router cannot call native
+#                  providers; it skips them and tries the member's HTTP
+#                  providers in chain order.
+# type = "http"    OpenAI-compatible endpoint the MCP router can call.
+#                  api_key accepts a plaintext value or ${ENV_VAR}.
+#
+# Use # comments in this file (TOML does not use ; comments).
+
+[providers.Home-Ornith]
+type = "http"
+base_url = "http://127.0.0.1:8000/v1"
+api_key = "local-key"             # or "${LOCAL_MODEL_API_KEY}"
+model = "local-llama/Ornith-1.5-35B-A3B-MLX-4bit"
+temperature = 0.2
+top_p = 0.9
+max_tokens = 8192
+max_input_chars = 96000
+on_context_exceeded = "truncate"  # "truncate" or "fallback"
+max_concurrency = 1
+timeout_ms = 600000
+queue_timeout_ms = 300000
+max_retries = 2
+
+[providers.DeepSeek-Flash]
+type = "http"
+base_url = "https://api.deepseek.com/v1"
+api_key = "replace-me"            # e.g. "${DEEPSEEK_API_KEY}"
+model = "deepseek-chat"
+max_concurrency = 4
+timeout_ms = 600000
+
+[providers.Muse-Spark]
+type = "native"
+model = "muse-spark-1.3-contributor"
+max_concurrency = 2
+
+[providers.Muse-Ember]
+type = "native"
+model = "muse-ember-1.0"
+max_concurrency = 4
+
+[providers.Muse-Wonder]
+type = "native"
+model = "muse-wonder-1.0"
+max_concurrency = 2
+
+# ================================== Squad ==================================
+# One [squad.<name>] table per member. Names are lowercase slugs.
+# Each member has only primary, an ordered fallback array, and a charter.
+# primary + fallback must reference provider names above. At least one member.
+
+[squad]
+
+[squad.keaton]
+primary = "Muse-Spark"
+fallback = ["DeepSeek-Flash"]
+charter = """Domain expertise: system architecture, dependency order, risk analysis, and decision-complete planning. Voice: concise, decisive, and evidence-first; ask for the exact file or command instead of guessing. Guardrails: do not edit product code while planning, cite concrete files and verification steps, and surface ambiguity before it becomes an implementation assumption."""
+
+[squad.fenster]
+primary = "Home-Ornith"
+fallback = ["Muse-Ember"]
+charter = """Domain expertise: UI components, styling systems, accessibility, and browser-side state. Voice: pragmatic and detail-oriented; describe the visible behavior a change should produce. Guardrails: stay inside frontend files, preserve existing design tokens and conventions, and never introduce a new framework or dependency without explicit approval."""
+
+[squad.mcmanus]
+primary = "Home-Ornith"
+fallback = ["DeepSeek-Flash"]
+charter = """Domain expertise: APIs, persistence layers, server-side logic, and safe data migrations. Voice: precise and failure-mode first; name the error path before the happy path. Guardrails: keep changes scoped to backend files, preserve public contracts unless the plan says otherwise, and never write a destructive migration without a rollback path."""
+
+[squad.hockney]
+primary = "Home-Ornith"
+fallback = ["Muse-Ember"]
+charter = """Domain expertise: unit and integration tests, regression analysis, and CI verification. Voice: skeptical and evidence-driven; report exact commands and results. Guardrails: never weaken or delete a test to make a run pass, add a regression test for every fixed bug, and do not claim success from a partial pass."""
+
+[squad.verbal]
+primary = "Muse-Ember"
+fallback = ["Home-Ornith"]
+charter = """Domain expertise: architectural decision records, execution logs, and durable project conventions. Voice: terse and factual; record why a decision was made, not just what happened. Guardrails: append only, never invent decisions, never rewrite earlier history, and keep every entry short enough to survive context compaction."""
 '@
 }
+Install-Config (Get-Config-Defaults)
 Install-Agents-Policy @'
 <!-- muse-squad:begin -->
 ## Muse Squad Default Delegation Policy
 
 This block is managed by muse-squad. Put durable changes in the muse-squad repo payload and re-run the installer; edits inside this block are replaced on update. Text outside the block is yours and is never overwritten.
 
-### Proactive subagent delegation
+### One config, one roster
 
-In ordinary Muse Code sessions - even without `/squad-plan` or `/squad-execute` - delegate self-contained work to the installed agents:
+`~/.config/muse/muse-squad.toml` is the single source of truth (`schema = 1`). It holds the AI providers and the squad in one TOML file. There is no second config file and no migration step; edit the TOML directly or use `/squad-team`.
 
-- `worker` / `general-purpose`: bounded code edits, refactors, bug fixes, and unit-test implementation outside the named roster.
-- Read-only exploration helpers: codebase mapping and investigation.
-- `plan-reviewer`: review plans, designs, or risky diffs before implementation.
-- Named `@team` members: use the persistent roster for recurring roles (see below).
+- Providers live under `[providers.<Name>]`. `type = "native"` providers are built into Muse; `type = "http"` providers point at an OpenAI-compatible server.
+- Members live under `[squad.<name>]` and define only `primary`, an ordered `fallback` array, and a `charter`. At least one member is required.
+- The generated roster is `~/.config/muse/squad/team.md`; generated member wrappers are `~/.config/muse/agents/<name>.md`. Do not hand-edit generated files.
 
-Keep the main session focused on decisions and integration. Delegating scoped work preserves the main context window and subscription quota.
+### Delegate through named members only
 
-### Persistent named team
+All implementation, exploration, and review work goes to a named squad member invoked with `@<name>`. There are no unnamed helpers to fall back to. Keep the main session focused on decisions and integration.
 
-Read `~/.config/muse/squad-team.json` (or the generated `~/.config/muse/squad/team.md`) and use `@<name>` for recurring work in normal sessions. In a repository, prefer `.agents/squad/team.md` and `.agents/agents/<name>.md` when present; those project-scoped files override the global roster and wrappers:
+Match work to the `charter` text in the config, never to a guessed specialty. If no member's charter clearly fits, ask the user which member should own the step instead of inventing a helper.
 
-- `@keaton` (Lead): architecture, decomposition, and plan review.
-- `@fenster` (Frontend): UI components, styles, and client-side files.
-- `@mcmanus` (Backend): APIs, persistence, and server-side files.
-- `@hockney` (Tester): verification, test suites, and regression coverage.
-- `@verbal` (Scribe): durable decisions and handoff notes.
+### Muse MCP routing
 
-Use `/squad-team` for targeted roster changes; generated wrappers and the roster page are not hand-edited. Each member has a charter, a `primary` model/endpoint, and a `backup`. For `custom-coder` calls, pass the member's `backup` as `fallback_endpoint` so only that member's chain is used. In a repository, initialize `.muse/squad/decisions.md` and `.muse/squad/history/` on first use. Named members read both the shared decisions file and their own history file before work, and append concise lasting learnings when finished. `@verbal` appends decisions after each wave or plan sign-off.
+The MCP server is `muse-squad`. It exposes:
 
-### Cost-saving custom-coder routing
+- `generate_code(member, prompt|task_spec, context|file_context, optional system/temperature/max_tokens)`
+- `critique_plan(member, plan_markdown, optional repo_context/temperature/max_tokens)`
+- `member_status(member?)` — omit `member` for an overview.
+- `list_providers`
 
-When `custom-coder` is available, prefer it for boilerplate generation, unit-test drafting, and secondary code or plan critiques:
+`generate_code` and `critique_plan` are member-scoped. The router resolves that member's `primary` first, then its `fallback` providers in order. Native providers cannot be called by the router; they are skipped, and the router tries that member's HTTP providers in chain order. If no provider in the member's chain can serve the request, the tool returns a hard error listing every attempt. There is no global fallback and no silent model switching.
 
-- `generate_code` for small, scoped diffs.
-- `critique_plan` for a second opinion on plans and designs.
-- `list_endpoints` and `coder_status` to check aliases, limits, and health before batching work.
-- `/squad-doctor` when routing looks broken: it checks MCP registration, live `/v1/models` reachability for every alias, and roster/wrapper drift without using `custom-coder` or printing keys.
-
-Use the aliases and limits in `~/.config/muse/endpoints.json`. Treat `servedBy`, `servedModel`, and `fallbackUsed` from tool result `meta` as the source of truth. If the tool reports that it is unavailable or misconfigured, warn once and continue with native tools.
-
-If a named native subagent fails with a quota, rate-limit, or subscription error, the orchestrator retries that exact step through `custom-coder` using that member's `backup` as both `endpoint` and `fallback_endpoint`. Report the retry with the actual `servedBy` / `fallbackUsed`; never treat the failed turn as the member's result or silently switch models. Only fall back to inline/native work if custom-coder cannot serve the retry, and say so explicitly.
+- For a native-primary member, run the native subagent first. If it fails because of quota, rate limits, or subscription limits, retry that same step through `muse-squad:generate_code` or `muse-squad:critique_plan` with `member="<name>"`. The router uses that member's HTTP fallbacks. Do not treat the failed native turn as the member's result.
+- For an HTTP-primary member, the generated wrapper pins a lightweight native runner and delegates heavy work to `muse-squad:generate_code` or `muse-squad:critique_plan` with `member="<name>"`.
+- Use `member_status` and `list_providers` to inspect limits and health before batching work. API keys are redacted.
 
 ### Global guardrails
 
-- Respect the `muse_models` concurrency caps for parallel native subagents. Extra work waits for a later wave.
-- Format every spawned subagent's short task description exactly as `[<Name> (<Role>) | <model-or-endpoint>] <concise action>` for named members (for example `[Fenster (Frontend) | local-coder] Build login form`), or `[<agent-role> | <model-tag>] <concise action>` for generic helpers. Keep the action under ~50 characters; never guess a model from the role.
-- Include a short Subagents / Models roster in user-facing summaries when delegation is used.
+- Label every spawned subagent exactly as `[<name> | <provider-name>] <action>` — for example `[keaton | Muse-Spark] Review architecture`. Use the member's lowercase name and the provider name exactly as written in the TOML. Keep the action under ~50 characters, start with a verb, and add no extra parenthetical text.
+- Respect each provider's `max_concurrency` for parallel work; queue extra work into a later wave.
 - Apply generated code surgically: a targeted unified diff or a single function/block with native edit tools. Reject full-file rewrites, truncation markers, and unapplyable diffs.
 - Run the fastest incremental check on changed files immediately after each patch. Full builds and full test suites belong to the final verification step.
-- Never call work done until verification passes or the remaining gaps are stated explicitly.
+- Never call work done until verification passes or the remaining gaps are stated explicitly. If a member chain returns a hard error, stop and report the attempts; do not switch to a provider outside that member's chain.
+
+### Project memory
+
+Initialize `.muse/squad/decisions.md` and `.muse/squad/history/` on first use. Each named member reads both the shared decisions file and its own history file before work and appends concise lasting learnings when finished. Append durable decisions after each wave or plan sign-off.
 
 ### Keep normal sessions lightweight
 
@@ -2967,9 +3212,10 @@ Register-Mcp 'install'
 if ($mode -eq 'install' -and $firstInstall) {
   Write-Host ''
   Write-Host 'Next steps:'
-  Write-Host "  1. Configure: edit $(Join-Path $configDir 'endpoints.json') (base_url, model, api_key). Missing/unreachable endpoints still work in native-only mode with warnings."
+  Write-Host "  1. Configure: edit $(Join-Path $configDir 'muse-squad.toml') (providers, endpoints, and squad members)."
   Write-Host '  2. Use in Muse Code: /squad-plan to create .muse/PLAN.md, then /squad-execute.'
-  Write-Host "  3. Customize: add agents in $(Join-Path $configDir 'agents') (*.md) and skills in $(Join-Path $configDir 'skills\<name>\SKILL.md')."
-  Write-Host '  4. Update later: re-run this installer with --update.'
+  Write-Host "  3. Customize: edit muse-squad.toml; generated agents in $(Join-Path $configDir 'agents') are rebuilt from it."
+  Write-Host '  4. Check setup any time with /squad-doctor.'
+  Write-Host '  5. Update later: re-run this installer with --update.'
 }
 Write-Host 'done.'

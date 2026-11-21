@@ -7,14 +7,16 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const configModule = require('./config.js');
 const {
   GENERATED_MARKER,
-  endpointAliases,
   buildRoster,
-  buildWrapper,
-  expandHome
+  buildWrapper
 } = require('./sync-team.js');
 
+const SERVER_NAME = 'muse-squad';
+const LEGACY_SERVER = 'custom-coder';
+const GENERIC_AGENTS = ['worker', 'plan-reviewer', 'general-purpose'];
 const DEFAULT_TIMEOUT_MS = 5000;
 const USAGE = [
   'Usage: node doctor.js [options]',
@@ -22,11 +24,12 @@ const USAGE = [
   'Options:',
   '  --config-dir PATH   Muse config directory (default: ~/.config/muse)',
   '  --dir PATH          Alias for --config-dir',
-  '  --timeout-ms N      Per-endpoint HTTP timeout (default: 5000)',
+  '  --file PATH         Explicit muse-squad.toml path',
+  '  --timeout-ms N      Per-provider HTTP timeout (default: 5000)',
   '  --json              Emit a JSON report',
   '  --help, -h          Show this help',
   '',
-  'Environment: MUSE_CONFIG_DIR, MODELS_CONFIG_FILE'
+  'Environment: MUSE_CONFIG_DIR, MUSE_SQUAD_CONFIG_FILE'
 ].join('\n');
 
 function parseArgs(argv) {
@@ -37,7 +40,7 @@ function parseArgs(argv) {
       opts.help = true;
     } else if (arg === '--json') {
       opts.json = true;
-    } else if (arg === '--config-dir' || arg === '--dir' || arg === '--timeout-ms') {
+    } else if (arg === '--config-dir' || arg === '--dir' || arg === '--file' || arg === '--timeout-ms') {
       const value = argv[++i];
       if (!value) throw new Error(`${arg} requires a value`);
       if (arg === '--timeout-ms') {
@@ -46,6 +49,8 @@ function parseArgs(argv) {
           throw new Error('--timeout-ms must be a positive integer');
         }
         opts.timeout_ms = timeout;
+      } else if (arg === '--file') {
+        opts.config_file = value;
       } else {
         opts.config_dir = value;
       }
@@ -77,7 +82,7 @@ function redact(value, secrets) {
   return text;
 }
 
-function checkSettings(configDir) {
+function checkSettings(configDir, configFile) {
   const settingsFile = path.join(configDir, 'settings.json');
   const loaded = loadJson(settingsFile);
   if (loaded.error) {
@@ -88,15 +93,16 @@ function checkSettings(configDir) {
         : `cannot parse ${settingsFile}: ${loaded.error}`
     };
   }
+
   const settings = loaded.data;
   const servers = settings && settings.mcpServers;
   const entry = servers && typeof servers === 'object' && !Array.isArray(servers)
-    ? servers['custom-coder']
+    ? servers[SERVER_NAME]
     : null;
   if (!entry || typeof entry !== 'object') {
     return {
       name: 'settings.json', status: 'MISSING', ok: false,
-      detail: 'custom-coder is not registered under mcpServers'
+      detail: `${SERVER_NAME} is not registered under mcpServers`
     };
   }
 
@@ -105,16 +111,19 @@ function checkSettings(configDir) {
   const foundBridge = args.find((arg) => path.resolve(String(arg)) === path.resolve(bridge));
   const commandName = path.basename(String(entry.command || '')).toLowerCase();
   const commandOk = commandName === 'node' || commandName === 'node.exe';
-  const expectedConfig = path.join(configDir, 'endpoints.json');
-  const configuredEnv = entry.env && entry.env.MODELS_CONFIG_FILE;
-  const configOk = !configuredEnv ||
-    path.resolve(expandHome(configuredEnv)) === path.resolve(expectedConfig);
-  const ok = Boolean(foundBridge && commandOk && configOk);
+  const configuredEnv = entry.env && entry.env.MUSE_SQUAD_CONFIG_FILE;
+  const configOk = Boolean(configuredEnv) &&
+    path.resolve(configModule.expandHome(configuredEnv)) === path.resolve(configFile);
+  const legacyRegistered = (servers && Object.prototype.hasOwnProperty.call(servers, LEGACY_SERVER)) ||
+    (settings.mcp_servers && Object.prototype.hasOwnProperty.call(settings.mcp_servers, LEGACY_SERVER));
+  const ok = Boolean(foundBridge && commandOk && configOk && !legacyRegistered);
+
   const bits = [
     `command=${entry.command || '(none)'}`,
-    `bridge=${foundBridge || '(missing)'}`
+    `bridge=${foundBridge || '(missing)'}`,
+    `config=${configuredEnv || '(missing)'}`
   ];
-  if (!configOk) bits.push(`config=${configuredEnv}`);
+  if (legacyRegistered) bits.push(`legacy ${LEGACY_SERVER} still registered`);
   return { name: 'settings.json', status: ok ? 'OK' : 'BAD', ok, detail: bits.join(' ') };
 }
 
@@ -125,37 +134,32 @@ function modelsUrl(baseUrl) {
   return `${trimmed}/v1/models`;
 }
 
-async function checkEndpoints(configFile, timeoutMs, secrets) {
-  const loaded = loadJson(configFile);
-  if (loaded.error) {
+async function checkProviders(config, timeoutMs, secrets) {
+  if (!config) {
     return [{
-      alias: 'endpoints.json', status: 'MISSING', ok: false,
-      detail: loaded.error === 'file not found'
-        ? `${configFile} not found`
-        : `cannot parse ${configFile}: ${loaded.error}`
+      provider: '(config)', status: 'BAD', ok: false,
+      detail: 'provider check skipped because the config is invalid'
     }];
-  }
-  const endpoints = loaded.data && loaded.data.endpoints;
-  if (!endpoints || typeof endpoints !== 'object' || Array.isArray(endpoints) ||
-      Object.keys(endpoints).length === 0) {
-    return [{ alias: 'endpoints.json', status: 'EMPTY', ok: false, detail: 'no endpoints configured' }];
-  }
-
-  for (const endpoint of Object.values(endpoints)) {
-    if (endpoint && typeof endpoint === 'object' && endpoint.api_key) {
-      secrets.add(String(endpoint.api_key));
-    }
   }
 
   const results = [];
-  for (const [alias, endpoint] of Object.entries(endpoints)) {
-    if (!endpoint || typeof endpoint !== 'object' || !endpoint.base_url) {
-      results.push({ alias, status: 'BAD', ok: false, detail: 'missing base_url' });
+  for (const provider of Object.values(config.providers)) {
+    for (const secret of [provider.api_key]) {
+      if (secret) secrets.add(String(secret));
+    }
+
+    if (provider.type === 'native') {
+      results.push({
+        provider: provider.name,
+        status: 'NATIVE',
+        ok: true,
+        detail: `model ${provider.model} (not pinged; advisory max_concurrency ${provider.max_concurrency})`
+      });
       continue;
     }
-    const url = modelsUrl(endpoint.base_url);
-    const headers = {};
-    if (endpoint.api_key) headers.Authorization = `Bearer ${endpoint.api_key}`;
+
+    const url = modelsUrl(provider.base_url);
+    const headers = provider.api_key ? { Authorization: `Bearer ${provider.api_key}` } : {};
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -170,16 +174,18 @@ async function checkEndpoints(configFile, timeoutMs, secrets) {
       const status = response.ok ? 'OK'
         : (response.status === 401 || response.status === 403 ? 'AUTH' : 'HTTP');
       results.push({
-        alias, status, ok: response.ok,
+        provider: provider.name,
+        status,
+        ok: response.ok,
         detail: redact(`${url} ${response.status}${hint}`, secrets)
       });
     } catch (error) {
       const timedOut = error && error.name === 'AbortError';
       results.push({
-        alias,
+        provider: provider.name,
         status: timedOut ? 'TIMEOUT' : 'DOWN',
         ok: false,
-        detail: `${url} ${redact(error && error.message || error, secrets)}`
+        detail: redact(`${url} ${error && error.message || error}`, secrets)
       });
     } finally {
       clearTimeout(timer);
@@ -188,64 +194,45 @@ async function checkEndpoints(configFile, timeoutMs, secrets) {
   return results;
 }
 
-function checkRoster(configDir, endpointsFile) {
-  const teamFile = path.join(configDir, 'squad-team.json');
-  const loaded = loadJson(teamFile);
-  if (loaded.error) {
+function checkRoster(config, configFile, configDir) {
+  if (!config) {
     return {
-      name: 'squad-team.json', status: 'MISSING', ok: false,
-      detail: loaded.error === 'file not found'
-        ? `${teamFile} not found`
-        : `cannot parse ${teamFile}: ${loaded.error}`
+      name: 'muse-squad.toml', status: 'SKIP', ok: false,
+      detail: 'roster check skipped because the config is invalid'
     };
   }
-  const team = loaded.data;
-  if (!team || !Array.isArray(team.members) || team.members.length === 0) {
-    return {
-      name: 'squad-team.json', status: 'BAD', ok: false,
-      detail: 'squad-team.json has no members'
-    };
-  }
-  const endpointData = loadJson(endpointsFile).data || null;
-  const aliases = endpointAliases(endpointData);
-  const issues = [];
-  const expectedNames = new Set();
 
-  for (const member of team.members) {
-    const name = member && member.name;
-    if (typeof name !== 'string' || !name) {
-      issues.push('member without a name');
-      continue;
-    }
-    expectedNames.add(name);
-    try {
-      const wrapper = path.join(configDir, 'agents', `${name}.md`);
-      if (!fs.existsSync(wrapper)) {
-        issues.push(`@${name} wrapper missing`);
-        continue;
-      }
-      const expected = buildWrapper(member, team, aliases);
-      const actual = fs.readFileSync(wrapper, 'utf8');
-      if (normalized(actual) !== normalized(expected)) {
-        issues.push(`@${name} wrapper out of sync`);
-      }
-    } catch (error) {
-      issues.push(`@${name} cannot verify: ${error.message}`);
-    }
-  }
+  const issues = [];
+  const expectedNames = new Set(Object.keys(config.squad.members));
 
   const roster = path.join(configDir, 'squad', 'team.md');
   try {
     if (!fs.existsSync(roster)) {
       issues.push('squad/team.md missing');
     } else {
-      const expected = buildRoster(team, team.members, aliases, teamFile);
+      const expected = buildRoster(config, configFile);
       if (normalized(fs.readFileSync(roster, 'utf8')) !== normalized(expected)) {
         issues.push('squad/team.md out of sync');
       }
     }
   } catch (error) {
     issues.push(`squad/team.md cannot verify: ${error.message}`);
+  }
+
+  for (const name of expectedNames) {
+    try {
+      const wrapper = path.join(configDir, 'agents', `${name}.md`);
+      if (!fs.existsSync(wrapper)) {
+        issues.push(`@${name} wrapper missing`);
+        continue;
+      }
+      const expected = buildWrapper(config, name, configFile);
+      if (normalized(fs.readFileSync(wrapper, 'utf8')) !== normalized(expected)) {
+        issues.push(`@${name} wrapper out of sync`);
+      }
+    } catch (error) {
+      issues.push(`@${name} cannot verify: ${error.message}`);
+    }
   }
 
   const agentsDir = path.join(configDir, 'agents');
@@ -259,13 +246,19 @@ function checkRoster(configDir, endpointsFile) {
     }
   }
 
+  for (const name of GENERIC_AGENTS) {
+    if (fs.existsSync(path.join(agentsDir, `${name}.md`))) {
+      issues.push(`generic agent ${name}.md still present`);
+    }
+  }
+
   const ok = issues.length === 0;
   return {
-    name: 'squad-team.json',
+    name: 'muse-squad.toml',
     status: ok ? 'OK' : 'BAD',
     ok,
     detail: ok
-      ? `${team.members.length} members, wrappers and roster in sync`
+      ? `${expectedNames.size} members; roster and wrappers in sync; no generic agents`
       : issues.join('; ')
   };
 }
@@ -274,9 +267,10 @@ function renderText(report) {
   const pad = (value, size) => String(value).padEnd(size);
   const lines = ['squad-doctor', ''];
   lines.push(`  ${pad(report.checks.settings.name, 16)} ${pad(report.checks.settings.status, 7)} ${report.checks.settings.detail}`);
-  lines.push('  endpoints');
-  for (const endpoint of report.checks.endpoints) {
-    lines.push(`    ${pad(endpoint.alias, 16)} ${pad(endpoint.status, 7)} ${endpoint.detail}`);
+  lines.push(`  ${pad(report.checks.config.name, 16)} ${pad(report.checks.config.status, 7)} ${report.checks.config.detail}`);
+  lines.push('  providers');
+  for (const provider of report.checks.providers) {
+    lines.push(`    ${pad(provider.provider, 16)} ${pad(provider.status, 7)} ${provider.detail}`);
   }
   lines.push(`  ${pad(report.checks.roster.name, 16)} ${pad(report.checks.roster.status, 7)} ${report.checks.roster.detail}`);
   lines.push('');
@@ -293,17 +287,35 @@ async function main() {
     return;
   }
 
-  const configDir = expandHome(opts.config_dir || process.env.MUSE_CONFIG_DIR ||
+  const configDir = configModule.expandHome(opts.config_dir || process.env.MUSE_CONFIG_DIR ||
     path.join(os.homedir(), '.config', 'muse'));
-  const endpointsFile = expandHome(process.env.MODELS_CONFIG_FILE ||
-    path.join(configDir, 'endpoints.json'));
+  const configFile = configModule.configPath(opts);
   const secrets = new Set();
 
-  const settings = checkSettings(configDir);
-  const endpoints = await checkEndpoints(endpointsFile, opts.timeout_ms, secrets);
-  const roster = checkRoster(configDir, endpointsFile);
-  const checks = { settings, endpoints, roster };
-  const problems = [settings, ...endpoints, roster].filter((check) => !check.ok).length;
+  let config = null;
+  let configCheck;
+  try {
+    config = configModule.loadConfig({ config_file: configFile });
+    for (const provider of Object.values(config.providers)) {
+      if (provider.api_key) secrets.add(String(provider.api_key));
+    }
+    configCheck = {
+      name: 'muse-squad.toml',
+      status: 'OK',
+      ok: true,
+      detail: `${Object.keys(config.providers).length} providers, ${Object.keys(config.squad.members).length} members, schema ${config.schema}`
+    };
+  } catch (error) {
+    configCheck = {
+      name: 'muse-squad.toml', status: 'BAD', ok: false, detail: error.message
+    };
+  }
+
+  const settings = checkSettings(configDir, configFile);
+  const providers = await checkProviders(config, opts.timeout_ms, secrets);
+  const roster = checkRoster(config, configFile, configDir);
+  const checks = { settings, config: configCheck, providers, roster };
+  const problems = [settings, configCheck, ...providers, roster].filter((check) => !check.ok).length;
   const report = { ok: problems === 0, problems, checks };
 
   process.stdout.write(opts.json ? `${JSON.stringify(report, null, 2)}\n` : renderText(report));

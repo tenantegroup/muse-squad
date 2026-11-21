@@ -5,8 +5,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PAYLOAD_DIR="$ROOT/payload"
 VERSION_FILE="$ROOT/VERSION"
-ENDPOINTS_DEFAULT="$PAYLOAD_DIR/mcp/endpoints.default.json"
-SQUAD_TEAM_DEFAULT="$PAYLOAD_DIR/squad-team.default.json"
+CONFIG_DEFAULT="$PAYLOAD_DIR/muse-squad.default.toml"
 AGENTS_POLICY="$PAYLOAD_DIR/AGENTS.md"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
@@ -17,17 +16,22 @@ VERSION="$(tr -d '[:space:]' < "$VERSION_FILE")"
 
 # Explicit order keeps generated output deterministic.
 MANAGED_PATHS=(
-  "agents/plan-reviewer.md"
-  "agents/general-purpose.md"
-  "agents/worker.md"
   "skills/squad-team/SKILL.md"
   "skills/squad-doctor/SKILL.md"
   "skills/squad-plan/SKILL.md"
   "skills/squad-execute/SKILL.md"
   "mcp/bridge.js"
+  "mcp/config.js"
   "mcp/doctor.js"
   "mcp/register-settings.js"
   "mcp/sync-team.js"
+)
+
+# Files installed by older versions that no longer belong in a squad install.
+LEGACY_AGENTS=(
+  "agents/plan-reviewer.md"
+  "agents/general-purpose.md"
+  "agents/worker.md"
 )
 
 for rel in "${MANAGED_PATHS[@]}"; do
@@ -37,19 +41,16 @@ for rel in "${MANAGED_PATHS[@]}"; do
     die "payload contains a PowerShell here-string terminator ('@): $f"
   fi
 done
-[[ -f "$ENDPOINTS_DEFAULT" ]] || die "missing $ENDPOINTS_DEFAULT"
-[[ -f "$SQUAD_TEAM_DEFAULT" ]] || die "missing $SQUAD_TEAM_DEFAULT"
-if LC_ALL=C grep -q "'@" "$SQUAD_TEAM_DEFAULT"; then
-  die "team config contains a PowerShell here-string terminator ('@): $SQUAD_TEAM_DEFAULT"
+[[ -f "$CONFIG_DEFAULT" ]] || die "missing $CONFIG_DEFAULT"
+if LC_ALL=C grep -q "'@" "$CONFIG_DEFAULT"; then
+  die "config default contains a PowerShell here-string terminator ('@): $CONFIG_DEFAULT"
 fi
 [[ -f "$AGENTS_POLICY" ]] || die "missing $AGENTS_POLICY"
 if LC_ALL=C grep -q "'@" "$AGENTS_POLICY"; then
   die "agents policy contains a PowerShell here-string terminator ('@): $AGENTS_POLICY"
 fi
-node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$ENDPOINTS_DEFAULT" ||
-  die "$ENDPOINTS_DEFAULT is not valid JSON"
-node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$SQUAD_TEAM_DEFAULT" ||
-  die "$SQUAD_TEAM_DEFAULT is not valid JSON"
+node "$ROOT/payload/mcp/config.js" --file "$CONFIG_DEFAULT" --json >/dev/null ||
+  die "$CONFIG_DEFAULT is not valid muse-squad TOML"
 
 emit_bash() {
   local out="$ROOT/install" i=0 rel delim content
@@ -87,8 +88,8 @@ Usage:
 Options:
   --dir PATH          Install into PATH instead of $HOME/.config/muse
   --update            Download and run the latest installer from GitHub, then install
-  --uninstall         Remove managed files and unregister custom-coder
-  --no-mcp            Skip custom-coder MCP registration
+  --uninstall         Remove managed files and unregister muse-squad
+  --no-mcp            Skip muse-squad MCP registration
   --backup            Force a backup prompt/backup
   --no-backup         Skip the backup prompt and backup
   --reconfigure-team  Rerun the interactive team wizard on an existing install
@@ -102,7 +103,7 @@ Environment:
   MUSE_SQUAD_NO_BACKUP     Set to 1 to skip backup unless --backup is passed
   MUSE_SQUAD_SKIP_MUSE_CHECK Set to 1 to skip Muse install/config discovery
 
-Endpoints are configured in endpoints.json inside the config directory.
+Providers and squad members are configured in muse-squad.toml inside the config directory.
 USAGE
 }
 
@@ -304,7 +305,7 @@ backup_config() {
   chmod 700 "$backup" || fail "cannot secure backup dir $backup"
   cp -a "$CONFIG_DIR/." "$backup/" || fail "cannot back up $CONFIG_DIR to $backup"
   log "  backed up    $CONFIG_DIR -> $backup"
-  log "  restore      copy the contents of $backup back into $CONFIG_DIR"
+  log "  restore      $backup"
 }
 
 install_file() {
@@ -420,48 +421,35 @@ uninstall_agents_policy() {
   done
 }
 
-install_endpoints_config() {
-  local dest="$CONFIG_DIR/endpoints.json" tmp
+install_config() {
+  local dest="$CONFIG_DIR/muse-squad.toml" tmp
   if [[ -f "$dest" ]]; then
     log "  unchanged  $dest"
     return 0
   fi
   mkdir -p "$(dirname "$dest")" || fail "cannot create directory for $dest"
-  tmp="$(mktemp "${TMPDIR:-/tmp}/muse-squad-endpoints.XXXXXX")" || fail "mktemp failed"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/muse-squad-config.XXXXXX")" || fail "mktemp failed"
   cat > "$tmp"
   chmod 600 "$tmp" || fail "cannot set permissions on $dest"
   mv "$tmp" "$dest" || fail "cannot install $dest"
   log "  created    $dest"
 }
 
-install_squad_team_config() {
-  local dest="$CONFIG_DIR/squad-team.json" tmp
-  if [[ -f "$dest" ]]; then
-    log "  unchanged  $dest"
-    return 0
+available_providers() {
+  local config="$CONFIG_DIR/muse-squad.toml" parser="$CONFIG_DIR/mcp/config.js"
+  if command -v node >/dev/null 2>&1 && [[ -f "$config" && -f "$parser" ]]; then
+    node "$parser" --file "$config" --list-providers 2>/dev/null || true
   fi
-  mkdir -p "$(dirname "$dest")" || fail "cannot create directory for $dest"
-  tmp="$(mktemp "${TMPDIR:-/tmp}/muse-squad-team.XXXXXX")" || fail "mktemp failed"
-  emit_team_defaults > "$tmp"
-  mv "$tmp" "$dest" || fail "cannot install $dest"
-  log "  created    $dest"
 }
 
-available_models() {
-  local endpoints="$CONFIG_DIR/endpoints.json"
-  printf '%s\n' 'muse-spark-1.3-contributor' 'muse-ember-1.0' 'muse-wonder-1.0'
-  if command -v node >/dev/null 2>&1 && [[ -f "$endpoints" ]]; then
+existing_charter() {
+  local config="$1" name="$2" parser="$CONFIG_DIR/mcp/config.js"
+  if command -v node >/dev/null 2>&1 && [[ -f "$config" && -f "$parser" ]]; then
     node -e '
-      const fs = require("fs");
-      const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
-      const seen = new Set();
-      for (const name of Object.keys(config.muse_models || {})) if (!seen.has(name)) {
-        seen.add(name); console.log(name);
-      }
-      for (const name of Object.keys(config.endpoints || {})) if (!seen.has(name)) {
-        seen.add(name); console.log(name);
-      }
-    ' "$endpoints" 2>/dev/null || true
+      const config = require(process.argv[1]).loadConfig({ config_file: process.argv[2] });
+      const member = config.squad.members[process.argv[3]];
+      if (member) process.stdout.write(member.charter.replace(/\s+/g, " ").trim());
+    ' "$parser" "$config" "$name" 2>/dev/null || true
   fi
 }
 
@@ -483,9 +471,6 @@ normalize_member_name() {
   local value="$1" slug
   slug="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')"
   [[ -n "$slug" ]] || slug="member"
-  case "$slug" in
-    worker|plan-reviewer|general-purpose) slug="${slug}-1" ;;
-  esac
   printf '%s' "$slug"
 }
 
@@ -497,18 +482,53 @@ prompt_default() {
   printf '%s' "$answer"
 }
 
-resolve_model_selection() {
+resolve_provider_selection() {
   local answer="$1" default="$2"
   [[ -z "$answer" ]] && { printf '%s' "$default"; return 0; }
   if [[ "$answer" =~ ^[0-9]+$ ]]; then
     local index=$((answer - 1))
-    if (( index >= 0 && index < ${#WIZARD_MODELS[@]} )); then
-      printf '%s' "${WIZARD_MODELS[$index]}"
+    if (( index >= 0 && index < ${#WIZARD_PROVIDERS[@]} )); then
+      printf '%s' "${WIZARD_PROVIDERS[$index]}"
       return 0
     fi
-    fail "invalid model number: $answer"
+    fail "invalid provider number: $answer"
   fi
   printf '%s' "$answer"
+}
+
+resolve_provider_list() {
+  local answer="$1" default="$2" resolved
+  [[ -z "$answer" ]] && { printf '%s' "$default"; return 0; }
+  local -a parts=()
+  IFS=',' read -r -a parts <<< "$answer"
+  local part out=""
+  for part in "${parts[@]}"; do
+    part="$(trim_value "$part")"
+    [[ -n "$part" ]] || continue
+    resolved="$(resolve_provider_selection "$part" "")"
+    [[ -n "$out" ]] && out+=","
+    out+="$resolved"
+  done
+  printf '%s' "$out"
+}
+
+provider_is_known() {
+  local candidate="$1" known
+  for known in "${WIZARD_PROVIDERS[@]-}"; do
+    [[ "$known" == "$candidate" ]] && return 0
+  done
+  return 1
+}
+
+validate_provider_list() {
+  local list="$1" part
+  [[ -z "$list" ]] && return 0
+  local -a parts=()
+  IFS=',' read -r -a parts <<< "$list"
+  for part in "${parts[@]}"; do
+    provider_is_known "$part" || return 1
+  done
+  return 0
 }
 
 is_name_used() {
@@ -520,64 +540,73 @@ is_name_used() {
 }
 
 render_team_config() {
-  local members_file="$1" output="$2" defaults_file node_file
-  defaults_file="$(mktemp "${TMPDIR:-/tmp}/muse-squad-defaults.XXXXXX")" || fail "mktemp failed"
+  local config_file="$1" members_file="$2" node_file
   node_file="$(mktemp "${TMPDIR:-/tmp}/muse-squad-render.XXXXXX")" || fail "mktemp failed"
-  emit_team_defaults > "$defaults_file"
   cat > "$node_file" <<'NODE'
 const fs = require('fs');
-const membersFile = process.argv[2];
-const defaultFile = process.argv[3];
-const defaults = JSON.parse(fs.readFileSync(defaultFile, 'utf8'));
-const byRole = new Map((defaults.members || []).map((member) => [member.role, member]));
+const path = require('path');
 
-function displayName(name) {
-  return String(name).split('-').filter(Boolean)
-    .map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' ');
+const configFile = process.argv[2];
+const membersFile = process.argv[3];
+
+function quote(value) {
+  return JSON.stringify(String(value));
 }
+
+function quoteBlock(value) {
+  const text = String(value).trim();
+  if (text.includes('"""')) return quote(text);
+  return `"""\n${text}\n"""`;
+}
+
+const raw = fs.readFileSync(configFile, 'utf8');
+const marker = raw.match(/^\[squad\][ \t]*$/m);
+if (!marker) throw new Error('muse-squad.toml has no [squad] table');
+const prefix = raw.slice(0, marker.index).replace(/\r?\n+$/, '\n');
+
+const config = require(path.join(path.dirname(configFile), 'mcp', 'config.js'))
+  .loadConfig({ config_file: configFile });
 
 const members = fs.readFileSync(membersFile, 'utf8').split(/\r?\n/)
   .filter((line) => line.length > 0)
   .map((line) => {
     const fields = line.split('\t');
     if (fields.length !== 4) throw new Error(`bad member line: ${line}`);
-    const [name, role, primary, backup] = fields;
-    const template = byRole.get(role);
+    const [name, primary, fallback, charter] = fields;
     return {
       name,
-      display_name: displayName(name),
-      role,
-      responsibility: template
-        ? template.responsibility
-        : `${role} work and bounded implementation tasks`,
       primary,
-      backup,
-      charter: template
-        ? template.charter
-        : `Domain expertise: ${role.toLowerCase()} tasks. Voice: concise and evidence-first. ` +
-          'Guardrails: stay scoped to assigned files, preserve existing conventions, and verify ' +
-          'changes before reporting done.'
+      fallback: fallback ? fallback.split(',') : [],
+      charter
     };
   });
 
-const team = {
-  schema_version: defaults.schema_version,
-  team_name: defaults.team_name,
-  memory_dir: defaults.memory_dir,
-  members,
-  projects: defaults.projects || {}
-};
-process.stdout.write(JSON.stringify(team, null, 2) + '\n');
+const lines = [
+  '[squad]',
+  `name = ${quote(config.squad.name)}`,
+  `memory_dir = ${quote(config.squad.memory_dir)}`,
+  ''
+];
+for (const member of members) {
+  lines.push(
+    `[squad.${member.name}]`,
+    `primary = ${quote(member.primary)}`,
+    `fallback = [${member.fallback.map(quote).join(', ')}]`,
+    `charter = ${quoteBlock(member.charter)}`,
+    ''
+  );
+}
+process.stdout.write(`${prefix}${lines.join('\n')}`);
 NODE
-  if ! node "$node_file" "$members_file" "$defaults_file" > "$output"; then
-    rm -f "$node_file" "$defaults_file"
+  if ! node "$node_file" "$config_file" "$members_file"; then
+    rm -f "$node_file"
     fail "team config generation failed"
   fi
-  rm -f "$node_file" "$defaults_file"
+  rm -f "$node_file"
 }
 
 configure_team() {
-  local dest="$CONFIG_DIR/squad-team.json" action="created"
+  local dest="$CONFIG_DIR/muse-squad.toml" action="created"
   if [[ -f "$dest" ]]; then
     action="updated"
     if (( ! RECONFIGURE_TEAM )); then
@@ -590,7 +619,7 @@ configure_team() {
     fi
   else
     if ! wizard_interactive || ! command -v node >/dev/null 2>&1; then
-      install_squad_team_config
+      install_config
       return 0
     fi
   fi
@@ -610,40 +639,40 @@ configure_team() {
       if [[ -f "$dest" ]]; then
         log "  unchanged  $dest"
       else
-        install_squad_team_config
+        install_config
       fi
       return 0 ;;
     *)
       fail "expected Y or n for team customization prompt" ;;
   esac
 
-  local model
-  WIZARD_MODELS=()
-  while IFS= read -r model; do
-    [[ -n "$model" ]] || continue
-    if [[ " ${WIZARD_MODELS[*]-} " != *" $model "* ]]; then
-      WIZARD_MODELS+=("$model")
+  local provider
+  WIZARD_PROVIDERS=()
+  while IFS= read -r provider; do
+    [[ -n "$provider" ]] || continue
+    if ! provider_is_known "$provider"; then
+      WIZARD_PROVIDERS+=("$provider")
     fi
-  done < <(available_models)
+  done < <(available_providers)
+  (( ${#WIZARD_PROVIDERS[@]} > 0 )) || fail "no providers are defined in $dest"
 
-  WIZARD_MODEL_MENU=""
+  WIZARD_PROVIDER_MENU=""
   local i
-  for i in "${!WIZARD_MODELS[@]}"; do
-    [[ -n "$WIZARD_MODEL_MENU" ]] && WIZARD_MODEL_MENU+=", "
-    WIZARD_MODEL_MENU+="$((i + 1)): ${WIZARD_MODELS[$i]}"
+  for i in "${!WIZARD_PROVIDERS[@]}"; do
+    [[ -n "$WIZARD_PROVIDER_MENU" ]] && WIZARD_PROVIDER_MENU+=", "
+    WIZARD_PROVIDER_MENU+="$((i + 1)): ${WIZARD_PROVIDERS[$i]}"
   done
 
   local -a default_names=(keaton fenster mcmanus hockney verbal)
-  local -a default_roles=(Lead Frontend Backend Tester Scribe)
-  local -a default_primary=(muse-spark-1.3-contributor local-coder local-coder local-coder muse-ember-1.0)
-  local -a default_backup=(grill-reviewer muse-ember-1.0 grill-reviewer muse-ember-1.0 local-coder)
-  local -a names=() roles=() primaries=() backups=()
+  local -a default_primary=(Muse-Spark Home-Ornith Home-Ornith Home-Ornith Muse-Ember)
+  local -a default_fallback=("DeepSeek-Flash" "Muse-Ember" "DeepSeek-Flash" "Muse-Ember" "Home-Ornith")
+  local -a names=() primaries=() fallbacks=() charters=()
   USED_NAMES=()
-  local name role primary backup answer
+  local name primary fallback charter answer
 
   for i in 0 1 2 3 4; do
     while :; do
-      name="$(prompt_default "Member $((i + 1)) [${default_roles[$i]}] name" "${default_names[$i]}")"
+      name="$(prompt_default "Member $((i + 1)) name" "${default_names[$i]}")"
       name="$(normalize_member_name "$name")"
       if is_name_used "$name"; then
         printf '  name already in use: %s\n' "$name"
@@ -651,17 +680,20 @@ configure_team() {
       fi
       break
     done
-    role="$(prompt_default "Role for $name" "${default_roles[$i]}")"
-    role="$(trim_value "$role" | tr -d '\t')"
-    [[ -n "$role" ]] || role="${default_roles[$i]}"
-    primary="$(prompt_default "Primary model/endpoint for $name ($WIZARD_MODEL_MENU)" "${default_primary[$i]}")"
-    primary="$(resolve_model_selection "$primary" "${default_primary[$i]}")"
-    backup="$(prompt_default "Backup model/endpoint for $name" "${default_backup[$i]}")"
-    backup="$(resolve_model_selection "$backup" "${default_backup[$i]}")"
+    primary="$(prompt_default "Primary provider for $name ($WIZARD_PROVIDER_MENU)" "${default_primary[$i]}")"
+    primary="$(resolve_provider_selection "$primary" "${default_primary[$i]}")"
+    provider_is_known "$primary" || fail "unknown provider: $primary"
+    fallback="$(prompt_default "Fallback providers for $name (comma-separated, empty for none)" "${default_fallback[$i]}")"
+    fallback="$(resolve_provider_list "$fallback" "${default_fallback[$i]}")"
+    validate_provider_list "$fallback" || fail "unknown provider in fallback list: $fallback"
+    charter="$(existing_charter "$dest" "$name")"
+    [[ -n "$charter" ]] || charter="Domain expertise: $name tasks. Voice: concise and evidence-first. Guardrails: stay scoped to assigned files, preserve existing conventions, and verify changes before reporting done."
+    charter="$(prompt_default "Charter for $name" "$charter")"
+    charter="$(printf '%s' "$charter" | tr '\t' ' ' | tr '\n' ' ' | tr -s ' ')"
     names+=("$name")
-    roles+=("$role")
     primaries+=("$primary")
-    backups+=("$backup")
+    fallbacks+=("$fallback")
+    charters+=("$charter")
     USED_NAMES+=("$name")
   done
 
@@ -685,30 +717,30 @@ configure_team() {
       [[ -n "$name" ]] || { printf '  name cannot be empty\n'; continue; }
       break
     done
-    printf 'Role for %s: ' "$name" >&2
-    if ! IFS= read -r role; then role=""; fi
-    role="$(trim_value "$role" | tr -d '\t')"
-    [[ -n "$role" ]] || role="Contributor"
-    primary="$(prompt_default "Primary model/endpoint for $name ($WIZARD_MODEL_MENU)" 'muse-ember-1.0')"
-    primary="$(resolve_model_selection "$primary" 'muse-ember-1.0')"
-    backup="$(prompt_default "Backup model/endpoint for $name" 'local-coder')"
-    backup="$(resolve_model_selection "$backup" 'local-coder')"
+    primary="$(prompt_default "Primary provider for $name ($WIZARD_PROVIDER_MENU)" 'Muse-Ember')"
+    primary="$(resolve_provider_selection "$primary" 'Muse-Ember')"
+    provider_is_known "$primary" || fail "unknown provider: $primary"
+    fallback="$(prompt_default "Fallback providers for $name (comma-separated, empty for none)" 'Home-Ornith')"
+    fallback="$(resolve_provider_list "$fallback" 'Home-Ornith')"
+    validate_provider_list "$fallback" || fail "unknown provider in fallback list: $fallback"
+    charter="$(prompt_default "Charter for $name" 'Domain expertise: bounded implementation tasks. Voice: concise and evidence-first. Guardrails: stay scoped to assigned files, preserve existing conventions, and verify changes before reporting done.')"
+    charter="$(printf '%s' "$charter" | tr '\t' ' ' | tr '\n' ' ' | tr -s ' ')"
     names+=("$name")
-    roles+=("$role")
     primaries+=("$primary")
-    backups+=("$backup")
+    fallbacks+=("$fallback")
+    charters+=("$charter")
     USED_NAMES+=("$name")
   done
 
   local members_file config_tmp
   members_file="$(mktemp "${TMPDIR:-/tmp}/muse-squad-members.XXXXXX")" || fail "mktemp failed"
-  config_tmp="$(mktemp "${TMPDIR:-/tmp}/muse-squad-team.XXXXXX")" || fail "mktemp failed"
+  config_tmp="$(mktemp "${TMPDIR:-/tmp}/muse-squad-config.XXXXXX")" || fail "mktemp failed"
   : > "$members_file"
   for i in "${!names[@]}"; do
     printf '%s\t%s\t%s\t%s\n' \
-      "${names[$i]}" "${roles[$i]}" "${primaries[$i]}" "${backups[$i]}" >> "$members_file"
+      "${names[$i]}" "${primaries[$i]}" "${fallbacks[$i]}" "${charters[$i]}" >> "$members_file"
   done
-  render_team_config "$members_file" "$config_tmp"
+  render_team_config "$dest" "$members_file" > "$config_tmp" || fail "cannot render $dest"
   mkdir -p "$(dirname "$dest")" || fail "cannot create directory for $dest"
   mv "$config_tmp" "$dest" || fail "cannot install $dest"
   rm -f "$members_file"
@@ -756,7 +788,7 @@ register_mcp() {
     node "$registrar" "${args[@]}" --unregister
     return $?
   fi
-  args+=(--config-file "$CONFIG_DIR/endpoints.json")
+  args+=(--config-file "$CONFIG_DIR/muse-squad.toml")
   node "$registrar" "${args[@]}"
 }
 
@@ -783,7 +815,7 @@ self_update() {
   bash "$tmp" "${args[@]}"
   rc=$?
   rm -f "$tmp"
-  exit $rc
+  return $rc
 }
 
 if [[ "$MODE" != "uninstall" ]]; then
@@ -794,38 +826,43 @@ log "muse-squad v$VERSION - $MODE"
 log "config dir: $CONFIG_DIR"
 
 if [[ "$MODE" == "update" ]]; then
-  self_update
+  self_update || exit $?
+  # The downloaded installer already did the work; keep reading to EOF so a
+  # piped `curl ... | bash` does not report a broken pipe.
+  MODE="updated"
 fi
 
 FIRST_INSTALL=0
-if [[ ! -f "$CONFIG_DIR/endpoints.json" ]]; then
+if [[ ! -f "$CONFIG_DIR/muse-squad.toml" ]]; then
   FIRST_INSTALL=1
 fi
 
-backup_config
+if [[ "$MODE" != "updated" ]]; then
+  backup_config
+fi
 
 if [[ "$MODE" == "uninstall" ]]; then
   register_mcp unregister
   uninstall_agents_policy
   run_sync_team uninstall
-  uninstall_file squad-team.json
   if [[ -d "$CONFIG_DIR/squad" ]]; then
     rm -rf "$CONFIG_DIR/squad" || fail "cannot remove $CONFIG_DIR/squad"
     log "  removed    $CONFIG_DIR/squad"
   fi
 BODY
 
-    for rel in "${MANAGED_PATHS[@]}"; do
+    for rel in "${MANAGED_PATHS[@]}" "${LEGACY_AGENTS[@]}"; do
       printf '  uninstall_file %q\n' "$rel"
     done
 
     cat <<'MID'
-  if [[ -f "$CONFIG_DIR/endpoints.json" ]]; then
-    log "  kept       $CONFIG_DIR/endpoints.json (remove manually if desired)"
+  if [[ -f "$CONFIG_DIR/muse-squad.toml" ]]; then
+    log "  kept       $CONFIG_DIR/muse-squad.toml (config is never removed)"
   fi
   log "done."
-  exit 0
-fi
+elif [[ "$MODE" == "updated" ]]; then
+  :
+else
 
 MID
 
@@ -838,19 +875,19 @@ MID
       printf '%s\n' "$delim"
     done
 
-    printf "install_endpoints_config <<'MSQ_ENDPOINTS_CONFIG'\n"
-    cat "$ENDPOINTS_DEFAULT"
-    printf 'MSQ_ENDPOINTS_CONFIG\n'
-
-    printf "emit_team_defaults() {\n  cat <<'MSQ_TEAM_DEFAULTS'\n"
-    cat "$SQUAD_TEAM_DEFAULT"
-    printf "MSQ_TEAM_DEFAULTS\n}\n"
+    printf "install_config <<'MSQ_CONFIG_DEFAULT'\n"
+    cat "$CONFIG_DEFAULT"
+    printf 'MSQ_CONFIG_DEFAULT\n'
 
     printf "install_agents_policy <<'MSQ_AGENTS_POLICY'\n"
     printf '%s\n' '<!-- muse-squad:begin -->'
     cat "$AGENTS_POLICY"
     printf '%s\n' '<!-- muse-squad:end -->'
     printf 'MSQ_AGENTS_POLICY\n'
+
+    for rel in "${LEGACY_AGENTS[@]}"; do
+      printf 'uninstall_file %q\n' "$rel"
+    done
 
     cat <<'FOOT'
 configure_team
@@ -859,12 +896,14 @@ register_mcp install
 if [[ "$MODE" == "install" && "$FIRST_INSTALL" == "1" ]]; then
   log ""
   log "Next steps:"
-  log "  1. Configure: edit $CONFIG_DIR/endpoints.json (base_url, model, api_key). Missing/unreachable endpoints still work in native-only mode with warnings."
+  log "  1. Configure: edit $CONFIG_DIR/muse-squad.toml (providers, endpoints, and squad members)."
   log "  2. Use in Muse Code: /squad-plan to create .muse/PLAN.md, then /squad-execute."
-  log "  3. Customize: add agents to $CONFIG_DIR/agents/*.md and skills to $CONFIG_DIR/skills/<name>/SKILL.md."
-  log "  4. Update later: re-run this installer with --update."
+  log "  3. Customize: edit muse-squad.toml; generated agents in $CONFIG_DIR/agents/ are rebuilt from it."
+  log "  4. Check setup any time with /squad-doctor."
+  log "  5. Update later: re-run this installer with --update."
 fi
 log "done."
+fi
 FOOT
   } > "$out"
   chmod +x "$out"
@@ -942,8 +981,8 @@ Usage:
 Options:
   --dir PATH          Install into PATH instead of ~/.config/muse
   --update            Download and run the latest installer from GitHub, then install
-  --uninstall         Remove managed files and unregister custom-coder
-  --no-mcp            Skip custom-coder MCP registration
+  --uninstall         Remove managed files and unregister muse-squad
+  --no-mcp            Skip muse-squad MCP registration
   --backup            Force a backup prompt/backup
   --no-backup         Skip the backup prompt and backup
   --reconfigure-team  Rerun the interactive team wizard on an existing install
@@ -957,7 +996,7 @@ Environment:
   MUSE_SQUAD_NO_BACKUP     Set to 1 to skip backup unless --backup is passed
   MUSE_SQUAD_SKIP_MUSE_CHECK Set to 1 to skip Muse install/config discovery
 
-Endpoints are configured in endpoints.json inside the config directory.
+Providers and squad members are configured in muse-squad.toml inside the config directory.
 
 Note: Windows PowerShell 5.1 has no `irm` alias. Use:
   Invoke-RestMethod 'https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install.ps1' | iex
@@ -1149,7 +1188,7 @@ function Backup-Config {
     Copy-Item -LiteralPath $_.FullName -Destination $backup -Recurse -Force
   }
   Write-Host "  backed up    $configDir -> $backup"
-  Write-Host "  restore      copy the contents of $backup back into $configDir"
+  Write-Host "  restore      $backup"
 }
 
 function Install-File([string]$rel, [string]$content) {
@@ -1279,8 +1318,8 @@ function Uninstall-Agents-Policy {
   }
 }
 
-function Install-Endpoints-Config([string]$content) {
-  $dest = Get-Dest 'endpoints.json'
+function Install-Config([string]$content) {
+  $dest = Get-Dest 'muse-squad.toml'
   if (Test-Path -LiteralPath $dest) {
     Write-Host "  unchanged  $dest"
     return
@@ -1291,21 +1330,16 @@ function Install-Endpoints-Config([string]$content) {
   }
   $normalized = $content -replace "(?:\r?\n)+\z", "`n"
   [IO.File]::WriteAllText($dest, $normalized, [System.Text.UTF8Encoding]::new($false))
-  Write-Host "  created    $dest"
-}
-
-function Install-Squad-Team-Config {
-  $dest = Get-Dest 'squad-team.json'
-  if (Test-Path -LiteralPath $dest) {
-    Write-Host "  unchanged  $dest"
-    return
+  try {
+    $identity = [Security.Principal.WindowsIdentity]::GetCurrent().Name
+    $rule = New-Object System.Security.AccessControl.FileSystemAccessRule -ArgumentList @($identity, 'FullControl', 'Allow')
+    $acl = Get-Acl -LiteralPath $dest
+    $acl.SetAccessRuleProtection($true, $false)
+    $acl.SetAccessRule($rule)
+    Set-Acl -LiteralPath $dest -AclObject $acl
+  } catch {
+    # ACLs are best effort; the file still owns the current user by default.
   }
-  $parent = Split-Path -Parent $dest
-  if (-not (Test-Path -LiteralPath $parent)) {
-    New-Item -ItemType Directory -Path $parent -Force | Out-Null
-  }
-  $normalized = (Get-Team-Defaults) -replace "(?:\r?\n)+\z", "`n"
-  [IO.File]::WriteAllText($dest, $normalized, [System.Text.UTF8Encoding]::new($false))
   Write-Host "  created    $dest"
 }
 
@@ -1318,39 +1352,43 @@ function Test-Interactive-Input {
   }
 }
 
-function Get-Available-Models {
-  $models = New-Object 'System.Collections.Generic.List[string]'
-  foreach ($name in @('muse-spark-1.3-contributor', 'muse-ember-1.0', 'muse-wonder-1.0')) {
-    if (-not $models.Contains($name)) { $models.Add($name) }
-  }
-  $endpointsFile = Get-Dest 'endpoints.json'
-  if ((Get-Command node -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $endpointsFile)) {
-    $script = @'
-const fs = require('fs');
-const config = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
-const seen = new Set();
-for (const name of Object.keys(config.muse_models || {})) if (!seen.has(name)) {
-  seen.add(name); console.log(name);
-}
-for (const name of Object.keys(config.endpoints || {})) if (!seen.has(name)) {
-  seen.add(name); console.log(name);
-}
-'@
-    $output = & node -e $script $endpointsFile 2>$null
+function Get-Available-Providers {
+  $providers = New-Object 'System.Collections.Generic.List[string]'
+  $configFile = Get-Dest 'muse-squad.toml'
+  $parser = Get-Dest 'mcp/config.js'
+  if ((Get-Command node -ErrorAction SilentlyContinue) -and
+      (Test-Path -LiteralPath $configFile) -and (Test-Path -LiteralPath $parser)) {
+    $output = & node $parser --file $configFile --list-providers 2>$null
     foreach ($line in $output) {
       $name = ([string]$line).Trim()
-      if ($name -and -not $models.Contains($name)) { $models.Add($name) }
+      if ($name -and -not $providers.Contains($name)) { $providers.Add($name) }
     }
   }
-  return $models.ToArray()
+  return $providers.ToArray()
 }
 
-function Get-Model-Menu([string[]]$models) {
+function Get-Provider-Menu([string[]]$providers) {
   $items = @()
-  for ($i = 0; $i -lt $models.Count; $i++) {
-    $items += "$($i + 1): $($models[$i])"
+  for ($i = 0; $i -lt $providers.Count; $i++) {
+    $items += "$($i + 1): $($providers[$i])"
   }
   return ($items -join ', ')
+}
+
+function Get-Existing-Charter([string]$name) {
+  $configFile = Get-Dest 'muse-squad.toml'
+  $parser = Get-Dest 'mcp/config.js'
+  if ((Get-Command node -ErrorAction SilentlyContinue) -and
+      (Test-Path -LiteralPath $configFile) -and (Test-Path -LiteralPath $parser)) {
+    $script = @'
+const config = require(process.argv[1]).loadConfig({ config_file: process.argv[2] });
+const member = config.squad.members[process.argv[3]];
+if (member) process.stdout.write(member.charter.replace(/\s+/g, ' ').trim());
+'@
+    $output = & node -e $script $parser $configFile $name 2>$null
+    if ($output) { return (([string]($output -join ' ')).Trim()) }
+  }
+  return ''
 }
 
 function Read-Defaulted([string]$prompt, [string]$default) {
@@ -1369,81 +1407,117 @@ function ConvertTo-Member-Name([string]$value) {
   $slug = $value.ToLowerInvariant() -replace '[^a-z0-9]+', '-'
   $slug = $slug.Trim('-')
   if ([string]::IsNullOrEmpty($slug)) { $slug = 'member' }
-  if (@('worker', 'plan-reviewer', 'general-purpose') -contains $slug) { $slug = "$slug-1" }
   return $slug
 }
 
-function Resolve-Model([string]$answer, [string]$default) {
+function Resolve-Provider([string]$answer, [string]$default) {
   if ([string]::IsNullOrWhiteSpace($answer)) { return $default }
   if ($answer -match '^\d+$') {
     $index = [int]$answer - 1
-    if ($index -ge 0 -and $index -lt $script:WizardModels.Count) {
-      return $script:WizardModels[$index]
+    if ($index -ge 0 -and $index -lt $script:WizardProviders.Count) {
+      return $script:WizardProviders[$index]
     }
-    throw "Invalid model number: $answer"
+    throw "Invalid provider number: $answer"
   }
   return $answer
 }
 
-function New-Team-Config([object[]]$members) {
-  $defaults = Get-Team-Defaults | ConvertFrom-Json
-  $byRole = @{}
-  foreach ($member in $defaults.members) { $byRole[$member.role] = $member }
-
-  $built = @()
-  foreach ($member in $members) {
-    $template = $null
-    if ($byRole.ContainsKey($member.role)) { $template = $byRole[$member.role] }
-    $responsibility = if ($template) {
-      $template.responsibility
-    } else {
-      "$($member.role) work and bounded implementation tasks"
-    }
-    $charter = if ($template) {
-      $template.charter
-    } else {
-      "Domain expertise: $($member.role.ToLowerInvariant()) tasks. Voice: concise and evidence-first. " +
-        'Guardrails: stay scoped to assigned files, preserve existing conventions, and verify ' +
-        'changes before reporting done.'
-    }
-    $display = (($member.name -split '-' | Where-Object { $_ } | ForEach-Object {
-      $_.Substring(0, 1).ToUpperInvariant() + $_.Substring(1)
-    }) -join ' ')
-
-    $built += [pscustomobject]@{
-      name           = $member.name
-      display_name   = $display
-      role           = $member.role
-      responsibility = $responsibility
-      primary        = $member.primary
-      backup         = $member.backup
-      charter        = $charter
-    }
+function Resolve-Provider-List([string]$answer, [string]$default) {
+  if ([string]::IsNullOrWhiteSpace($answer)) { return $default }
+  $resolved = @()
+  foreach ($part in ($answer -split ',')) {
+    $part = ([string]$part).Trim()
+    if (-not $part) { continue }
+    $resolved += (Resolve-Provider $part '')
   }
-
-  $team = [ordered]@{
-    schema_version = $defaults.schema_version
-    team_name      = $defaults.team_name
-    memory_dir     = $defaults.memory_dir
-    members        = @($built)
-    projects       = $defaults.projects
-  }
-  return ($team | ConvertTo-Json -Depth 8)
+  return ($resolved -join ',')
 }
 
-function Write-Team-Config([string]$content, [string]$action) {
-  $dest = Get-Dest 'squad-team.json'
+function Test-Provider-Known([string]$candidate) {
+  return ($script:WizardProviders -contains $candidate)
+}
+
+function Test-Provider-List([string]$list) {
+  if ([string]::IsNullOrWhiteSpace($list)) { return $true }
+  foreach ($part in ($list -split ',')) {
+    if (-not (Test-Provider-Known ([string]$part).Trim())) { return $false }
+  }
+  return $true
+}
+
+function Write-Team-Config([string]$membersFile, [string]$action) {
+  $dest = Get-Dest 'muse-squad.toml'
   $parent = Split-Path -Parent $dest
   if (-not (Test-Path -LiteralPath $parent)) {
     New-Item -ItemType Directory -Path $parent -Force | Out-Null
   }
-  $normalized = $content -replace "(?:\r?\n)+\z", "`n"
+  $nodeScript = @'
+const fs = require('fs');
+const path = require('path');
+
+const configFile = process.argv[2];
+const membersFile = process.argv[3];
+const outputFile = process.argv[4];
+
+function quote(value) {
+  return JSON.stringify(String(value));
+}
+
+function quoteBlock(value) {
+  const text = String(value).trim();
+  if (text.includes('"""')) return quote(text);
+  return `"""\n${text}\n"""`;
+}
+
+const raw = fs.readFileSync(configFile, 'utf8');
+const marker = raw.match(/^\[squad\][ \t]*$/m);
+if (!marker) throw new Error('muse-squad.toml has no [squad] table');
+const prefix = raw.slice(0, marker.index).replace(/\r?\n+$/, '\n');
+const config = require(path.join(path.dirname(configFile), 'mcp', 'config.js'))
+  .loadConfig({ config_file: configFile });
+
+const members = fs.readFileSync(membersFile, 'utf8').split(/\r?\n/)
+  .filter((line) => line.length > 0)
+  .map((line) => {
+    const fields = line.split('\t');
+    if (fields.length !== 4) throw new Error(`bad member line: ${line}`);
+    const [name, primary, fallback, charter] = fields;
+    return {
+      name,
+      primary,
+      fallback: fallback ? fallback.split(',') : [],
+      charter
+    };
+  });
+
+const lines = [
+  '[squad]',
+  `name = ${quote(config.squad.name)}`,
+  `memory_dir = ${quote(config.squad.memory_dir)}`,
+  ''
+];
+for (const member of members) {
+  lines.push(
+    `[squad.${member.name}]`,
+    `primary = ${quote(member.primary)}`,
+    `fallback = [${member.fallback.map(quote).join(', ')}]`,
+    `charter = ${quoteBlock(member.charter)}`,
+    ''
+  );
+}
+fs.writeFileSync(outputFile, `${prefix}${lines.join('\n')}`);
+'@
+  $rendered = & node -e $nodeScript $dest $membersFile
+  if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) {
+    throw "team config generation failed with exit code $LASTEXITCODE"
+  }
+  $normalized = (($rendered -join "`n") -replace "(?:\r?\n)+\z", "`n")
   [IO.File]::WriteAllText($dest, $normalized, [System.Text.UTF8Encoding]::new($false))
   Write-Host "  $action  $dest"
 }
 
 function Configure-Team {
-  $dest = Get-Dest 'squad-team.json'
+  $dest = Get-Dest 'muse-squad.toml'
   $action = 'created'
   if (Test-Path -LiteralPath $dest) {
     $action = 'updated'
@@ -1458,7 +1532,7 @@ function Configure-Team {
   } else {
     if ($useDefaults -or -not (Test-Interactive-Input) -or
         -not (Get-Command node -ErrorAction SilentlyContinue)) {
-      Install-Squad-Team-Config
+      Install-Config (Get-Config-Defaults)
       return
     }
   }
@@ -1474,7 +1548,7 @@ function Configure-Team {
     if (Test-Path -LiteralPath $dest) {
       Write-Host "  unchanged  $dest"
     } else {
-      Install-Squad-Team-Config
+      Install-Config (Get-Config-Defaults)
     }
     return
   }
@@ -1482,23 +1556,21 @@ function Configure-Team {
     throw 'Expected Y or n for team customization prompt'
   }
 
-  $script:WizardModels = Get-Available-Models
-  $menu = Get-Model-Menu $script:WizardModels
-  $defaultNames = @('keaton', 'fenster', 'mcmanus', 'hockney', 'verbal')
-  $defaultRoles = @('Lead', 'Frontend', 'Backend', 'Tester', 'Scribe')
-  $defaultPrimary = @(
-    'muse-spark-1.3-contributor', 'local-coder', 'local-coder', 'local-coder', 'muse-ember-1.0'
-  )
-  $defaultBackup = @(
-    'grill-reviewer', 'muse-ember-1.0', 'grill-reviewer', 'muse-ember-1.0', 'local-coder'
-  )
+  $script:WizardProviders = Get-Available-Providers
+  if ($script:WizardProviders.Count -eq 0) {
+    throw "no providers are defined in $dest"
+  }
+  $menu = Get-Provider-Menu $script:WizardProviders
 
+  $defaultNames = @('keaton', 'fenster', 'mcmanus', 'hockney', 'verbal')
+  $defaultPrimary = @('Muse-Spark', 'Home-Ornith', 'Home-Ornith', 'Home-Ornith', 'Muse-Ember')
+  $defaultFallback = @('DeepSeek-Flash', 'Muse-Ember', 'DeepSeek-Flash', 'Muse-Ember', 'Home-Ornith')
   $members = @()
   $used = New-Object 'System.Collections.Generic.HashSet[string]'
 
   for ($i = 0; $i -lt 5; $i++) {
     while ($true) {
-      $rawName = Read-Defaulted "Member $($i + 1) [$($defaultRoles[$i])] name" $defaultNames[$i]
+      $rawName = Read-Defaulted "Member $($i + 1) name" $defaultNames[$i]
       $name = ConvertTo-Member-Name $rawName
       if ($used.Contains($name)) {
         Write-Host "  name already in use: $name"
@@ -1507,13 +1579,20 @@ function Configure-Team {
       [void]$used.Add($name)
       break
     }
-    $role = (Read-Defaulted "Role for $name" $defaultRoles[$i]).Trim()
-    if ([string]::IsNullOrEmpty($role)) { $role = $defaultRoles[$i] }
-    $primary = Resolve-Model `
-      (Read-Defaulted "Primary model/endpoint for $name ($menu)" $defaultPrimary[$i]) $defaultPrimary[$i]
-    $backup = Resolve-Model `
-      (Read-Defaulted "Backup model/endpoint for $name" $defaultBackup[$i]) $defaultBackup[$i]
-    $members += [pscustomobject]@{ name = $name; role = $role; primary = $primary; backup = $backup }
+    $primary = Resolve-Provider `
+      (Read-Defaulted "Primary provider for $name ($menu)" $defaultPrimary[$i]) $defaultPrimary[$i]
+    if (-not (Test-Provider-Known $primary)) { throw "unknown provider: $primary" }
+    $fallback = Resolve-Provider-List `
+      (Read-Defaulted "Fallback providers for $name (comma-separated, empty for none)" $defaultFallback[$i]) `
+      $defaultFallback[$i]
+    if (-not (Test-Provider-List $fallback)) { throw "unknown provider in fallback list: $fallback" }
+    $charter = Get-Existing-Charter $name
+    if ([string]::IsNullOrWhiteSpace($charter)) {
+      $charter = "Domain expertise: $name tasks. Voice: concise and evidence-first. " +
+        'Guardrails: stay scoped to assigned files, preserve existing conventions, and verify changes before reporting done.'
+    }
+    $charter = ((Read-Defaulted "Charter for $name" $charter).Trim() -replace '\s+', ' ')
+    $members += [pscustomobject]@{ name = $name; primary = $primary; fallback = $fallback; charter = $charter }
   }
 
   while ($true) {
@@ -1534,24 +1613,32 @@ function Configure-Team {
       [void]$used.Add($name)
       break
     }
-    $role = (Read-Required "Role for $name" 'Contributor').Trim()
-    if ([string]::IsNullOrEmpty($role)) { $role = 'Contributor' }
-    $primary = Resolve-Model `
-      (Read-Defaulted "Primary model/endpoint for $name ($menu)" 'muse-ember-1.0') 'muse-ember-1.0'
-    $backup = Resolve-Model `
-      (Read-Defaulted "Backup model/endpoint for $name" 'local-coder') 'local-coder'
-    $members += [pscustomobject]@{ name = $name; role = $role; primary = $primary; backup = $backup }
+    $primary = Resolve-Provider `
+      (Read-Defaulted "Primary provider for $name ($menu)" 'Muse-Ember') 'Muse-Ember'
+    if (-not (Test-Provider-Known $primary)) { throw "unknown provider: $primary" }
+    $fallback = Resolve-Provider-List `
+      (Read-Defaulted "Fallback providers for $name (comma-separated, empty for none)" 'Home-Ornith') 'Home-Ornith'
+    if (-not (Test-Provider-List $fallback)) { throw "unknown provider in fallback list: $fallback" }
+    $charter = Read-Defaulted 'Charter' 'Domain expertise: bounded implementation tasks. Voice: concise and evidence-first. Guardrails: stay scoped to assigned files, preserve existing conventions, and verify changes before reporting done.'
+    $charter = ($charter.Trim() -replace '\s+', ' ')
+    $members += [pscustomobject]@{ name = $name; primary = $primary; fallback = $fallback; charter = $charter }
   }
 
-  Write-Team-Config (New-Team-Config $members) $action
+  $membersFile = Join-Path ([IO.Path]::GetTempPath()) ('muse-squad-members-' + [Guid]::NewGuid().ToString('N') + '.tsv')
+  try {
+    $lines = foreach ($member in $members) {
+      "$($member.name)`t$($member.primary)`t$($member.fallback)`t$($member.charter)"
+    }
+    [IO.File]::WriteAllText($membersFile, (($lines -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
+    Write-Team-Config $membersFile $action
+  } finally {
+    if (Test-Path -LiteralPath $membersFile) {
+      Remove-Item -LiteralPath $membersFile -Force -ErrorAction SilentlyContinue
+    }
+  }
 }
 
 function Uninstall-Team {
-  $teamFile = Get-Dest 'squad-team.json'
-  if (Test-Path -LiteralPath $teamFile) {
-    Remove-Item -LiteralPath $teamFile -Force
-    Write-Host "  removed    $teamFile"
-  }
   $squadDir = Get-Dest 'squad'
   if (Test-Path -LiteralPath $squadDir -PathType Container) {
     Remove-Item -LiteralPath $squadDir -Recurse -Force
@@ -1599,7 +1686,7 @@ function Register-Mcp([string]$action) {
   if ($action -eq 'unregister') {
     $nodeArgs += '--unregister'
   } else {
-    $nodeArgs += @('--config-file', (Get-Dest 'endpoints.json'))
+    $nodeArgs += @('--config-file', (Get-Dest 'muse-squad.toml'))
   }
   & node @nodeArgs
   if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) {
@@ -1655,7 +1742,7 @@ if ($mode -eq 'update') {
   return
 }
 
-$firstInstall = -not (Test-Path -LiteralPath (Join-Path $configDir 'endpoints.json'))
+$firstInstall = -not (Test-Path -LiteralPath (Get-Dest 'muse-squad.toml'))
 
 Backup-Config
 
@@ -1666,13 +1753,13 @@ if ($mode -eq 'uninstall') {
   Uninstall-Team
 BODY
 
-    for rel in "${MANAGED_PATHS[@]}"; do
+    for rel in "${MANAGED_PATHS[@]}" "${LEGACY_AGENTS[@]}"; do
       printf "  Uninstall-File '%s'\n" "$rel"
     done
 
     cat <<'MID'
-  if (Test-Path -LiteralPath (Get-Dest 'endpoints.json')) {
-    Write-Host "  kept       endpoints.json (remove manually if desired)"
+  if (Test-Path -LiteralPath (Get-Dest 'muse-squad.toml')) {
+    Write-Host "  kept       $(Get-Dest 'muse-squad.toml') (config is never removed)"
   }
   Write-Host 'done.'
   return
@@ -1687,13 +1774,15 @@ MID
       printf "'@\n"
     done
 
-    printf "Install-Endpoints-Config @'\n"
-    cat "$ENDPOINTS_DEFAULT"
-    printf "'@\n"
+    for rel in "${LEGACY_AGENTS[@]}"; do
+      printf "  Uninstall-File '%s'\n" "$rel"
+    done
 
-    printf "function Get-Team-Defaults {\n  @'\n"
-    cat "$SQUAD_TEAM_DEFAULT"
+    printf "function Get-Config-Defaults {\n  @'\n"
+    cat "$CONFIG_DEFAULT"
     printf "'@\n}\n"
+
+    printf "Install-Config (Get-Config-Defaults)\n"
 
     printf "Install-Agents-Policy @'\n"
     printf '%s\n' '<!-- muse-squad:begin -->'
@@ -1708,10 +1797,11 @@ Register-Mcp 'install'
 if ($mode -eq 'install' -and $firstInstall) {
   Write-Host ''
   Write-Host 'Next steps:'
-  Write-Host "  1. Configure: edit $(Join-Path $configDir 'endpoints.json') (base_url, model, api_key). Missing/unreachable endpoints still work in native-only mode with warnings."
+  Write-Host "  1. Configure: edit $(Join-Path $configDir 'muse-squad.toml') (providers, endpoints, and squad members)."
   Write-Host '  2. Use in Muse Code: /squad-plan to create .muse/PLAN.md, then /squad-execute.'
-  Write-Host "  3. Customize: add agents in $(Join-Path $configDir 'agents') (*.md) and skills in $(Join-Path $configDir 'skills\<name>\SKILL.md')."
-  Write-Host '  4. Update later: re-run this installer with --update.'
+  Write-Host "  3. Customize: edit muse-squad.toml; generated agents in $(Join-Path $configDir 'agents') are rebuilt from it."
+  Write-Host '  4. Check setup any time with /squad-doctor.'
+  Write-Host '  5. Update later: re-run this installer with --update.'
 }
 Write-Host 'done.'
 FOOT

@@ -1,0 +1,87 @@
+# muse-squad configuration - schema = 1
+# Single source of truth. Edit by hand or with /squad-team.
+# There is no second config file and no migration step.
+
+schema = 1
+
+# =============================== AI Providers ===============================
+# Provider names may contain letters, numbers, dot (.), underscore (_), and
+# hyphen (-). Members reference them exactly as written here.
+#
+# type = "native"  Built-in Muse model. The MCP router cannot call native
+#                  providers; it skips them and tries the member's HTTP
+#                  providers in chain order.
+# type = "http"    OpenAI-compatible endpoint the MCP router can call.
+#                  api_key accepts a plaintext value or ${ENV_VAR}.
+#
+# Use # comments in this file (TOML does not use ; comments).
+
+[providers.Home-Ornith]
+type = "http"
+base_url = "http://127.0.0.1:8000/v1"
+api_key = "local-key"             # or "${LOCAL_MODEL_API_KEY}"
+model = "local-llama/Ornith-1.5-35B-A3B-MLX-4bit"
+temperature = 0.2
+top_p = 0.9
+max_tokens = 8192
+max_input_chars = 96000
+on_context_exceeded = "truncate"  # "truncate" or "fallback"
+max_concurrency = 1
+timeout_ms = 600000
+queue_timeout_ms = 300000
+max_retries = 2
+
+[providers.DeepSeek-Flash]
+type = "http"
+base_url = "https://api.deepseek.com/v1"
+api_key = "replace-me"            # e.g. "${DEEPSEEK_API_KEY}"
+model = "deepseek-chat"
+max_concurrency = 4
+timeout_ms = 600000
+
+[providers.Muse-Spark]
+type = "native"
+model = "muse-spark-1.3-contributor"
+max_concurrency = 2
+
+[providers.Muse-Ember]
+type = "native"
+model = "muse-ember-1.0"
+max_concurrency = 4
+
+[providers.Muse-Wonder]
+type = "native"
+model = "muse-wonder-1.0"
+max_concurrency = 2
+
+# ================================== Squad ==================================
+# One [squad.<name>] table per member. Names are lowercase slugs.
+# Each member has only primary, an ordered fallback array, and a charter.
+# primary + fallback must reference provider names above. At least one member.
+
+[squad]
+
+[squad.keaton]
+primary = "Muse-Spark"
+fallback = ["DeepSeek-Flash"]
+charter = """Domain expertise: system architecture, dependency order, risk analysis, and decision-complete planning. Voice: concise, decisive, and evidence-first; ask for the exact file or command instead of guessing. Guardrails: do not edit product code while planning, cite concrete files and verification steps, and surface ambiguity before it becomes an implementation assumption."""
+
+[squad.fenster]
+primary = "Home-Ornith"
+fallback = ["Muse-Ember"]
+charter = """Domain expertise: UI components, styling systems, accessibility, and browser-side state. Voice: pragmatic and detail-oriented; describe the visible behavior a change should produce. Guardrails: stay inside frontend files, preserve existing design tokens and conventions, and never introduce a new framework or dependency without explicit approval."""
+
+[squad.mcmanus]
+primary = "Home-Ornith"
+fallback = ["DeepSeek-Flash"]
+charter = """Domain expertise: APIs, persistence layers, server-side logic, and safe data migrations. Voice: precise and failure-mode first; name the error path before the happy path. Guardrails: keep changes scoped to backend files, preserve public contracts unless the plan says otherwise, and never write a destructive migration without a rollback path."""
+
+[squad.hockney]
+primary = "Home-Ornith"
+fallback = ["Muse-Ember"]
+charter = """Domain expertise: unit and integration tests, regression analysis, and CI verification. Voice: skeptical and evidence-driven; report exact commands and results. Guardrails: never weaken or delete a test to make a run pass, add a regression test for every fixed bug, and do not claim success from a partial pass."""
+
+[squad.verbal]
+primary = "Muse-Ember"
+fallback = ["Home-Ornith"]
+charter = """Domain expertise: architectural decision records, execution logs, and durable project conventions. Voice: terse and factual; record why a decision was made, not just what happened. Guardrails: append only, never invent decisions, never rewrite earlier history, and keep every entry short enough to survive context compaction."""

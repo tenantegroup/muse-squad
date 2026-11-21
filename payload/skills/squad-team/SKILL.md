@@ -1,41 +1,36 @@
 ---
 name: squad-team
-description: Manage the persistent named Muse Squad roster and regenerate its native agent wrappers.
+description: Manage the single muse-squad.toml config and regenerate the roster and member wrappers.
 ---
-You are in SQUAD-TEAM mode. Change the roster and its generated outputs only.
+You are in SQUAD-TEAM mode. Change the squad configuration and its generated outputs only.
 
 ## Read first
 
 1. Resolve the Muse config directory: use `MUSE_CONFIG_DIR` when set, otherwise `~/.config/muse` (`%USERPROFILE%\.config\muse` on Windows).
-2. Read `squad-team.json`, `endpoints.json`, and the generated `squad/team.md` from that directory.
-3. Show the current roster briefly as `@name | Role | Primary | Backup` before asking what to change.
+2. Read `muse-squad.toml` from that directory and the generated `squad/team.md`.
+3. Show the current roster briefly as `@<name> | primary | fallback chain` before asking what to change.
 
 ## What you may edit
 
-Edit only `squad-team.json`. Do not hand-edit `squad/team.md`, `agents/<name>.md`, `.agents/squad/team.md`, `.agents/agents/<name>.md`, `AGENTS.md` / `MUSE.md`, `endpoints.json`, or the generic `worker.md`, `plan-reviewer.md`, and `general-purpose.md` agents. For a full interactive rebuild of the default five-member roster, tell the user to re-run the installer with `--reconfigure-team`; this command is for targeted roster changes.
+Edit only `muse-squad.toml`. Do not hand-edit `squad/team.md`, `agents/<name>.md`, `AGENTS.md` / `MUSE.md`, or anything under `mcp/`. This is the only config file; there are no per-repo settings and no helper agents to edit.
 
-Each member needs these fields:
+The file uses `schema = 1` and these tables:
 
-- `name`: lowercase slug (`a-z0-9-`), not `worker`, `plan-reviewer`, or `general-purpose`.
-- `display_name`: human-readable name.
-- `role` and `responsibility`: non-empty strings.
-- `primary` and `backup`: a native Muse model (for example `muse-spark-1.3-contributor`, `muse-ember-1.0`, or `muse-wonder-1.0`) or an alias under `endpoints` in `endpoints.json`.
-- `charter`: non-empty instructions for that member.
+- `[providers.<Name>]` — a provider name may contain letters, numbers, `.`, `_`, and `-`. `type = "native"` requires `model` and `max_concurrency`. `type = "http"` requires `base_url`, `api_key`, and `model`, and accepts `temperature`, `top_p`, `max_tokens`, `max_input_chars`, `on_context_exceeded`, `max_concurrency`, `timeout_ms`, `queue_timeout_ms`, and `max_retries`. `api_key` may be plaintext or `${ENV_VAR}`.
+- `[squad.<name>]` — one per member, with only `primary`, an ordered `fallback` array, and `charter`.
 
-If a model/endpoint name is not a known native model and not an `endpoints` alias, ask for a correction instead of inventing one. Keep the top-level `schema_version`, `team_name`, `memory_dir`, `members`, and `projects` fields intact.
+Every member needs at least one provider in its chain: `primary` and every `fallback` entry must match a provider table name exactly. Validate all cross-references before writing. Never invent a provider name. Member names are lowercase slugs (`a-z0-9-`); retired helper names are reserved. Keep `schema = 1`. Do not add display names, responsibilities, labels, or any new member keys. Use `#` for TOML comments, not `;`.
 
 ## Apply the change
 
 Ask which change to make unless the user already stated it clearly:
 
-- add, rename, or remove a member;
-- change a role, responsibility, charter, primary, or backup;
-- rename the team or change `memory_dir`;
-- add or update a project-only override under `projects`, keyed by the repository directory name or its absolute path.
+- add, rename, or remove a provider (check every member chain before removing);
+- add, rename, or remove a member (at least one member must remain);
+- change a member's `primary`, reorder or replace its `fallback` array, or rewrite its `charter`;
+- change any provider setting, including moving a secret into `${ENV_VAR}`.
 
-For a project override, preserve unrelated `projects` entries and apply only the requested partial `members` patch. Pass the repository root explicitly so `sync-team.js` resolves the override and writes the project-scoped artifacts there; global wrappers always stay on the base roster.
-
-Before writing, copy `squad-team.json` to a timestamped sibling backup such as `squad-team.json.bak.20261121-143022`. Apply the smallest valid JSON edit and parse the result before continuing. If parsing fails, restore the backup and stop.
+Before writing, copy `muse-squad.toml` to a timestamped sibling backup such as `muse-squad.toml.bak.20261121-143022`. Apply the smallest valid TOML edit, then parse the result and re-check every provider reference. If parsing or validation fails, restore the backup and stop.
 
 ## Regenerate
 
@@ -45,18 +40,12 @@ Run the materializer with the same config directory:
 node "$MUSE_CONFIG_DIR/mcp/sync-team.js" --config-dir "$MUSE_CONFIG_DIR"
 ```
 
-For a project override, also pass the repo root (run this from the repository root):
+On Windows without `MUSE_CONFIG_DIR`, use `node "$HOME\.config\muse\mcp\sync-team.js" --config-dir "$HOME\.config\muse"`.
 
-```bash
-node "$MUSE_CONFIG_DIR/mcp/sync-team.js" --config-dir "$MUSE_CONFIG_DIR" --project-dir "$PWD"
-```
+If the command fails, restore the config backup, report the exact error, and do not claim success.
 
-On Windows without `MUSE_CONFIG_DIR`, use `node "$HOME\.config\muse\mcp\sync-team.js" --config-dir "$HOME\.config\muse"` and add `--project-dir "$PWD"` for a project override.
-
-If the command fails, restore the roster backup, report the exact error, and do not claim success.
-
-Stale `agents/<name>.md` and `.agents/agents/<name>.md` files that carry the `Generated by muse-squad sync-team.js` marker are removed automatically. Leave any unmarked agent file untouched.
+Stale `agents/<name>.md` wrappers that carry the generated marker are removed automatically. Leave any unmarked agent file untouched.
 
 ## Finish
 
-Re-read `squad/team.md` and, for a project override, `.agents/squad/team.md`. Report the final `@name | Role | Primary | Backup` table and the regenerated file paths, noting which files are project-scoped. Never report the change as done until the materializer exited successfully.
+Re-read `squad/team.md`. Report the final `@<name> | primary | fallback` table and the regenerated file paths. Never report the change as done until the materializer exited successfully.
