@@ -23,11 +23,11 @@ When spawning any subagent, set its short task label exactly to:
 Examples:
 
 ```text
-[keaton | Muse-Spark] Sequence wave dependencies
-[fenster | Home-Ornith] Build login form
-[mcmanus | DeepSeek-Flash] Add retry queue
-[hockney | Home-Ornith] Run regression suite
-[verbal | Muse-Ember] Log wave decisions
+[team-lead | Muse-Spark] Sequence wave dependencies
+[frontend | Home-Ornith] Build login form
+[backend | DeepSeek-Flash] Add retry queue
+[tester | Home-Ornith] Run regression suite
+[secretary | Muse-Ember] Log wave decisions
 ```
 
 Always include a "Subagents / Providers" roster in wave, progress, and completion summaries. For each entry list the member name, provider, action, and outcome. For `muse-squad` tool calls, report the member, the provider shown in tool meta, and the outcome; if meta is unavailable, say so explicitly. When practical, include the member name and provider in execution-log entries.
@@ -69,7 +69,7 @@ Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` sect
 1. Update `.muse/TODO.md` (create it from the plan if it does not exist). Check off only items whose changes are applied and verified; leave or add `- [ ]` items for remaining or newly discovered work. Record exact verification commands and results in the checklist.
 2. Run every verification command listed in `.muse/PLAN.md` from the repository root — for example `npm test`, `cargo check`, `pytest`, or `go test ./...`. If the plan lists none, detect the project's typechecker and test commands from its manifests, add them to `.muse/TODO.md`, and run them.
 3. If any command fails, fix the failure in another bounded wave with the appropriate named member and repeat this gate. Never mark an item done or claim success based on a partial pass.
-4. Append a short entry to `## Execution Log & Decisions` at the bottom of `.muse/PLAN.md` (create the section if absent). Record the wave number, what landed, decisions and *why*, gotchas discovered, exact verification commands and results, and any remaining work or blockers. Append only — never rewrite or delete earlier entries. Ask `@verbal` to append durable decisions to `.muse/squad/decisions.md` and each member to append lasting learnings to its own `.muse/squad/history/<name>.md`.
+4. Append a short entry to `## Execution Log & Decisions` at the bottom of `.muse/PLAN.md` (create the section if absent). Record the wave number, what landed, decisions and *why*, gotchas discovered, exact verification commands and results, and any remaining work or blockers. Append only — never rewrite or delete earlier entries. Ask `@secretary` to append durable decisions to `.muse/squad/decisions.md` and each member to append lasting learnings to its own `.muse/squad/history/<name>.md`.
 5. Only when all TODO items are checked and all verification commands pass, summarize what was verified and return control to the user, including the Subagents / Providers roster for the run.
 
 ## Session handoff notes

@@ -184,27 +184,27 @@ max_concurrency = 2
 
 [squad]
 
-[squad.keaton]
+[squad.team-lead]
 primary = "Muse-Spark"
 fallback = ["DeepSeek-Flash"]
 charter = """Domain expertise: system architecture, dependency order, risk analysis, and decision-complete planning. Keep plans evidence-first and verification-ready."""
 
-[squad.fenster]
+[squad.frontend]
 primary = "Home-Ornith"
 fallback = ["Muse-Ember"]
 charter = """Domain expertise: UI components, styling systems, accessibility, and browser-side state. Preserve existing design tokens and describe visible behavior."""
 
-[squad.mcmanus]
+[squad.backend]
 primary = "Home-Ornith"
 fallback = ["DeepSeek-Flash"]
 charter = """Domain expertise: APIs, persistence layers, server-side logic, and safe data migrations. Name the error path before the happy path."""
 
-[squad.hockney]
+[squad.tester]
 primary = "Home-Ornith"
 fallback = ["Muse-Ember"]
 charter = """Domain expertise: unit and integration tests, regression analysis, and CI verification. Report exact commands and results; never weaken a test."""
 
-[squad.verbal]
+[squad.secretary]
 primary = "Muse-Ember"
 fallback = ["Home-Ornith"]
 charter = """Domain expertise: decision records, execution logs, and durable project conventions. Append only, and record why a decision was made."""
@@ -284,7 +284,7 @@ On install, `mcp/register-settings.js` adds a server named `muse-squad` to `sett
 
 **Error behavior:** if no provider in the member chain can serve the request, the tool returns a hard error listing each attempted provider and why it failed. Skills stop the current wave or planning step, report the attempts, and ask you to fix that member's chain with `/squad-team`. They do not try another member, another provider, or inline work.
 
-Task labels always use `[<name> | <provider-name>] <action>`, for example `[keaton | Muse-Spark] Review architecture`. The provider shown is the one that actually served the step.
+Task labels always use `[<name> | <provider-name>] <action>`, for example `[team-lead | Muse-Spark] Review architecture`. The provider shown is the one that actually served the step.
 
 ---
 

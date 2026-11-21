@@ -684,7 +684,7 @@ function Configure-Team {
   }
   $menu = Get-Provider-Menu $script:WizardProviders
 
-  $defaultNames = @('keaton', 'fenster', 'mcmanus', 'hockney', 'verbal')
+  $defaultNames = @('team-lead', 'frontend', 'backend', 'tester', 'secretary')
   $defaultPrimary = @('Muse-Spark', 'Home-Ornith', 'Home-Ornith', 'Home-Ornith', 'Muse-Ember')
   $defaultFallback = @('DeepSeek-Flash', 'Muse-Ember', 'DeepSeek-Flash', 'Muse-Ember', 'Home-Ornith')
   $members = @()
@@ -995,7 +995,7 @@ You are in SQUAD-PLAN mode. Do NOT edit product code yet.
 
 At startup, read `~/.config/muse/muse-squad.toml` (`schema = 1`) and the generated roster at `~/.config/muse/squad/team.md`. Use only the members defined under `[squad.<name>]`; every step goes to a named member. Match each step to that member's `charter`. If no charter fits, ask the user which member should own the step instead of inventing a helper.
 
-If `.muse/squad/` does not exist in this repository yet, create `.muse/squad/decisions.md` and `.muse/squad/history/` before starting. Every named member reads `.muse/squad/decisions.md` and `.muse/squad/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished. Ask the `@verbal` member to append durable decisions to `.muse/squad/decisions.md` before sign-off.
+If `.muse/squad/` does not exist in this repository yet, create `.muse/squad/decisions.md` and `.muse/squad/history/` before starting. Every named member reads `.muse/squad/decisions.md` and `.muse/squad/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished. Ask the `@secretary` member to append durable decisions to `.muse/squad/decisions.md` before sign-off.
 
 ## TUI labels and reporting
 
@@ -1011,11 +1011,11 @@ When spawning any subagent, set its short task label exactly to:
 Examples:
 
 ```text
-[keaton | Muse-Spark] Review architecture
-[fenster | Home-Ornith] Sketch login form changes
-[mcmanus | DeepSeek-Flash] Map retry queue changes
-[hockney | Home-Ornith] List verification commands
-[verbal | Muse-Ember] Record plan decisions
+[team-lead | Muse-Spark] Review architecture
+[frontend | Home-Ornith] Sketch login form changes
+[backend | DeepSeek-Flash] Map retry queue changes
+[tester | Home-Ornith] List verification commands
+[secretary | Muse-Ember] Record plan decisions
 ```
 
 Always include a "Subagents / Providers" roster in user-facing summaries and before asking for sign-off. For each entry list the member name, provider, action, and outcome. For `muse-squad` tool calls, report the member, the provider shown in tool meta, and the outcome; if meta is unavailable, say so explicitly.
@@ -1051,7 +1051,7 @@ When calling `muse-squad`, keep `repo_context`, `file_context`, and `plan_markdo
 1. Map the relevant files, dependencies, and existing patterns using named members only.
 2. Ask the user clarifying questions only if an architectural fork cannot be resolved from the codebase.
 3. Draft a decision-complete implementation plan in `.muse/PLAN.md` with exact file paths, dependency order, and verification commands. If the file already has a `## Execution Log & Decisions` section, preserve it verbatim at the bottom.
-4. Plan grill: ask the architecture charter member (default `@keaton`) to audit `.muse/PLAN.md` against the actual files, then request an independent critique through `muse-squad:critique_plan` with `member="<name>"` for that same member. Synthesize valid issues into `.muse/PLAN.md` and ask `@verbal` to append durable choices to `.muse/squad/decisions.md`.
+4. Plan grill: ask the architecture charter member (default `@team-lead`) to audit `.muse/PLAN.md` against the actual files, then request an independent critique through `muse-squad:critique_plan` with `member="<name>"` for that same member. Synthesize valid issues into `.muse/PLAN.md` and ask `@secretary` to append durable choices to `.muse/squad/decisions.md`.
 5. Present a summary of what was caught, including the Subagents / Providers roster, before asking the user for `/squad-execute` sign-off.
 '@
 Install-File 'skills/squad-execute/SKILL.md' @'
@@ -1080,11 +1080,11 @@ When spawning any subagent, set its short task label exactly to:
 Examples:
 
 ```text
-[keaton | Muse-Spark] Sequence wave dependencies
-[fenster | Home-Ornith] Build login form
-[mcmanus | DeepSeek-Flash] Add retry queue
-[hockney | Home-Ornith] Run regression suite
-[verbal | Muse-Ember] Log wave decisions
+[team-lead | Muse-Spark] Sequence wave dependencies
+[frontend | Home-Ornith] Build login form
+[backend | DeepSeek-Flash] Add retry queue
+[tester | Home-Ornith] Run regression suite
+[secretary | Muse-Ember] Log wave decisions
 ```
 
 Always include a "Subagents / Providers" roster in wave, progress, and completion summaries. For each entry list the member name, provider, action, and outcome. For `muse-squad` tool calls, report the member, the provider shown in tool meta, and the outcome; if meta is unavailable, say so explicitly. When practical, include the member name and provider in execution-log entries.
@@ -1126,7 +1126,7 @@ Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` sect
 1. Update `.muse/TODO.md` (create it from the plan if it does not exist). Check off only items whose changes are applied and verified; leave or add `- [ ]` items for remaining or newly discovered work. Record exact verification commands and results in the checklist.
 2. Run every verification command listed in `.muse/PLAN.md` from the repository root — for example `npm test`, `cargo check`, `pytest`, or `go test ./...`. If the plan lists none, detect the project's typechecker and test commands from its manifests, add them to `.muse/TODO.md`, and run them.
 3. If any command fails, fix the failure in another bounded wave with the appropriate named member and repeat this gate. Never mark an item done or claim success based on a partial pass.
-4. Append a short entry to `## Execution Log & Decisions` at the bottom of `.muse/PLAN.md` (create the section if absent). Record the wave number, what landed, decisions and *why*, gotchas discovered, exact verification commands and results, and any remaining work or blockers. Append only — never rewrite or delete earlier entries. Ask `@verbal` to append durable decisions to `.muse/squad/decisions.md` and each member to append lasting learnings to its own `.muse/squad/history/<name>.md`.
+4. Append a short entry to `## Execution Log & Decisions` at the bottom of `.muse/PLAN.md` (create the section if absent). Record the wave number, what landed, decisions and *why*, gotchas discovered, exact verification commands and results, and any remaining work or blockers. Append only — never rewrite or delete earlier entries. Ask `@secretary` to append durable decisions to `.muse/squad/decisions.md` and each member to append lasting learnings to its own `.muse/squad/history/<name>.md`.
 5. Only when all TODO items are checked and all verification commands pass, summarize what was verified and return control to the user, including the Subagents / Providers roster for the run.
 
 ## Session handoff notes
@@ -3167,27 +3167,27 @@ max_concurrency = 2
 
 [squad]
 
-[squad.keaton]
+[squad.team-lead]
 primary = "Muse-Spark"
 fallback = ["DeepSeek-Flash"]
 charter = """Domain expertise: system architecture, dependency order, risk analysis, and decision-complete planning. Voice: concise, decisive, and evidence-first; ask for the exact file or command instead of guessing. Guardrails: do not edit product code while planning, cite concrete files and verification steps, and surface ambiguity before it becomes an implementation assumption."""
 
-[squad.fenster]
+[squad.frontend]
 primary = "Home-Ornith"
 fallback = ["Muse-Ember"]
 charter = """Domain expertise: UI components, styling systems, accessibility, and browser-side state. Voice: pragmatic and detail-oriented; describe the visible behavior a change should produce. Guardrails: stay inside frontend files, preserve existing design tokens and conventions, and never introduce a new framework or dependency without explicit approval."""
 
-[squad.mcmanus]
+[squad.backend]
 primary = "Home-Ornith"
 fallback = ["DeepSeek-Flash"]
 charter = """Domain expertise: APIs, persistence layers, server-side logic, and safe data migrations. Voice: precise and failure-mode first; name the error path before the happy path. Guardrails: keep changes scoped to backend files, preserve public contracts unless the plan says otherwise, and never write a destructive migration without a rollback path."""
 
-[squad.hockney]
+[squad.tester]
 primary = "Home-Ornith"
 fallback = ["Muse-Ember"]
 charter = """Domain expertise: unit and integration tests, regression analysis, and CI verification. Voice: skeptical and evidence-driven; report exact commands and results. Guardrails: never weaken or delete a test to make a run pass, add a regression test for every fixed bug, and do not claim success from a partial pass."""
 
-[squad.verbal]
+[squad.secretary]
 primary = "Muse-Ember"
 fallback = ["Home-Ornith"]
 charter = """Domain expertise: architectural decision records, execution logs, and durable project conventions. Voice: terse and factual; record why a decision was made, not just what happened. Guardrails: append only, never invent decisions, never rewrite earlier history, and keep every entry short enough to survive context compaction."""
@@ -3230,7 +3230,7 @@ The MCP server is `muse-squad`. It exposes:
 
 ### Global guardrails
 
-- Label every spawned subagent exactly as `[<name> | <provider-name>] <action>` — for example `[keaton | Muse-Spark] Review architecture`. Use the member's lowercase name and the provider name exactly as written in the TOML. Keep the action under ~50 characters, start with a verb, and add no extra parenthetical text.
+- Label every spawned subagent exactly as `[<name> | <provider-name>] <action>` — for example `[team-lead | Muse-Spark] Review architecture`. Use the member's lowercase name and the provider name exactly as written in the TOML. Keep the action under ~50 characters, start with a verb, and add no extra parenthetical text.
 - Respect each provider's `max_concurrency` for parallel work; queue extra work into a later wave.
 - Apply generated code surgically: a targeted unified diff or a single function/block with native edit tools. Reject full-file rewrites, truncation markers, and unapplyable diffs.
 - Run the fastest incremental check on changed files immediately after each patch. Full builds and full test suites belong to the final verification step.

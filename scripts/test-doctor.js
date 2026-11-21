@@ -329,7 +329,7 @@ async function main() {
     writeConfig({ ...goodConfig, members: {} });
     await expectDoctor(args, { status: 1, contains: ['at least one squad member is required'] });
 
-    fs.writeFileSync(configFile, 'schema = 1\n[squad.keaton\nprimary = "Native-Core"\n');
+    fs.writeFileSync(configFile, 'schema = 1\n[squad.team-lead\nprimary = "Native-Core"\n');
     await expectDoctor(args, { status: 1, contains: ['BAD'] });
 
     writeConfig(goodConfig);

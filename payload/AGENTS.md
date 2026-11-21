@@ -33,7 +33,7 @@ The MCP server is `muse-squad`. It exposes:
 
 ### Global guardrails
 
-- Label every spawned subagent exactly as `[<name> | <provider-name>] <action>` — for example `[keaton | Muse-Spark] Review architecture`. Use the member's lowercase name and the provider name exactly as written in the TOML. Keep the action under ~50 characters, start with a verb, and add no extra parenthetical text.
+- Label every spawned subagent exactly as `[<name> | <provider-name>] <action>` — for example `[team-lead | Muse-Spark] Review architecture`. Use the member's lowercase name and the provider name exactly as written in the TOML. Keep the action under ~50 characters, start with a verb, and add no extra parenthetical text.
 - Respect each provider's `max_concurrency` for parallel work; queue extra work into a later wave.
 - Apply generated code surgically: a targeted unified diff or a single function/block with native edit tools. Reject full-file rewrites, truncation markers, and unapplyable diffs.
 - Run the fastest incremental check on changed files immediately after each patch. Full builds and full test suites belong to the final verification step.

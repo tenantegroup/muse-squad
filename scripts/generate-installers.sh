@@ -715,7 +715,7 @@ configure_team() {
     WIZARD_PROVIDER_MENU+="$((i + 1)): ${WIZARD_PROVIDERS[$i]}"
   done
 
-  local -a default_names=(keaton fenster mcmanus hockney verbal)
+  local -a default_names=(team-lead frontend backend tester secretary)
   local -a default_primary=(Muse-Spark Home-Ornith Home-Ornith Home-Ornith Muse-Ember)
   local -a default_fallback=("DeepSeek-Flash" "Muse-Ember" "DeepSeek-Flash" "Muse-Ember" "Home-Ornith")
   local -a names=() primaries=() fallbacks=() charters=()
@@ -1656,7 +1656,7 @@ function Configure-Team {
   }
   $menu = Get-Provider-Menu $script:WizardProviders
 
-  $defaultNames = @('keaton', 'fenster', 'mcmanus', 'hockney', 'verbal')
+  $defaultNames = @('team-lead', 'frontend', 'backend', 'tester', 'secretary')
   $defaultPrimary = @('Muse-Spark', 'Home-Ornith', 'Home-Ornith', 'Home-Ornith', 'Muse-Ember')
   $defaultFallback = @('DeepSeek-Flash', 'Muse-Ember', 'DeepSeek-Flash', 'Muse-Ember', 'Home-Ornith')
   $members = @()
