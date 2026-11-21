@@ -386,6 +386,7 @@ for option in --dir --update --uninstall --no-mcp --backup --no-backup \
 done
 
 echo "== PowerShell installer structure =="
+# node -e has no script path in argv; the placeholder keeps argv[2]/[3] correct.
 for phrase in \
   "function Install-Config" \
   "Install-Config (Get-Config-Defaults)" \
@@ -397,7 +398,8 @@ for phrase in \
   "team config failed validation; no changes were written" \
   "MUSE_SQUAD_TTY" \
   "Get-Dest 'muse-squad.toml'" \
-  "--uninstall         Remove managed files and unregister muse-squad"; do
+  "--uninstall         Remove managed files and unregister muse-squad" \
+  '& node -e $nodeScript - $dest $membersFile'; do
   grep -qF -- "$phrase" "$ROOT/install.ps1" || fail "install.ps1 is missing: $phrase"
 done
 for phrase in endpoints.json squad-team.json; do

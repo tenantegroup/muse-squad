@@ -1750,7 +1750,9 @@ for (const member of members) {
 }
 process.stdout.write(`${prefix}${lines.join('\n')}`);
 '@
-  $rendered = & node -e $nodeScript $dest $membersFile
+  # `node -e` has no script path in argv, so argv[1] is the first user argument.
+  # The placeholder keeps the renderer's argv[2]/argv[3] indexing intact.
+  $rendered = & node -e $nodeScript - $dest $membersFile
   if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) {
     throw "team config generation failed with exit code $LASTEXITCODE"
   }
