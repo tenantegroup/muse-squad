@@ -102,6 +102,8 @@ Environment:
   MUSE_SQUAD_SKIP_MCP      Set to 1 to skip MCP registration
   MUSE_SQUAD_NO_BACKUP     Set to 1 to skip backup unless --backup is passed
   MUSE_SQUAD_SKIP_MUSE_CHECK Set to 1 to skip Muse install/config discovery
+  MUSE_SQUAD_FORCE_INTERACTIVE Set to 1 to attempt prompts even without a TTY
+  MUSE_SQUAD_TTY           Terminal device for prompts (default /dev/tty or CONIN$)
 
 Providers and squad members are configured in muse-squad.toml inside the config directory.
 USAGE
@@ -138,9 +140,62 @@ while [[ "$CONFIG_DIR" == */ && "$CONFIG_DIR" != "/" ]]; do
   CONFIG_DIR="${CONFIG_DIR%/}"
 done
 
-preflight_interactive() {
+# fd 0 is the installer script when it is piped in, so prompts must use the
+# controlling terminal instead. MUSE_SQUAD_TTY exists for automation/tests.
+MUSE_SQUAD_TTY="${MUSE_SQUAD_TTY:-/dev/tty}"
+MUSE_SQUAD_TTY_LINE=1
+
+tty_readable() {
+  ( : < "$MUSE_SQUAD_TTY" ) 2>/dev/null
+}
+
+# A regular-file override is used by tests; read it one line at a time. A real
+# terminal keeps its input queue across open/read/close, so reopen it per prompt.
+read_tty_value() {
+  local __var="$1" value=""
+  if [[ -f "$MUSE_SQUAD_TTY" ]]; then
+    if ! value="$(awk -v n="$MUSE_SQUAD_TTY_LINE" \
+      'NR == n { print; found = 1; exit } END { if (!found) exit 1 }' \
+      "$MUSE_SQUAD_TTY" 2>/dev/null)"; then
+      return 1
+    fi
+    MUSE_SQUAD_TTY_LINE=$((MUSE_SQUAD_TTY_LINE + 1))
+  else
+    IFS= read -r value < "$MUSE_SQUAD_TTY" || return 1
+  fi
+  printf -v "$__var" '%s' "$value"
+}
+
+interactive_input() {
   [[ "${MUSE_SQUAD_FORCE_INTERACTIVE:-0}" == "1" ]] && return 0
-  [[ -t 0 ]]
+  [[ -t 0 ]] && return 0
+  tty_readable
+}
+
+read_answer() {
+  local __var="$1" __value=""
+  if [[ -t 0 ]]; then
+    IFS= read -r __value || return 1
+  elif tty_readable; then
+    read_tty_value __value || return 1
+  else
+    # Forced-interactive automation may feed answers on stdin.
+    IFS= read -r __value || return 1
+  fi
+  printf -v "$__var" '%s' "$__value"
+}
+
+read_default() {
+  local __var="$1" __default="${2-}" value=""
+  if read_answer value && [[ -n "$value" ]]; then
+    printf -v "$__var" '%s' "$value"
+  else
+    printf -v "$__var" '%s' "$__default"
+  fi
+}
+
+preflight_interactive() {
+  interactive_input
 }
 
 muse_missing_error() {
@@ -212,8 +267,7 @@ preflight() {
     if preflight_interactive; then
       local answer
       printf 'Muse Code does not appear to be installed. Install it now? [Y/n]: ' >&2
-      if ! IFS= read -r answer; then answer="Y"; fi
-      [[ -n "$answer" ]] || answer="Y"
+      read_default answer "Y"
       case "$answer" in
         [Yy]|[Yy][Ee][Ss]) install_muse ;;
         [Nn]|[Nn][Oo]) muse_missing_error ;;
@@ -254,9 +308,7 @@ preflight() {
   if preflight_interactive; then
     while :; do
       printf 'Where is your Muse config directory? ' >&2
-      if ! IFS= read -r typed; then
-        fail "no Muse config directory was supplied"
-      fi
+      read_answer typed || fail "no Muse config directory was supplied"
       typed="$(expand_user_path "$(trim_value "$typed")")"
       if valid_muse_config_dir "$typed"; then
         CONFIG_DIR="$typed"
@@ -281,12 +333,11 @@ backup_config() {
   fi
 
   local answer="Y"
-  if [[ -t 0 ]]; then
-    printf 'Back up current Muse config before continuing? [Y/n] '
-    if ! read -r answer; then answer="Y"; fi
-    [[ -n "$answer" ]] || answer="Y"
+  if interactive_input; then
+    printf 'Back up current Muse config before continuing? [Y/n]: ' >&2
+    read_default answer "Y"
   else
-    log "  no TTY detected; backing up by default"
+    log "  no interactive terminal detected; backing up by default"
   fi
 
   case "$answer" in
@@ -456,8 +507,7 @@ existing_charter() {
 wizard_interactive() {
   [[ "$MODE" == "install" ]] || return 1
   (( USE_DEFAULTS )) && return 1
-  [[ "${MUSE_SQUAD_FORCE_INTERACTIVE:-0}" == "1" ]] && return 0
-  [[ -t 0 ]]
+  interactive_input
 }
 
 trim_value() {
@@ -475,11 +525,10 @@ normalize_member_name() {
 }
 
 prompt_default() {
-  local prompt="$1" default="$2" answer
+  local __var="$1" prompt="$2" default="$3" answer
   printf '%s [%s]: ' "$prompt" "$default" >&2
-  if ! IFS= read -r answer; then answer="$default"; fi
-  [[ -n "$answer" ]] || answer="$default"
-  printf '%s' "$answer"
+  read_default answer "$default"
+  printf -v "$__var" '%s' "$answer"
 }
 
 resolve_provider_selection() {
@@ -606,8 +655,18 @@ NODE
 }
 
 configure_team() {
-  local dest="$CONFIG_DIR/muse-squad.toml" action="created"
-  if [[ -f "$dest" ]]; then
+  local dest="$CONFIG_DIR/muse-squad.toml" action="created" seeded=0
+  if (( FIRST_INSTALL )); then
+    # Seed first so the provider menu can be built from the default TOML, then
+    # let an interactive wizard replace it.
+    if [[ ! -f "$dest" ]]; then
+      install_default_config
+      seeded=1
+    fi
+    if ! wizard_interactive || ! command -v node >/dev/null 2>&1; then
+      return 0
+    fi
+  else
     action="updated"
     if (( ! RECONFIGURE_TEAM )); then
       log "  unchanged  $dest"
@@ -617,29 +676,22 @@ configure_team() {
       log "  unchanged  $dest (team wizard skipped)"
       return 0
     fi
-  else
-    if ! wizard_interactive || ! command -v node >/dev/null 2>&1; then
-      install_config
+    if ! command -v node >/dev/null 2>&1; then
+      log "  warning    node not found; keeping existing team config"
       return 0
     fi
   fi
 
-  if ! command -v node >/dev/null 2>&1; then
-    log "  warning    node not found; keeping existing team config"
-    return 0
-  fi
-
   local customize_answer="Y"
   printf 'Customize Squad team members & models now? [Y/n]: ' >&2
-  if ! IFS= read -r customize_answer; then customize_answer="Y"; fi
-  [[ -n "$customize_answer" ]] || customize_answer="Y"
+  read_default customize_answer "Y"
   case "$customize_answer" in
     [Yy]|[Yy][Ee][Ss]) ;;
     [Nn]|[Nn][Oo])
-      if [[ -f "$dest" ]]; then
-        log "  unchanged  $dest"
+      if (( seeded )); then
+        log "  kept defaults  $dest"
       else
-        install_config
+        log "  unchanged  $dest"
       fi
       return 0 ;;
     *)
@@ -672,7 +724,7 @@ configure_team() {
 
   for i in 0 1 2 3 4; do
     while :; do
-      name="$(prompt_default "Member $((i + 1)) name" "${default_names[$i]}")"
+      prompt_default name "Member $((i + 1)) name" "${default_names[$i]}"
       name="$(normalize_member_name "$name")"
       if is_name_used "$name"; then
         printf '  name already in use: %s\n' "$name"
@@ -680,15 +732,15 @@ configure_team() {
       fi
       break
     done
-    primary="$(prompt_default "Primary provider for $name ($WIZARD_PROVIDER_MENU)" "${default_primary[$i]}")"
+    prompt_default primary "Primary provider for $name ($WIZARD_PROVIDER_MENU)" "${default_primary[$i]}"
     primary="$(resolve_provider_selection "$primary" "${default_primary[$i]}")"
     provider_is_known "$primary" || fail "unknown provider: $primary"
-    fallback="$(prompt_default "Fallback providers for $name (comma-separated, empty for none)" "${default_fallback[$i]}")"
+    prompt_default fallback "Fallback providers for $name (comma-separated, empty for none)" "${default_fallback[$i]}"
     fallback="$(resolve_provider_list "$fallback" "${default_fallback[$i]}")"
     validate_provider_list "$fallback" || fail "unknown provider in fallback list: $fallback"
     charter="$(existing_charter "$dest" "$name")"
     [[ -n "$charter" ]] || charter="Domain expertise: $name tasks. Voice: concise and evidence-first. Guardrails: stay scoped to assigned files, preserve existing conventions, and verify changes before reporting done."
-    charter="$(prompt_default "Charter for $name" "$charter")"
+    prompt_default charter "Charter for $name" "$charter"
     charter="$(printf '%s' "$charter" | tr '\t' ' ' | tr '\n' ' ' | tr -s ' ')"
     names+=("$name")
     primaries+=("$primary")
@@ -699,7 +751,7 @@ configure_team() {
 
   while :; do
     printf 'Add another team member? [y/N]: ' >&2
-    if ! IFS= read -r answer; then answer=""; fi
+    read_default answer ""
     case "$answer" in
       [Yy]|[Yy][Ee][Ss]) ;;
       *) break ;;
@@ -708,7 +760,7 @@ configure_team() {
     name=""
     while :; do
       printf 'Extra member name: ' >&2
-      if ! IFS= read -r name; then name=""; fi
+      read_default name ""
       name="$(normalize_member_name "$name")"
       if is_name_used "$name"; then
         printf '  name already in use: %s\n' "$name"
@@ -717,13 +769,13 @@ configure_team() {
       [[ -n "$name" ]] || { printf '  name cannot be empty\n'; continue; }
       break
     done
-    primary="$(prompt_default "Primary provider for $name ($WIZARD_PROVIDER_MENU)" 'Muse-Ember')"
+    prompt_default primary "Primary provider for $name ($WIZARD_PROVIDER_MENU)" 'Muse-Ember'
     primary="$(resolve_provider_selection "$primary" 'Muse-Ember')"
     provider_is_known "$primary" || fail "unknown provider: $primary"
-    fallback="$(prompt_default "Fallback providers for $name (comma-separated, empty for none)" 'Home-Ornith')"
+    prompt_default fallback "Fallback providers for $name (comma-separated, empty for none)" 'Home-Ornith'
     fallback="$(resolve_provider_list "$fallback" 'Home-Ornith')"
     validate_provider_list "$fallback" || fail "unknown provider in fallback list: $fallback"
-    charter="$(prompt_default "Charter for $name" 'Domain expertise: bounded implementation tasks. Voice: concise and evidence-first. Guardrails: stay scoped to assigned files, preserve existing conventions, and verify changes before reporting done.')"
+    prompt_default charter "Charter for $name" 'Domain expertise: bounded implementation tasks. Voice: concise and evidence-first. Guardrails: stay scoped to assigned files, preserve existing conventions, and verify changes before reporting done.'
     charter="$(printf '%s' "$charter" | tr '\t' ' ' | tr '\n' ' ' | tr -s ' ')"
     names+=("$name")
     primaries+=("$primary")
@@ -875,9 +927,11 @@ MID
       printf '%s\n' "$delim"
     done
 
-    printf "install_config <<'MSQ_CONFIG_DEFAULT'\n"
+    printf "install_default_config() {\n"
+    printf "  install_config <<'MSQ_CONFIG_DEFAULT'\n"
     cat "$CONFIG_DEFAULT"
     printf 'MSQ_CONFIG_DEFAULT\n'
+    printf "}\n"
 
     printf "install_agents_policy <<'MSQ_AGENTS_POLICY'\n"
     printf '%s\n' '<!-- muse-squad:begin -->'
@@ -995,6 +1049,8 @@ Environment:
   MUSE_SQUAD_SKIP_MCP      Set to 1 to skip MCP registration
   MUSE_SQUAD_NO_BACKUP     Set to 1 to skip backup unless --backup is passed
   MUSE_SQUAD_SKIP_MUSE_CHECK Set to 1 to skip Muse install/config discovery
+  MUSE_SQUAD_FORCE_INTERACTIVE Set to 1 to attempt prompts even without a TTY
+  MUSE_SQUAD_TTY           Terminal device for prompts (default /dev/tty or CONIN$)
 
 Providers and squad members are configured in muse-squad.toml inside the config directory.
 
@@ -1009,13 +1065,50 @@ function Get-Dest([string]$rel) {
   return [IO.Path]::GetFullPath((Join-Path $configDir $parts))
 }
 
-function Test-Preflight-Interactive {
-  if ($env:MUSE_SQUAD_FORCE_INTERACTIVE -eq '1') { return $true }
+# When the installer is piped in, stdin carries the script rather than user
+# input. Read prompts from the controlling console/TTY when one is available.
+$script:ConsoleInputPath = $env:MUSE_SQUAD_TTY
+if ([string]::IsNullOrWhiteSpace($script:ConsoleInputPath)) {
+  if ([IO.Path]::DirectorySeparatorChar -eq '\') { $script:ConsoleInputPath = 'CONIN$' }
+  else { $script:ConsoleInputPath = '/dev/tty' }
+}
+$script:ConsoleInputReader = $null
+
+function Get-Console-Input-Reader {
+  if ($null -ne $script:ConsoleInputReader) { return $script:ConsoleInputReader }
   try {
-    return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected)
+    $reader = New-Object System.IO.StreamReader -ArgumentList $script:ConsoleInputPath
+    $script:ConsoleInputReader = $reader
+    return $reader
+  } catch {
+    return $null
+  }
+}
+
+function Test-Console-Input {
+  try {
+    if (-not [Environment]::UserInteractive) { return $false }
+    if (-not [Console]::IsInputRedirected) { return $true }
+    return ($null -ne (Get-Console-Input-Reader))
   } catch {
     return $false
   }
+}
+
+function Read-Interactive([string]$prompt) {
+  if ([Console]::IsInputRedirected) {
+    $reader = Get-Console-Input-Reader
+    if ($null -ne $reader) {
+      Write-Host "$prompt`: " -NoNewline
+      return $reader.ReadLine()
+    }
+  }
+  return Read-Host $prompt
+}
+
+function Test-Preflight-Interactive {
+  if ($env:MUSE_SQUAD_FORCE_INTERACTIVE -eq '1') { return $true }
+  return (Test-Console-Input)
 }
 
 function Show-Muse-Missing-Error {
@@ -1083,7 +1176,7 @@ function Invoke-Preflight {
 
   if (-not (Test-Muse-Installed)) {
     if (Test-Preflight-Interactive) {
-      $answer = Read-Host 'Muse Code does not appear to be installed. Install it now? [Y/n]'
+      $answer = Read-Interactive 'Muse Code does not appear to be installed. Install it now? [Y/n]'
       if ([string]::IsNullOrWhiteSpace($answer)) { $answer = 'Y' }
       if ($answer -match '^[Yy]([Ee][Ss])?$') {
         Install-Muse
@@ -1124,7 +1217,7 @@ function Invoke-Preflight {
 
   if (Test-Preflight-Interactive) {
     while ($true) {
-      $typed = Read-Host 'Where is your Muse config directory?'
+      $typed = Read-Interactive 'Where is your Muse config directory?'
       if ([string]::IsNullOrWhiteSpace($typed)) {
         Write-Host '  a config directory is required'
         continue
@@ -1161,7 +1254,7 @@ function Backup-Config {
     $interactive = $false
   }
   if ($interactive) {
-    $answer = Read-Host 'Back up current Muse config before continuing? [Y/n]'
+    $answer = Read-Interactive 'Back up current Muse config before continuing? [Y/n]'
     if ([string]::IsNullOrWhiteSpace($answer)) { $answer = 'Y' }
   } else {
     Write-Host '  no interactive input detected; backing up by default'
@@ -1345,11 +1438,7 @@ function Install-Config([string]$content) {
 
 function Test-Interactive-Input {
   if ($env:MUSE_SQUAD_FORCE_INTERACTIVE -eq '1') { return $true }
-  try {
-    return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected)
-  } catch {
-    return $false
-  }
+  return (Test-Console-Input)
 }
 
 function Get-Available-Providers {
@@ -1392,13 +1481,13 @@ if (member) process.stdout.write(member.charter.replace(/\s+/g, ' ').trim());
 }
 
 function Read-Defaulted([string]$prompt, [string]$default) {
-  $answer = Read-Host "$prompt [$default]"
+  $answer = Read-Interactive "$prompt [$default]"
   if ([string]::IsNullOrWhiteSpace($answer)) { return $default }
   return $answer
 }
 
 function Read-Required([string]$prompt, [string]$fallback) {
-  $answer = Read-Host $prompt
+  $answer = Read-Interactive $prompt
   if ([string]::IsNullOrWhiteSpace($answer)) { return $fallback }
   return $answer
 }
@@ -1519,7 +1608,19 @@ fs.writeFileSync(outputFile, `${prefix}${lines.join('\n')}`);
 function Configure-Team {
   $dest = Get-Dest 'muse-squad.toml'
   $action = 'created'
-  if (Test-Path -LiteralPath $dest) {
+  $seeded = $false
+  if ($firstInstall) {
+    # Seed first so the provider menu can be built from the default TOML, then
+    # let an interactive wizard replace it.
+    if (-not (Test-Path -LiteralPath $dest)) {
+      Install-Config (Get-Config-Defaults)
+      $seeded = $true
+    }
+    if ($useDefaults -or -not (Test-Interactive-Input) -or
+        -not (Get-Command node -ErrorAction SilentlyContinue)) {
+      return
+    }
+  } else {
     $action = 'updated'
     if (-not $reconfigureTeam) {
       Write-Host "  unchanged  $dest"
@@ -1529,26 +1630,19 @@ function Configure-Team {
       Write-Host "  unchanged  $dest (team wizard skipped)"
       return
     }
-  } else {
-    if ($useDefaults -or -not (Test-Interactive-Input) -or
-        -not (Get-Command node -ErrorAction SilentlyContinue)) {
-      Install-Config (Get-Config-Defaults)
+    if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+      Write-Host '  warning    node not found; keeping existing team config'
       return
     }
   }
 
-  if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    Write-Host '  warning    node not found; keeping existing team config'
-    return
-  }
-
-  $customize = Read-Host 'Customize Squad team members & models now? [Y/n]'
+  $customize = Read-Interactive 'Customize Squad team members & models now? [Y/n]'
   if ([string]::IsNullOrWhiteSpace($customize)) { $customize = 'Y' }
   if ($customize -match '^[Nn]([Oo])?$') {
-    if (Test-Path -LiteralPath $dest) {
-      Write-Host "  unchanged  $dest"
+    if ($seeded) {
+      Write-Host "  kept defaults  $dest"
     } else {
-      Install-Config (Get-Config-Defaults)
+      Write-Host "  unchanged  $dest"
     }
     return
   }
@@ -1596,7 +1690,7 @@ function Configure-Team {
   }
 
   while ($true) {
-    $answer = Read-Host 'Add another team member? [y/N]'
+    $answer = Read-Interactive 'Add another team member? [y/N]'
     if ($answer -notmatch '^[Yy]([Ee][Ss])?$') { break }
 
     while ($true) {
@@ -1781,8 +1875,6 @@ MID
     printf "function Get-Config-Defaults {\n  @'\n"
     cat "$CONFIG_DEFAULT"
     printf "'@\n}\n"
-
-    printf "Install-Config (Get-Config-Defaults)\n"
 
     printf "Install-Agents-Policy @'\n"
     printf '%s\n' '<!-- muse-squad:begin -->'

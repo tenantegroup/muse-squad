@@ -221,6 +221,56 @@ for name in oracle fenster mcmanus hockney verbal scout; do
   [[ -f "$INTERACTIVE_DIR/agents/$name.md" ]] || fail "missing custom agent @$name"
 done
 
+echo "== bash installer: prompts with piped stdin =="
+PIPED_DIR="$TMP/piped-config"
+TTY_FILE="$TMP/piped-tty"
+PIPED_ANSWERS=(y piped-member Muse-Ember Home-Ornith "Piped charter.")
+for _ in 1 2 3 4; do
+  PIPED_ANSWERS+=("" "" "" "")
+done
+PIPED_ANSWERS+=(n)
+printf '%s\n' "${PIPED_ANSWERS[@]}" > "$TTY_FILE"
+piped_status=0
+piped_output="$(
+  MUSE_CONFIG_DIR="$PIPED_DIR" MUSE_SQUAD_TTY="$TTY_FILE" \
+    bash -s < "$ROOT/install" 2>&1
+)" || piped_status=$?
+printf '%s\n' "$piped_output"
+[[ "$piped_status" -eq 0 ]] || \
+  fail "piped installer exited with status $piped_status"
+grep -qF 'Customize Squad team members & models now?' <<<"$piped_output" || \
+  fail "piped install did not prompt through MUSE_SQUAD_TTY"
+grep -qF 'Member 1 name [keaton]:' <<<"$piped_output" || \
+  fail "piped install did not prompt for member names"
+grep -qF 'Charter for piped-member' <<<"$piped_output" || \
+  fail "piped install did not prompt for the custom charter"
+
+PIPED_CONFIG="$PIPED_DIR/muse-squad.toml" node -e '
+  const config = require(process.env.PIPED_CONFIG.replace(/muse-squad\.toml$/, "mcp/config.js"))
+    .loadConfig({ config_file: process.env.PIPED_CONFIG });
+  const member = config.squad.members["piped-member"];
+  if (!member) throw new Error("piped-member was not written to the config");
+  if (member.primary !== "Muse-Ember") throw new Error("piped primary was not applied");
+  if (member.fallback[0] !== "Home-Ornith") throw new Error("piped fallback was not applied");
+  if (member.charter.trim() !== "Piped charter.") throw new Error("piped charter was not applied");
+'
+grep -qF '[piped-member | Muse-Ember] <action>' "$PIPED_DIR/agents/piped-member.md" || \
+  fail "piped-member wrapper has the wrong TUI label"
+
+RERUN_TTY="$TMP/piped-rerun-tty"
+printf 'n\nn\n' > "$RERUN_TTY"
+piped_rerun_output="$(
+  MUSE_CONFIG_DIR="$PIPED_DIR" MUSE_SQUAD_TTY="$RERUN_TTY" \
+    bash -s -- --reconfigure-team < "$ROOT/install" 2>&1
+)"
+printf '%s\n' "$piped_rerun_output"
+grep -qF 'Back up current Muse config before continuing? [Y/n]:' <<<"$piped_rerun_output" || \
+  fail "piped rerun did not prompt for backup through MUSE_SQUAD_TTY"
+grep -qF 'skipped      backup (user chose no)' <<<"$piped_rerun_output" || \
+  fail "piped backup answer was not applied"
+[[ -z "$(latest_backup "$PIPED_DIR")" ]] || \
+  fail "piped rerun created a backup after choosing no"
+
 echo "== bash installer: uninstall =="
 UNINSTALL_DIR="$TMP/uninstall-config"
 mkdir -p "$UNINSTALL_DIR/agents"
@@ -276,6 +326,9 @@ echo "== PowerShell installer structure =="
 for phrase in \
   "function Install-Config" \
   "Install-Config (Get-Config-Defaults)" \
+  "function Test-Console-Input" \
+  "function Read-Interactive" \
+  "MUSE_SQUAD_TTY" \
   "Get-Dest 'muse-squad.toml'" \
   "--uninstall         Remove managed files and unregister muse-squad"; do
   grep -qF -- "$phrase" "$ROOT/install.ps1" || fail "install.ps1 is missing: $phrase"

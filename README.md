@@ -60,14 +60,33 @@ These URLs point straight at the files in this public repo. The installers are s
 | `--no-mcp` | Skip adding the `muse-squad` MCP server. |
 | `--backup` | Force the backup prompt, even if backup was disabled by environment. |
 | `--no-backup` | Skip the backup prompt and backup. |
+| `--reconfigure-team` | Rerun the interactive team wizard on an existing install. |
+| `--defaults` | Skip the team wizard and use the default roster. |
 | `--skip-muse-check` | Skip the Muse install/config discovery preflight. |
 | `--help` or `-h` | Show help. |
 
-If you are piping the script straight into bash, use an environment variable instead of `--dir`:
+### Interactive prompts
+
+Prompts work even when the installer is piped in (`curl ... | bash` or `irm ... | iex`). The script never reads user answers from stdin in that case, because stdin carries the installer itself. It reads from the controlling terminal instead: `/dev/tty` on macOS/Linux and `CONIN$` on Windows. If there is no controlling terminal—CI, cron, a detached SSH session without `-t`, or a service manager—prompts are skipped and the safe defaults are used.
+
+On a first install, the interactive flow asks `Customize Squad team members & models now? [Y/n]` and then walks through the default roster. Press Enter to accept the defaults at any prompt. Re-run with `--reconfigure-team` to edit an existing squad; use `--defaults` to skip the wizard entirely.
+
+You can still use an environment variable with a piped install:
 
 ```bash
 MUSE_CONFIG_DIR=/tmp/muse-test bash <(curl -fsSL https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install)
 ```
+
+Advanced environment variables:
+
+| Variable | Meaning |
+| --- | --- |
+| `MUSE_CONFIG_DIR` | Equivalent to `--dir`. |
+| `MUSE_SQUAD_SKIP_MCP` | Set to `1` to skip MCP registration. |
+| `MUSE_SQUAD_NO_BACKUP` | Set to `1` to skip backup unless `--backup` is passed. |
+| `MUSE_SQUAD_SKIP_MUSE_CHECK` | Set to `1` to skip Muse discovery. |
+| `MUSE_SQUAD_FORCE_INTERACTIVE` | Set to `1` to attempt prompts even when no terminal is detected. |
+| `MUSE_SQUAD_TTY` | Override the prompt device, e.g. `/dev/tty` or `CONIN$`. Mainly for tests and unusual terminals. |
 
 Running the installer again is safe. Unchanged files are skipped. Files you edited are saved as `<file>.bak.<timestamp>` first.
 
@@ -80,7 +99,7 @@ curl -fsSL https://dev.meta.ai/install.sh | bash   # macOS / Linux
 irm https://dev.meta.ai/install.ps1 | iex          # Windows
 ```
 
-It then finds the Muse config directory: a path you supplied previously, `$XDG_CONFIG_HOME/muse` when set, otherwise `~/.config/muse`, plus a few platform fallbacks. A directory is accepted when it exists and contains `settings.json`, `auth.json`, `trust.json`, `agents/`, `skills/`, or `mcp/`. An explicit `--dir` or `MUSE_CONFIG_DIR` always wins. Without a TTY, a failed preflight stops before writing anything; use `--skip-muse-check` or `MUSE_SQUAD_SKIP_MUSE_CHECK=1` to bypass it.
+It then finds the Muse config directory: a path you supplied previously, `$XDG_CONFIG_HOME/muse` when set, otherwise `~/.config/muse`, plus a few platform fallbacks. A directory is accepted when it exists and contains `settings.json`, `auth.json`, `trust.json`, `agents/`, `skills/`, or `mcp/`. An explicit `--dir` or `MUSE_CONFIG_DIR` always wins. If no interactive terminal is available at all, a failed preflight stops before writing anything; use `--skip-muse-check` or `MUSE_SQUAD_SKIP_MUSE_CHECK=1` to bypass it.
 
 ### Config, updates, and uninstall
 
@@ -96,7 +115,7 @@ Before install or uninstall, the script asks:
 Back up current Muse config before continuing? [Y/n]
 ```
 
-Press Enter (or type `Y`) to make a backup; type `n` to skip. It copies the whole Muse config folder to a sibling directory such as `~/.config/muse.backup.20261120-143022-12345`. With `curl | bash` there is no keyboard, so it backs up automatically. Use `--no-backup` or `MUSE_SQUAD_NO_BACKUP=1` to skip, or `--backup` to force it.
+Press Enter (or type `Y`) to make a backup; type `n` to skip. It copies the whole Muse config folder to a sibling directory such as `~/.config/muse.backup.20261120-143022-12345`. The prompt also works through `curl | bash` because it reads from the controlling terminal; if no terminal is available, the script backs up automatically. Use `--no-backup` or `MUSE_SQUAD_NO_BACKUP=1` to skip, or `--backup` to force it.
 
 Backups contain plaintext API keys from your config. Keep them private.
 

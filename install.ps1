@@ -77,6 +77,8 @@ Environment:
   MUSE_SQUAD_SKIP_MCP      Set to 1 to skip MCP registration
   MUSE_SQUAD_NO_BACKUP     Set to 1 to skip backup unless --backup is passed
   MUSE_SQUAD_SKIP_MUSE_CHECK Set to 1 to skip Muse install/config discovery
+  MUSE_SQUAD_FORCE_INTERACTIVE Set to 1 to attempt prompts even without a TTY
+  MUSE_SQUAD_TTY           Terminal device for prompts (default /dev/tty or CONIN$)
 
 Providers and squad members are configured in muse-squad.toml inside the config directory.
 
@@ -91,13 +93,50 @@ function Get-Dest([string]$rel) {
   return [IO.Path]::GetFullPath((Join-Path $configDir $parts))
 }
 
-function Test-Preflight-Interactive {
-  if ($env:MUSE_SQUAD_FORCE_INTERACTIVE -eq '1') { return $true }
+# When the installer is piped in, stdin carries the script rather than user
+# input. Read prompts from the controlling console/TTY when one is available.
+$script:ConsoleInputPath = $env:MUSE_SQUAD_TTY
+if ([string]::IsNullOrWhiteSpace($script:ConsoleInputPath)) {
+  if ([IO.Path]::DirectorySeparatorChar -eq '\') { $script:ConsoleInputPath = 'CONIN$' }
+  else { $script:ConsoleInputPath = '/dev/tty' }
+}
+$script:ConsoleInputReader = $null
+
+function Get-Console-Input-Reader {
+  if ($null -ne $script:ConsoleInputReader) { return $script:ConsoleInputReader }
   try {
-    return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected)
+    $reader = New-Object System.IO.StreamReader -ArgumentList $script:ConsoleInputPath
+    $script:ConsoleInputReader = $reader
+    return $reader
+  } catch {
+    return $null
+  }
+}
+
+function Test-Console-Input {
+  try {
+    if (-not [Environment]::UserInteractive) { return $false }
+    if (-not [Console]::IsInputRedirected) { return $true }
+    return ($null -ne (Get-Console-Input-Reader))
   } catch {
     return $false
   }
+}
+
+function Read-Interactive([string]$prompt) {
+  if ([Console]::IsInputRedirected) {
+    $reader = Get-Console-Input-Reader
+    if ($null -ne $reader) {
+      Write-Host "$prompt`: " -NoNewline
+      return $reader.ReadLine()
+    }
+  }
+  return Read-Host $prompt
+}
+
+function Test-Preflight-Interactive {
+  if ($env:MUSE_SQUAD_FORCE_INTERACTIVE -eq '1') { return $true }
+  return (Test-Console-Input)
 }
 
 function Show-Muse-Missing-Error {
@@ -165,7 +204,7 @@ function Invoke-Preflight {
 
   if (-not (Test-Muse-Installed)) {
     if (Test-Preflight-Interactive) {
-      $answer = Read-Host 'Muse Code does not appear to be installed. Install it now? [Y/n]'
+      $answer = Read-Interactive 'Muse Code does not appear to be installed. Install it now? [Y/n]'
       if ([string]::IsNullOrWhiteSpace($answer)) { $answer = 'Y' }
       if ($answer -match '^[Yy]([Ee][Ss])?$') {
         Install-Muse
@@ -206,7 +245,7 @@ function Invoke-Preflight {
 
   if (Test-Preflight-Interactive) {
     while ($true) {
-      $typed = Read-Host 'Where is your Muse config directory?'
+      $typed = Read-Interactive 'Where is your Muse config directory?'
       if ([string]::IsNullOrWhiteSpace($typed)) {
         Write-Host '  a config directory is required'
         continue
@@ -243,7 +282,7 @@ function Backup-Config {
     $interactive = $false
   }
   if ($interactive) {
-    $answer = Read-Host 'Back up current Muse config before continuing? [Y/n]'
+    $answer = Read-Interactive 'Back up current Muse config before continuing? [Y/n]'
     if ([string]::IsNullOrWhiteSpace($answer)) { $answer = 'Y' }
   } else {
     Write-Host '  no interactive input detected; backing up by default'
@@ -427,11 +466,7 @@ function Install-Config([string]$content) {
 
 function Test-Interactive-Input {
   if ($env:MUSE_SQUAD_FORCE_INTERACTIVE -eq '1') { return $true }
-  try {
-    return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected)
-  } catch {
-    return $false
-  }
+  return (Test-Console-Input)
 }
 
 function Get-Available-Providers {
@@ -474,13 +509,13 @@ if (member) process.stdout.write(member.charter.replace(/\s+/g, ' ').trim());
 }
 
 function Read-Defaulted([string]$prompt, [string]$default) {
-  $answer = Read-Host "$prompt [$default]"
+  $answer = Read-Interactive "$prompt [$default]"
   if ([string]::IsNullOrWhiteSpace($answer)) { return $default }
   return $answer
 }
 
 function Read-Required([string]$prompt, [string]$fallback) {
-  $answer = Read-Host $prompt
+  $answer = Read-Interactive $prompt
   if ([string]::IsNullOrWhiteSpace($answer)) { return $fallback }
   return $answer
 }
@@ -601,7 +636,19 @@ fs.writeFileSync(outputFile, `${prefix}${lines.join('\n')}`);
 function Configure-Team {
   $dest = Get-Dest 'muse-squad.toml'
   $action = 'created'
-  if (Test-Path -LiteralPath $dest) {
+  $seeded = $false
+  if ($firstInstall) {
+    # Seed first so the provider menu can be built from the default TOML, then
+    # let an interactive wizard replace it.
+    if (-not (Test-Path -LiteralPath $dest)) {
+      Install-Config (Get-Config-Defaults)
+      $seeded = $true
+    }
+    if ($useDefaults -or -not (Test-Interactive-Input) -or
+        -not (Get-Command node -ErrorAction SilentlyContinue)) {
+      return
+    }
+  } else {
     $action = 'updated'
     if (-not $reconfigureTeam) {
       Write-Host "  unchanged  $dest"
@@ -611,26 +658,19 @@ function Configure-Team {
       Write-Host "  unchanged  $dest (team wizard skipped)"
       return
     }
-  } else {
-    if ($useDefaults -or -not (Test-Interactive-Input) -or
-        -not (Get-Command node -ErrorAction SilentlyContinue)) {
-      Install-Config (Get-Config-Defaults)
+    if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+      Write-Host '  warning    node not found; keeping existing team config'
       return
     }
   }
 
-  if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-    Write-Host '  warning    node not found; keeping existing team config'
-    return
-  }
-
-  $customize = Read-Host 'Customize Squad team members & models now? [Y/n]'
+  $customize = Read-Interactive 'Customize Squad team members & models now? [Y/n]'
   if ([string]::IsNullOrWhiteSpace($customize)) { $customize = 'Y' }
   if ($customize -match '^[Nn]([Oo])?$') {
-    if (Test-Path -LiteralPath $dest) {
-      Write-Host "  unchanged  $dest"
+    if ($seeded) {
+      Write-Host "  kept defaults  $dest"
     } else {
-      Install-Config (Get-Config-Defaults)
+      Write-Host "  unchanged  $dest"
     }
     return
   }
@@ -678,7 +718,7 @@ function Configure-Team {
   }
 
   while ($true) {
-    $answer = Read-Host 'Add another team member? [y/N]'
+    $answer = Read-Interactive 'Add another team member? [y/N]'
     if ($answer -notmatch '^[Yy]([Ee][Ss])?$') { break }
 
     while ($true) {
@@ -3153,7 +3193,6 @@ fallback = ["Home-Ornith"]
 charter = """Domain expertise: architectural decision records, execution logs, and durable project conventions. Voice: terse and factual; record why a decision was made, not just what happened. Guardrails: append only, never invent decisions, never rewrite earlier history, and keep every entry short enough to survive context compaction."""
 '@
 }
-Install-Config (Get-Config-Defaults)
 Install-Agents-Policy @'
 <!-- muse-squad:begin -->
 ## Muse Squad Default Delegation Policy
