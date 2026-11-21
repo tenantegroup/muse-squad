@@ -46,6 +46,11 @@ const ENDPOINT_PARAM = {
   description: 'Named endpoint alias from endpoints.json. Omit to use the configured default.'
 };
 
+const FALLBACK_ENDPOINT_PARAM = {
+  type: 'string',
+  description: 'Member-specific backup endpoint alias. When set, only this endpoint is tried after the primary, instead of the global fallback_order. Set to an empty string to disable MCP fallback (for native backups).'
+};
+
 const TOOLS = [
   {
     name: 'generate_code',
@@ -54,6 +59,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         endpoint: ENDPOINT_PARAM,
+        fallback_endpoint: FALLBACK_ENDPOINT_PARAM,
         prompt: { type: 'string', description: 'Bounded implementation task to perform.' },
         task_spec: { type: 'string', description: 'Alias for prompt.' },
         context: { type: 'string', description: 'Relevant file contents or excerpts to work from.' },
@@ -73,6 +79,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         endpoint: ENDPOINT_PARAM,
+        fallback_endpoint: FALLBACK_ENDPOINT_PARAM,
         plan_markdown: { type: 'string', description: 'Full markdown of .muse/PLAN.md to audit.' },
         repo_context: { type: 'string', description: 'Relevant repository files and structure the plan relies on.' },
         temperature: { type: 'number', description: 'Optional sampling temperature override.' },
@@ -284,6 +291,26 @@ function requireEndpoint(config, requested) {
     throw new Error(`unknown endpoint "${name}". Available: ${Object.keys(config.endpoints).join(', ')}`);
   }
   return name;
+}
+
+// Resolves a member-specific backup chain. Omitted means "use the global
+// fallback_order"; "" means "no MCP fallback"; a name means "only this one".
+function parseFallbackEndpoint(config, requested) {
+  if (requested === undefined || requested === null) {
+    return { provided: false, name: null };
+  }
+  if (typeof requested !== 'string') {
+    throw new Error('"fallback_endpoint" must be a string');
+  }
+  if (requested === '') {
+    return { provided: true, name: null };
+  }
+  if (!Object.prototype.hasOwnProperty.call(config.endpoints, requested)) {
+    throw new Error(
+      `unknown fallback_endpoint "${requested}". Available: ${Object.keys(config.endpoints).join(', ')}`
+    );
+  }
+  return { provided: true, name: requested };
 }
 
 // --- Per-endpoint FIFO concurrency queues ---------------------------------
@@ -513,9 +540,12 @@ function buildPayload(endpoint, requestTemplate) {
   };
 }
 
-async function queryWithFallback(primaryName, requestTemplate, config) {
+async function queryWithFallback(primaryName, requestTemplate, config, fallback = { provided: false, name: null }) {
+  const orderedNames = fallback.provided
+    ? (fallback.name ? [fallback.name] : [])
+    : config.fallbackOrder;
   const candidates = [];
-  for (const name of [primaryName, ...config.fallbackOrder]) {
+  for (const name of [primaryName, ...orderedNames]) {
     if (name && !candidates.includes(name)) candidates.push(name);
   }
 
@@ -540,6 +570,7 @@ async function queryWithFallback(primaryName, requestTemplate, config) {
           ...(result.upstreamModel ? { upstreamModel: result.upstreamModel } : {}),
           ...(result.usage ? { usage: result.usage } : {}),
           fallbackUsed: name !== primaryName,
+          ...(fallback.provided ? { fallbackEndpoint: fallback.name, fallbackRestricted: true } : {}),
           attempts
         }
       };
@@ -620,6 +651,7 @@ async function callTool(name, args) {
       throw new Error('critique_plan requires a non-empty "plan_markdown"');
     }
     const primary = requireEndpoint(config, params.endpoint);
+    const fallback = parseFallbackEndpoint(config, params.fallback_endpoint);
     const user = [
       'PLAN MARKDOWN:',
       params.plan_markdown,
@@ -632,7 +664,8 @@ async function callTool(name, args) {
     const result = await queryWithFallback(
       primary,
       { systemPrompt: CRITIQUE_SYSTEM, userPrompt: user, params },
-      config
+      config,
+      fallback
     );
     return { content: [{ type: 'text', text: result.text }], meta: result.meta };
   }
@@ -644,6 +677,7 @@ async function callTool(name, args) {
     }
     const context = typeof params.context === 'string' ? params.context : params.file_context;
     const primary = requireEndpoint(config, params.endpoint);
+    const fallback = parseFallbackEndpoint(config, params.fallback_endpoint);
     const system = typeof params.system === 'string' && params.system.trim() ? params.system : DEFAULT_SYSTEM;
     const user = typeof context === 'string' && context.trim()
       ? `TASK:\n${prompt}\n\nRELEVANT CONTEXT:\n${context}`
@@ -651,7 +685,8 @@ async function callTool(name, args) {
     const result = await queryWithFallback(
       primary,
       { systemPrompt: system, userPrompt: user, params },
-      config
+      config,
+      fallback
     );
     return { content: [{ type: 'text', text: result.text }], meta: result.meta };
   }

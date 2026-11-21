@@ -4,12 +4,14 @@
 
 $ErrorActionPreference = 'Stop'
 
-$Version = '0.2.1'
+$Version = '0.2.4'
 $configDir = if ($env:MUSE_CONFIG_DIR) { $env:MUSE_CONFIG_DIR } else { Join-Path $HOME '.config/muse' }
 $mode = 'install'
 $help = $false
 $skipMcp = $false
 $backupChoice = 'auto'
+$reconfigureTeam = $false
+$useDefaults = $false
 $repoRawBase = 'https://raw.githubusercontent.com/tenantegroup/muse-squad/main'
 if ($null -eq $args) { $args = @() }
 
@@ -20,6 +22,8 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     '--no-mcp' { $skipMcp = $true }
     '--backup' { $backupChoice = 'yes' }
     '--no-backup' { $backupChoice = 'no' }
+    '--reconfigure-team' { $reconfigureTeam = $true }
+    '--defaults' { $useDefaults = $true }
     '--dir' {
       if (($i + 1) -ge $args.Count) { throw '--dir requires a value' }
       $configDir = $args[++$i]
@@ -46,15 +50,18 @@ muse-squad installer
 Usage:
   irm https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install.ps1 | iex
   powershell -File install.ps1 [--dir PATH] [--update] [--uninstall] [--no-mcp]
+  powershell -File install.ps1 [--reconfigure-team] [--defaults]
 
 Options:
-  --dir PATH       Install into PATH instead of ~/.config/muse
-  --update         Download and run the latest installer from GitHub, then install
-  --uninstall      Remove managed files and unregister custom-coder
-  --no-mcp         Skip custom-coder MCP registration
-  --backup         Force a backup prompt/backup
-  --no-backup      Skip the backup prompt and backup
-  --help, -h       Show this help
+  --dir PATH          Install into PATH instead of ~/.config/muse
+  --update            Download and run the latest installer from GitHub, then install
+  --uninstall         Remove managed files and unregister custom-coder
+  --no-mcp            Skip custom-coder MCP registration
+  --backup            Force a backup prompt/backup
+  --no-backup         Skip the backup prompt and backup
+  --reconfigure-team  Rerun the interactive team wizard on an existing install
+  --defaults          Skip the team wizard and use the default roster
+  --help, -h          Show this help
 
 Environment:
   MUSE_CONFIG_DIR     Equivalent to --dir (useful with irm | iex)
@@ -152,6 +159,103 @@ function Uninstall-File([string]$rel) {
   }
 }
 
+$agentsBegin = '<!-- muse-squad:begin -->'
+$agentsEnd = '<!-- muse-squad:end -->'
+
+function Get-Policy-File {
+  $agents = Get-Dest 'AGENTS.md'
+  if (Test-Path -LiteralPath $agents -PathType Leaf) { return $agents }
+  $muse = Get-Dest 'MUSE.md'
+  if (Test-Path -LiteralPath $muse -PathType Leaf) { return $muse }
+  return $agents
+}
+
+function Trim-Newlines([string]$text, [string]$side) {
+  $chars = [char[]]@("`r", "`n")
+  if ($side -eq 'end') { return $text.TrimEnd($chars) }
+  if ($side -eq 'start') { return $text.TrimStart($chars) }
+  return $text.Trim($chars)
+}
+
+function Write-Policy-File([string]$dest, [string]$updated, [string]$verb, [bool]$makeBackup) {
+  $parent = Split-Path -Parent $dest
+  if (-not (Test-Path -LiteralPath $parent)) {
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+  }
+  $normalized = $updated.TrimEnd([char[]]@("`r", "`n")) + "`n"
+  $existing = $null
+  if (Test-Path -LiteralPath $dest -PathType Leaf) { $existing = [IO.File]::ReadAllText($dest) }
+  if (($null -ne $existing) -and ($existing -ceq $normalized)) {
+    Write-Host "  unchanged  $dest"
+    return
+  }
+  if (($null -ne $existing) -and $makeBackup) {
+    $bak = "$dest.bak." + (Get-Date -Format 'yyyyMMddHHmmss')
+    Move-Item -LiteralPath $dest -Destination $bak -Force
+    Write-Host "  backed up  $dest -> $bak"
+  }
+  [IO.File]::WriteAllText($dest, $normalized, [System.Text.UTF8Encoding]::new($false))
+  Write-Host "  $verb  $dest"
+}
+
+function Install-Agents-Policy([string]$content) {
+  $dest = Get-Policy-File
+  $block = $content.TrimEnd([char[]]@("`r", "`n"))
+  $existing = $null
+  if (Test-Path -LiteralPath $dest -PathType Leaf) { $existing = [IO.File]::ReadAllText($dest) }
+  $beginIx = -1
+  $endIx = -1
+  if ($null -ne $existing) {
+    $beginIx = $existing.IndexOf($agentsBegin, [StringComparison]::Ordinal)
+    $endIx = $existing.IndexOf($agentsEnd, [StringComparison]::Ordinal)
+  }
+  $parts = @()
+  if (($beginIx -ge 0) -or ($endIx -ge 0)) {
+    if (($beginIx -lt 0) -or ($endIx -lt 0) -or ($endIx -lt $beginIx)) {
+      Write-Host "  warning    $dest has a partial or reordered muse-squad block; left unchanged"
+      return
+    }
+    $before = Trim-Newlines ($existing.Substring(0, $beginIx)) 'end'
+    $after = Trim-Newlines ($existing.Substring($endIx + $agentsEnd.Length)) 'start'
+    if ($before.Length -gt 0) { $parts += $before }
+    $parts += $block
+    if ($after.Length -gt 0) { $parts += $after }
+  } else {
+    if ($null -ne $existing) {
+      $before = Trim-Newlines $existing 'end'
+      if ($before.Length -gt 0) { $parts += $before }
+    }
+    $parts += $block
+  }
+  Write-Policy-File $dest ([string]::Join("`n`n", $parts)) 'installed' $true
+}
+
+function Uninstall-Agents-Policy {
+  foreach ($name in @('AGENTS.md', 'MUSE.md')) {
+    $dest = Get-Dest $name
+    if (-not (Test-Path -LiteralPath $dest -PathType Leaf)) { continue }
+    $existing = [IO.File]::ReadAllText($dest)
+    $beginIx = $existing.IndexOf($agentsBegin, [StringComparison]::Ordinal)
+    $endIx = $existing.IndexOf($agentsEnd, [StringComparison]::Ordinal)
+    if (($beginIx -lt 0) -and ($endIx -lt 0)) { continue }
+    if (($beginIx -lt 0) -or ($endIx -lt 0) -or ($endIx -lt $beginIx)) {
+      Write-Host "  warning    $dest has a partial or reordered muse-squad block; left unchanged"
+      continue
+    }
+    $before = Trim-Newlines ($existing.Substring(0, $beginIx)) 'end'
+    $after = Trim-Newlines ($existing.Substring($endIx + $agentsEnd.Length)) 'start'
+    $parts = @()
+    if ($before.Length -gt 0) { $parts += $before }
+    if ($after.Length -gt 0) { $parts += $after }
+    if ($parts.Count -eq 0) {
+      Remove-Item -LiteralPath $dest -Force
+      Write-Host "  removed    $dest"
+      continue
+    }
+    Write-Policy-File $dest ([string]::Join("`n`n", $parts)) 'updated' $false
+  }
+}
+
 function Install-Endpoints-Config([string]$content) {
   $dest = Get-Dest 'endpoints.json'
   if (Test-Path -LiteralPath $dest) {
@@ -165,6 +269,289 @@ function Install-Endpoints-Config([string]$content) {
   $normalized = $content -replace "(?:\r?\n)+\z", "`n"
   [IO.File]::WriteAllText($dest, $normalized, [System.Text.UTF8Encoding]::new($false))
   Write-Host "  created    $dest"
+}
+
+function Install-Squad-Team-Config {
+  $dest = Get-Dest 'squad-team.json'
+  if (Test-Path -LiteralPath $dest) {
+    Write-Host "  unchanged  $dest"
+    return
+  }
+  $parent = Split-Path -Parent $dest
+  if (-not (Test-Path -LiteralPath $parent)) {
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+  }
+  $normalized = (Get-Team-Defaults) -replace "(?:\r?\n)+\z", "`n"
+  [IO.File]::WriteAllText($dest, $normalized, [System.Text.UTF8Encoding]::new($false))
+  Write-Host "  created    $dest"
+}
+
+function Test-Interactive-Input {
+  if ($env:MUSE_SQUAD_FORCE_INTERACTIVE -eq '1') { return $true }
+  try {
+    return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected)
+  } catch {
+    return $false
+  }
+}
+
+function Get-Available-Models {
+  $models = New-Object 'System.Collections.Generic.List[string]'
+  foreach ($name in @('muse-spark-1.3-contributor', 'muse-ember-1.0', 'muse-wonder-1.0')) {
+    if (-not $models.Contains($name)) { $models.Add($name) }
+  }
+  $endpointsFile = Get-Dest 'endpoints.json'
+  if ((Get-Command node -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $endpointsFile)) {
+    $script = @'
+const fs = require('fs');
+const config = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+const seen = new Set();
+for (const name of Object.keys(config.muse_models || {})) if (!seen.has(name)) {
+  seen.add(name); console.log(name);
+}
+for (const name of Object.keys(config.endpoints || {})) if (!seen.has(name)) {
+  seen.add(name); console.log(name);
+}
+'@
+    $output = & node -e $script $endpointsFile 2>$null
+    foreach ($line in $output) {
+      $name = ([string]$line).Trim()
+      if ($name -and -not $models.Contains($name)) { $models.Add($name) }
+    }
+  }
+  return $models.ToArray()
+}
+
+function Get-Model-Menu([string[]]$models) {
+  $items = @()
+  for ($i = 0; $i -lt $models.Count; $i++) {
+    $items += "$($i + 1): $($models[$i])"
+  }
+  return ($items -join ', ')
+}
+
+function Read-Defaulted([string]$prompt, [string]$default) {
+  $answer = Read-Host "$prompt [$default]"
+  if ([string]::IsNullOrWhiteSpace($answer)) { return $default }
+  return $answer
+}
+
+function Read-Required([string]$prompt, [string]$fallback) {
+  $answer = Read-Host $prompt
+  if ([string]::IsNullOrWhiteSpace($answer)) { return $fallback }
+  return $answer
+}
+
+function ConvertTo-Member-Name([string]$value) {
+  $slug = $value.ToLowerInvariant() -replace '[^a-z0-9]+', '-'
+  $slug = $slug.Trim('-')
+  if ([string]::IsNullOrEmpty($slug)) { $slug = 'member' }
+  if (@('worker', 'plan-reviewer', 'general-purpose') -contains $slug) { $slug = "$slug-1" }
+  return $slug
+}
+
+function Resolve-Model([string]$answer, [string]$default) {
+  if ([string]::IsNullOrWhiteSpace($answer)) { return $default }
+  if ($answer -match '^\d+$') {
+    $index = [int]$answer - 1
+    if ($index -ge 0 -and $index -lt $script:WizardModels.Count) {
+      return $script:WizardModels[$index]
+    }
+    throw "Invalid model number: $answer"
+  }
+  return $answer
+}
+
+function New-Team-Config([object[]]$members) {
+  $defaults = Get-Team-Defaults | ConvertFrom-Json
+  $byRole = @{}
+  foreach ($member in $defaults.members) { $byRole[$member.role] = $member }
+
+  $built = @()
+  foreach ($member in $members) {
+    $template = $null
+    if ($byRole.ContainsKey($member.role)) { $template = $byRole[$member.role] }
+    $responsibility = if ($template) {
+      $template.responsibility
+    } else {
+      "$($member.role) work and bounded implementation tasks"
+    }
+    $charter = if ($template) {
+      $template.charter
+    } else {
+      "Domain expertise: $($member.role.ToLowerInvariant()) tasks. Voice: concise and evidence-first. " +
+        'Guardrails: stay scoped to assigned files, preserve existing conventions, and verify ' +
+        'changes before reporting done.'
+    }
+    $display = (($member.name -split '-' | Where-Object { $_ } | ForEach-Object {
+      $_.Substring(0, 1).ToUpperInvariant() + $_.Substring(1)
+    }) -join ' ')
+
+    $built += [pscustomobject]@{
+      name           = $member.name
+      display_name   = $display
+      role           = $member.role
+      responsibility = $responsibility
+      primary        = $member.primary
+      backup         = $member.backup
+      charter        = $charter
+    }
+  }
+
+  $team = [ordered]@{
+    schema_version = $defaults.schema_version
+    team_name      = $defaults.team_name
+    memory_dir     = $defaults.memory_dir
+    members        = @($built)
+    projects       = $defaults.projects
+  }
+  return ($team | ConvertTo-Json -Depth 8)
+}
+
+function Write-Team-Config([string]$content, [string]$action) {
+  $dest = Get-Dest 'squad-team.json'
+  $parent = Split-Path -Parent $dest
+  if (-not (Test-Path -LiteralPath $parent)) {
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+  }
+  $normalized = $content -replace "(?:\r?\n)+\z", "`n"
+  [IO.File]::WriteAllText($dest, $normalized, [System.Text.UTF8Encoding]::new($false))
+  Write-Host "  $action  $dest"
+}
+
+function Configure-Team {
+  $dest = Get-Dest 'squad-team.json'
+  $action = 'created'
+  if (Test-Path -LiteralPath $dest) {
+    $action = 'updated'
+    if (-not $reconfigureTeam) {
+      Write-Host "  unchanged  $dest"
+      return
+    }
+    if ($useDefaults -or -not (Test-Interactive-Input)) {
+      Write-Host "  unchanged  $dest (team wizard skipped)"
+      return
+    }
+  } else {
+    if ($useDefaults -or -not (Test-Interactive-Input) -or
+        -not (Get-Command node -ErrorAction SilentlyContinue)) {
+      Install-Squad-Team-Config
+      return
+    }
+  }
+
+  if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Write-Host '  warning    node not found; keeping existing team config'
+    return
+  }
+
+  $customize = Read-Host 'Customize Squad team members & models now? [Y/n]'
+  if ([string]::IsNullOrWhiteSpace($customize)) { $customize = 'Y' }
+  if ($customize -match '^[Nn]([Oo])?$') {
+    if (Test-Path -LiteralPath $dest) {
+      Write-Host "  unchanged  $dest"
+    } else {
+      Install-Squad-Team-Config
+    }
+    return
+  }
+  if ($customize -notmatch '^[Yy]([Ee][Ss])?$') {
+    throw 'Expected Y or n for team customization prompt'
+  }
+
+  $script:WizardModels = Get-Available-Models
+  $menu = Get-Model-Menu $script:WizardModels
+  $defaultNames = @('keaton', 'fenster', 'mcmanus', 'hockney', 'verbal')
+  $defaultRoles = @('Lead', 'Frontend', 'Backend', 'Tester', 'Scribe')
+  $defaultPrimary = @(
+    'muse-spark-1.3-contributor', 'local-coder', 'local-coder', 'local-coder', 'muse-ember-1.0'
+  )
+  $defaultBackup = @(
+    'grill-reviewer', 'muse-ember-1.0', 'grill-reviewer', 'muse-ember-1.0', 'local-coder'
+  )
+
+  $members = @()
+  $used = New-Object 'System.Collections.Generic.HashSet[string]'
+
+  for ($i = 0; $i -lt 5; $i++) {
+    while ($true) {
+      $rawName = Read-Defaulted "Member $($i + 1) [$($defaultRoles[$i])] name" $defaultNames[$i]
+      $name = ConvertTo-Member-Name $rawName
+      if ($used.Contains($name)) {
+        Write-Host "  name already in use: $name"
+        continue
+      }
+      [void]$used.Add($name)
+      break
+    }
+    $role = (Read-Defaulted "Role for $name" $defaultRoles[$i]).Trim()
+    if ([string]::IsNullOrEmpty($role)) { $role = $defaultRoles[$i] }
+    $primary = Resolve-Model `
+      (Read-Defaulted "Primary model/endpoint for $name ($menu)" $defaultPrimary[$i]) $defaultPrimary[$i]
+    $backup = Resolve-Model `
+      (Read-Defaulted "Backup model/endpoint for $name" $defaultBackup[$i]) $defaultBackup[$i]
+    $members += [pscustomobject]@{ name = $name; role = $role; primary = $primary; backup = $backup }
+  }
+
+  while ($true) {
+    $answer = Read-Host 'Add another team member? [y/N]'
+    if ($answer -notmatch '^[Yy]([Ee][Ss])?$') { break }
+
+    while ($true) {
+      $rawName = Read-Required 'Extra member name' ''
+      if ([string]::IsNullOrWhiteSpace($rawName)) {
+        Write-Host '  name cannot be empty'
+        continue
+      }
+      $name = ConvertTo-Member-Name $rawName
+      if ($used.Contains($name)) {
+        Write-Host "  name already in use: $name"
+        continue
+      }
+      [void]$used.Add($name)
+      break
+    }
+    $role = (Read-Required "Role for $name" 'Contributor').Trim()
+    if ([string]::IsNullOrEmpty($role)) { $role = 'Contributor' }
+    $primary = Resolve-Model `
+      (Read-Defaulted "Primary model/endpoint for $name ($menu)" 'muse-ember-1.0') 'muse-ember-1.0'
+    $backup = Resolve-Model `
+      (Read-Defaulted "Backup model/endpoint for $name" 'local-coder') 'local-coder'
+    $members += [pscustomobject]@{ name = $name; role = $role; primary = $primary; backup = $backup }
+  }
+
+  Write-Team-Config (New-Team-Config $members) $action
+}
+
+function Uninstall-Team {
+  $teamFile = Get-Dest 'squad-team.json'
+  if (Test-Path -LiteralPath $teamFile) {
+    Remove-Item -LiteralPath $teamFile -Force
+    Write-Host "  removed    $teamFile"
+  }
+  $squadDir = Get-Dest 'squad'
+  if (Test-Path -LiteralPath $squadDir -PathType Container) {
+    Remove-Item -LiteralPath $squadDir -Recurse -Force
+    Write-Host "  removed    $squadDir"
+  }
+}
+
+function Invoke-Sync-Team([string]$action) {
+  if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Write-Host '  warning    node not found on PATH; skipping team materialization'
+    return
+  }
+  $script = Get-Dest 'mcp/sync-team.js'
+  if (-not (Test-Path -LiteralPath $script)) {
+    Write-Host "  warning    $script missing; skipping team materialization"
+    return
+  }
+  $nodeArgs = @($script, '--config-dir', $configDir)
+  if ($action -eq 'uninstall') { $nodeArgs += '--uninstall' }
+  & node @nodeArgs
+  if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) {
+    throw "team materialization failed with exit code $LASTEXITCODE"
+  }
 }
 
 function Register-Mcp([string]$action) {
@@ -211,10 +598,11 @@ function Invoke-SelfUpdate {
     if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
     throw "cannot download latest installer: $($_.Exception.Message)"
   }
-  $updateArgs = @('--dir', $configDir)
+  $updateArgs = @('--dir', $configDir, '--defaults')
   if ($skipMcp -or $env:MUSE_SQUAD_SKIP_MCP -eq '1') { $updateArgs += '--no-mcp' }
   if ($backupChoice -eq 'yes') { $updateArgs += '--backup' }
   if ($backupChoice -eq 'no') { $updateArgs += '--no-backup' }
+  # --update must never trigger a reconfigure on the downloaded installer.
   Write-Host '  running    latest installer'
   try {
     $shell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } elseif (Get-Command powershell -ErrorAction SilentlyContinue) { 'powershell' } else { $null }
@@ -245,6 +633,9 @@ Backup-Config
 
 if ($mode -eq 'uninstall') {
   Register-Mcp 'unregister'
+  Uninstall-Agents-Policy
+  Invoke-Sync-Team 'uninstall'
+  Uninstall-Team
   Uninstall-File 'agents/plan-reviewer.md'
   Uninstall-File 'agents/general-purpose.md'
   Uninstall-File 'agents/worker.md'
@@ -252,6 +643,7 @@ if ($mode -eq 'uninstall') {
   Uninstall-File 'skills/squad-execute/SKILL.md'
   Uninstall-File 'mcp/bridge.js'
   Uninstall-File 'mcp/register-settings.js'
+  Uninstall-File 'mcp/sync-team.js'
   if (Test-Path -LiteralPath (Get-Dest 'endpoints.json')) {
     Write-Host "  kept       endpoints.json (remove manually if desired)"
   }
@@ -262,7 +654,7 @@ if ($mode -eq 'uninstall') {
 Install-File 'agents/plan-reviewer.md' @'
 ---
 name: plan-reviewer
-description: Stress-tests technical plans for edge cases, missing files, and architectural flaws. Read-only.
+description: Use proactively in normal sessions before risky or ambiguous changes, and when auditing an existing plan, design, or diff. Read-only; reports edge cases, missing files, race conditions, and verification gaps without editing code.
 disallowedTools: ["Edit", "Write", "Bash"]
 ---
 Review the proposed plan in `.muse/PLAN.md`. Identify gaps, ambiguous requirements, race conditions, or missing verification steps. Do not modify code.
@@ -270,7 +662,7 @@ Review the proposed plan in `.muse/PLAN.md`. Identify gaps, ambiguous requiremen
 Install-File 'agents/general-purpose.md' @'
 ---
 name: general-purpose
-description: Executes a single bounded implementation task from a written plan, with fast per-file diagnostics.
+description: Use proactively in normal sessions as the general implementation fallback for bounded coding or test tasks when no more specific agent fits. Keeps edits inside the brief and runs fast per-file diagnostics.
 ---
 Complete the assigned step from `.muse/PLAN.md`. Only touch files listed in your brief, run the specified tests, and return a concise summary of changes.
 
@@ -297,7 +689,7 @@ Other workers may call `custom-coder` tools at the same time. The router queues 
 Install-File 'agents/worker.md' @'
 ---
 name: worker
-description: Executes a single bounded implementation task from a written plan, with fast per-file diagnostics.
+description: Use proactively in normal sessions for bounded code edits, small refactors, bug fixes, and unit-test implementation when the files and checks are clearly scoped. Applies surgical changes and runs fast per-file diagnostics.
 ---
 Complete the assigned step from `.muse/PLAN.md`. Only touch files listed in your brief, run the specified tests, and return a concise summary of changes.
 
@@ -328,30 +720,45 @@ description: Multi-agent explore-first planning mode that writes a decision-comp
 ---
 You are in SQUAD-PLAN mode. Do NOT edit product code yet.
 
-## Subagent Task Labeling and Reporting (TUI Visibility)
+## Named Team Roster and Project Memory (read first)
 
-When spawning any subagent, **always** set its short task title / description to:
+At startup, read `~/.config/muse/squad-team.json` (or the generated roster at `~/.config/muse/squad/team.md`) and route work by responsibility:
 
-`[<agent-role> | <model-tag>] <concise action>`
+- Lead `@keaton` — architecture, task decomposition, and adversarial plan review.
+- Frontend `@fenster` — UI components, styles, accessibility, and client-side files.
+- Backend `@mcmanus` — APIs, persistence, server-side logic, and data files.
+- Tester `@hockney` — verification commands, test suites, and regression coverage.
+- Scribe `@verbal` — record decisions in `.muse/squad/decisions.md` and keep member histories current.
 
-- `<agent-role>` is the role, plus an index when there are peers: `scout-1`, `plan-reviewer`, `worker-2`.
-- `<model-tag>` is lowercase and stable: `ember` for `muse-ember-1.0`, `spark` for `muse-spark-1.3-contributor`, `wonder` for `muse-wonder-*` if configured, or the `custom-coder` endpoint alias (`local-coder`, `grill-reviewer`) when work goes through that endpoint. Combine with `+` when a native agent delegates to `custom-coder`, e.g. `ember+local-coder`. If the specific native model is unknown but it is a native Muse subagent, use `native`; use `unknown` only as a last resort. **Never omit the tag.** **Do not guess or infer from role defaults** (e.g. do not label a scout/reviewer `ember` or `spark` unless the runtime, spawn result, or session metadata explicitly reports that exact model). If you later learn the actual model, correct the roster/summary and note the correction.
+If `.muse/squad/` does not exist in this repository yet, create `.muse/squad/decisions.md` and `.muse/squad/history/` before spawning members. Every named member reads `.muse/squad/decisions.md` and `.muse/squad/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished. Ask `@verbal` to append durable decisions to `.muse/squad/decisions.md` before sign-off.
+
+When a task maps to a roster member, spawn that named agent (for example `@keaton`) instead of a generic one. Use generic agents only for work outside the roster or when a named spawn is unavailable, and say so in the summary.
+
+## TUI Task Labels and Reporting
+
+When spawning any subagent, **always** set its short task title / description to the roster-aware form:
+
+`[<Name> (<Role>) | <model-or-endpoint>] <concise action>`
+
+- `<Name>` and `<Role>` come from the roster: `Keaton (Lead)`, `Fenster (Frontend)`, `McManus (Backend)`, `Hockney (Tester)`, `Verbal (Scribe)`.
+- `<model-or-endpoint>` is that member's `primary` value: `muse-spark-1.3-contributor`, `muse-ember-1.0`, `local-coder`, etc. When work is delegated through `custom-coder`, append the actual `servedBy` from tool meta, e.g. `local-coder+grill-reviewer`. Do not guess a model from the role.
+- For generic helpers outside the roster (`worker-1`, `scout-1`, `plan-reviewer`), keep `[<agent-role> | <model-tag>] <action>` using `ember`, `spark`, or `native` tags.
 - Keep `<concise action>` under ~50 characters so the TUI footer (`└ ◈ <task> running <elapsed>`) does not truncate the useful part. Start with a verb; no trailing punctuation.
-- Use exactly `[role | tag] action`: lowercase tags, one space on each side of `|`, no extra prefix or wrapper.
 
 Examples:
 
 ```text
-[scout-1 | ember] Map mcp/bridge.js and endpoints.json
-[plan-reviewer | spark] Audit .muse/PLAN.md for edge cases
-[worker-1 | ember] Implement FIFO semaphore queue
-[worker-2 | ember+local-coder] Generate unit tests for fallback
-[scout-2 | native] Inspect git state of repos
+[Keaton (Lead) | muse-spark-1.3-contributor] Audit plan for edge cases
+[Fenster (Frontend) | local-coder] Sketch login form changes
+[McManus (Backend) | local-coder+grill-reviewer] Map retry queue changes
+[Hockney (Tester) | local-coder] List verification commands
+[Verbal (Scribe) | muse-ember-1.0] Record plan decisions
+[worker-1 | ember] Apply scoped diff
 ```
 
 If work is done **inline** because subagent spawning failed, was rejected, or is unavailable, do not invent a spawn — report it in the summary as `[inline | native] <action>`.
 
-**Always include a "Subagents / Models" roster in your user-facing summaries** (and before asking for sign-off) so the model is visible even if the TUI label omits it. For each helper list: role, model-tag, action, and outcome/status. For `custom-coder` tool calls, report the actual `servedBy` endpoint/model and `fallbackUsed` from the tool result meta (not inferred from config/default) and the outcome (e.g. `custom-coder:critique_plan | servedBy local-coder (<model>) — ok`). If result meta is unavailable, state that explicitly.
+**Always include a "Subagents / Models" roster in your user-facing summaries** (and before asking for sign-off) so the model is visible even if the TUI label omits it. For each helper list: name/role, model tag, action, and outcome/status. For `custom-coder` tool calls, report the actual `servedBy`, `servedModel`, `fallbackUsed`, and any `fallbackEndpoint` from tool result meta (not inferred from config/default) and the outcome (e.g. `custom-coder:critique_plan | servedBy grill-reviewer (grill-model) — ok`). If result meta is unavailable, state that explicitly.
 
 ## Concurrency Budget and Endpoint Health (read first)
 
@@ -368,9 +775,10 @@ When calling `custom-coder`, keep `repo_context`, `file_context`, and `plan_mark
 2. Ask the user clarifying questions ONLY if an architectural fork cannot be resolved from the codebase.
 3. Draft a decision-complete implementation plan in `.muse/PLAN.md` with exact file paths, dependency order, and verification commands. If the file already has a `## Execution Log & Decisions` section, preserve it verbatim at the bottom — it is the durable handoff record from any prior execution session; do not overwrite it unless the user explicitly asks to reset the plan.
 4. Plan Grill (degrades gracefully):
-   1. Audit `.muse/PLAN.md` against the actual files in the repository. Prefer spawning a read-only `plan-reviewer` subagent if available; if that spawn fails, perform the same critique inline.
-   2. If custom-coder is available, call `custom-coder:critique_plan` (endpoint `grill-reviewer` when present) for an independent adversarial review (in parallel with the native review when practical). If custom-coder is unavailable or the call fails, skip it, warn the user that the self-hosted critique was not run, and proceed with the native/inline review only.
-   3. Synthesize available critiques, resolve any valid issues in `.muse/PLAN.md`, and present a summary of what was caught (and any endpoint warning), including the **Subagents / Models** roster, before asking the user for `/squad-execute` sign-off.
+   1. Audit `.muse/PLAN.md` against the actual files in the repository. Prefer spawning `@keaton` (Lead) or a read-only `plan-reviewer` subagent; if that spawn fails, perform the same critique inline.
+   2. If custom-coder is available, call `custom-coder:critique_plan` (endpoint `grill-reviewer` when present) for an independent adversarial review. When the review is tied to a roster member, pass that member's `backup` as `fallback_endpoint` so the router uses only the member-specific chain. In parallel with the native review when practical. If custom-coder is unavailable or the call fails, skip it, warn the user that the self-hosted critique was not run, and proceed with the native/inline review only.
+   3. Synthesize available critiques, resolve any valid issues in `.muse/PLAN.md`, and ask `@verbal` (Scribe) to append the durable choices to `.muse/squad/decisions.md`.
+   4. Present a summary of what was caught (and any endpoint warning), including the **Subagents / Models** roster, before asking the user for `/squad-execute` sign-off.
 '@
 Install-File 'skills/squad-execute/SKILL.md' @'
 ---
@@ -378,39 +786,54 @@ name: squad-execute
 description: Executes the approved `.muse/PLAN.md` using parallel subagents in isolated worktrees, with a verification gate that blocks premature completion.
 ---
 
-## Subagent Task Labeling and Reporting (TUI Visibility)
+## Named Team Roster and Project Memory (read first)
 
-When spawning any subagent, **always** set its short task title / description to:
+At startup, read `~/.config/muse/squad-team.json` (or the generated roster at `~/.config/muse/squad/team.md`) and route each wave by responsibility:
 
-`[<agent-role> | <model-tag>] <concise action>`
+- Lead `@keaton` — architecture, sequencing, and risk review for the wave.
+- Frontend `@fenster` — UI components, styles, accessibility, and client-side files.
+- Backend `@mcmanus` — APIs, persistence, server-side logic, and data files.
+- Tester `@hockney` — verification commands, test suites, and regression coverage.
+- Scribe `@verbal` — append decisions to `.muse/squad/decisions.md` after each wave and maintain history files.
 
-- `<agent-role>` is the role, plus an index when there are peers: `worker-1`, `worker-2`, `scout-1`, `verifier-1`.
-- `<model-tag>` is lowercase and stable: `ember` for `muse-ember-1.0`, `spark` for `muse-spark-1.3-contributor`, `wonder` for `muse-wonder-*` if configured, or the `custom-coder` endpoint alias (`local-coder`, `grill-reviewer`) when work goes through that endpoint. Combine with `+` when a native agent delegates to `custom-coder`, e.g. `ember+local-coder`. If the specific native model is unknown but it is a native Muse subagent, use `native`; use `unknown` only as a last resort. **Never omit the tag.** **Do not guess or infer from role defaults** (e.g. do not label a worker/reviewer `ember` or `spark` unless the runtime, spawn result, or session metadata explicitly reports that exact model). If you later learn the actual model, correct the roster/summary and note the correction.
+If `.muse/squad/` does not exist in this repository yet, create `.muse/squad/decisions.md` and `.muse/squad/history/` before spawning members. Every named member reads `.muse/squad/decisions.md` and `.muse/squad/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished.
+
+Spawn named members for tasks that match their charter; use generic `worker` subagents only for work outside the roster or when the named spawn is unavailable. Keep isolated Git worktrees (`--subagent-worktree-isolation` behavior) for bounded implementation tasks.
+
+## TUI Task Labels and Reporting
+
+When spawning any subagent, **always** set its short task title / description to the roster-aware form:
+
+`[<Name> (<Role>) | <model-or-endpoint>] <concise action>`
+
+- `<Name>` and `<Role>` come from the roster: `Keaton (Lead)`, `Fenster (Frontend)`, `McManus (Backend)`, `Hockney (Tester)`, `Verbal (Scribe)`.
+- `<model-or-endpoint>` is that member's `primary` value: `muse-spark-1.3-contributor`, `muse-ember-1.0`, `local-coder`, etc. When work is delegated through `custom-coder`, append the actual `servedBy` from tool meta, e.g. `local-coder+grill-reviewer`. Do not guess a model from the role.
+- For generic helpers outside the roster (`worker-1`, `scout-1`, `plan-reviewer`), keep `[<agent-role> | <model-tag>] <action>` using `ember`, `spark`, or `native` tags.
 - Keep `<concise action>` under ~50 characters so the TUI footer (`└ ◈ <task> running <elapsed>`) does not truncate the useful part. Start with a verb; no trailing punctuation.
-- Use exactly `[role | tag] action`: lowercase tags, one space on each side of `|`, no extra prefix or wrapper.
 
 Examples:
 
 ```text
-[scout-1 | ember] Map mcp/bridge.js and endpoints.json
-[plan-reviewer | spark] Audit .muse/PLAN.md for edge cases
-[worker-1 | ember] Implement FIFO semaphore queue
-[worker-2 | ember+local-coder] Generate unit tests for fallback
-[worker-3 | native] Apply scoped fix in api/
+[Keaton (Lead) | muse-spark-1.3-contributor] Sequence wave dependencies
+[Fenster (Frontend) | local-coder] Build login form
+[McManus (Backend) | local-coder+grill-reviewer] Add retry queue
+[Hockney (Tester) | local-coder] Run regression suite
+[Verbal (Scribe) | muse-ember-1.0] Log wave decisions
+[worker-1 | ember] Apply scoped fix in api/
 ```
 
 If work is done **inline** because subagent spawning failed, was rejected, or is unavailable, do not invent a spawn — report it in the summary as `[inline | native] <action>`.
 
-**Always include a "Subagents / Models" roster in your user-facing wave/progress and completion summaries** so the model is visible even if the TUI label omits it. For each helper list: role, model-tag, action, and outcome/status. For `custom-coder` tool calls, report the actual `servedBy` endpoint/model and `fallbackUsed` from the tool result meta (not inferred from config/default) and the outcome (e.g. `custom-coder:generate_code | servedBy local-coder (<model>) — ok`). If result meta is unavailable, state that explicitly. When practical, include role|model-tag in execution-log entries.
+**Always include a "Subagents / Models" roster in your user-facing wave/progress and completion summaries** so the model is visible even if the TUI label omits it. For each helper list: name/role, model tag, action, and outcome/status. For `custom-coder` tool calls, report the actual `servedBy`, `servedModel`, `fallbackUsed`, and any `fallbackEndpoint` from tool result meta (not inferred from config/default) and the outcome (e.g. `custom-coder:generate_code | servedBy local-coder (<model>) — ok`). If result meta is unavailable, state that explicitly. When practical, include name/role and model tag in execution-log entries.
 
-Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` section - that section is the durable handoff record when resuming a long or interrupted session. Group independent tasks into parallel waves and delegate each bounded task to `worker` subagents using isolated Git worktrees (`--subagent-worktree-isolation` behavior). Track each helper (spawned or inline) with its role and model-tag for the roster.
+Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` section - that section is the durable handoff record when resuming a long or interrupted session. Group independent tasks into successive waves and track each helper (spawned or inline) with its name/role and model tag for the roster.
 
 ## Endpoint Health and Execution Mode (read first)
 
 At the start, call `custom-coder:list_endpoints` (or read `~/.config/muse/endpoints.json`) to learn `muse_models` limits and whether custom-coder is available.
 
 - If custom-coder is unavailable, misconfigured, or not working properly (for example `available: false`, `ok: false`/`warning`, missing/unreadable config, or unreachable), **warn the user clearly** with the reported issue and continue in **native-only mode**: do not block execution. Have workers implement changes directly with native Muse tools/editing instead of calling `custom-coder:generate_code`, and skip `custom-coder` critiques. If a custom-coder call fails later at runtime, treat that the same way (warn and continue natively). Use sensible default concurrency if limits are unknown (for example at most 2 concurrent native workers of the same model) and batch into waves.
-- If custom-coder is available, use `custom-coder:generate_code` (endpoint `local-coder` when present) for heavy code generation when helpful: pass a bounded prompt plus relevant file context, then apply and verify the returned diff locally. Never spawn more simultaneous native subagents of a given model than `muse_models` allows (for example at most 4 `muse-ember-1.0` or 2 `muse-spark-1.3-contributor` workers). Batch waves to respect limits.
+- If custom-coder is available, use `custom-coder:generate_code` (endpoint `local-coder` when present) for heavy code generation when helpful: pass a bounded prompt plus relevant file context, then apply and verify the returned diff locally. For a named member, use that member's `primary` as `endpoint` and its `backup` as `fallback_endpoint` so the router does not traverse an unrelated global chain. Never spawn more simultaneous native subagents of a given model than `muse_models` allows (for example at most 4 `muse-ember-1.0` or 2 `muse-spark-1.3-contributor` workers). Batch waves to respect limits.
 
 Multiple parallel workers may safely call `custom-coder` MCP tools concurrently when available: `bridge.js` queues requests FIFO and serializes them per endpoint's `max_concurrency` (local endpoints default to `1` to avoid GPU/RAM OOM). A queued call waits for a slot rather than failing over; fallback only happens after retries fail or the queue wait exceeds `queue_timeout_ms`. Do not implement separate locking in the workers.
 
@@ -434,7 +857,7 @@ After every wave — before advancing to the next wave and before reporting comp
 1. Update `.muse/TODO.md` (create it from the plan if it does not exist). Check off only items whose changes are applied and verified; leave or add `- [ ]` items for remaining or newly discovered work. Record the exact verification commands and their results in the checklist.
 2. Run every verification command listed in `.muse/PLAN.md` from the repository root — for example `npm test`, `cargo check`, `pytest`, or `go test ./...`. If the plan lists none, detect the project's typechecker and test commands from its manifests, add them to `.muse/TODO.md`, and run them.
 3. If any command fails, fix the failure in another bounded wave (delegating to a `worker` where appropriate) and repeat this gate. Never mark an item done or claim success based on a partial pass.
-4. Append a short entry to the `## Execution Log & Decisions` section at the bottom of `.muse/PLAN.md` (create the section if absent). Record the wave number, what landed, architectural decisions and *why*, gotchas discovered, exact verification commands/results, and any remaining work or blockers. Append only — never rewrite or delete earlier entries — so the on-disk record survives compaction and session restarts.
+4. Append a short entry to the `## Execution Log & Decisions` section at the bottom of `.muse/PLAN.md` (create the section if absent). Record the wave number, what landed, architectural decisions and *why*, gotchas discovered, exact verification commands/results, and any remaining work or blockers. Append only — never rewrite or delete earlier entries — so the on-disk record survives compaction and session restarts. Ask `@verbal` (Scribe) to append durable decisions to `.muse/squad/decisions.md` and each member to append lasting learnings to its own `.muse/squad/history/<name>.md`.
 5. Only when all TODO items are checked and all verification commands pass, summarize what was verified and return control to the user, including the **Subagents / Models** roster for the run (per wave where useful).
 
 ## Session Handoff Notes
@@ -503,6 +926,11 @@ const ENDPOINT_PARAM = {
   description: 'Named endpoint alias from endpoints.json. Omit to use the configured default.'
 };
 
+const FALLBACK_ENDPOINT_PARAM = {
+  type: 'string',
+  description: 'Member-specific backup endpoint alias. When set, only this endpoint is tried after the primary, instead of the global fallback_order. Set to an empty string to disable MCP fallback (for native backups).'
+};
+
 const TOOLS = [
   {
     name: 'generate_code',
@@ -511,6 +939,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         endpoint: ENDPOINT_PARAM,
+        fallback_endpoint: FALLBACK_ENDPOINT_PARAM,
         prompt: { type: 'string', description: 'Bounded implementation task to perform.' },
         task_spec: { type: 'string', description: 'Alias for prompt.' },
         context: { type: 'string', description: 'Relevant file contents or excerpts to work from.' },
@@ -530,6 +959,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         endpoint: ENDPOINT_PARAM,
+        fallback_endpoint: FALLBACK_ENDPOINT_PARAM,
         plan_markdown: { type: 'string', description: 'Full markdown of .muse/PLAN.md to audit.' },
         repo_context: { type: 'string', description: 'Relevant repository files and structure the plan relies on.' },
         temperature: { type: 'number', description: 'Optional sampling temperature override.' },
@@ -741,6 +1171,26 @@ function requireEndpoint(config, requested) {
     throw new Error(`unknown endpoint "${name}". Available: ${Object.keys(config.endpoints).join(', ')}`);
   }
   return name;
+}
+
+// Resolves a member-specific backup chain. Omitted means "use the global
+// fallback_order"; "" means "no MCP fallback"; a name means "only this one".
+function parseFallbackEndpoint(config, requested) {
+  if (requested === undefined || requested === null) {
+    return { provided: false, name: null };
+  }
+  if (typeof requested !== 'string') {
+    throw new Error('"fallback_endpoint" must be a string');
+  }
+  if (requested === '') {
+    return { provided: true, name: null };
+  }
+  if (!Object.prototype.hasOwnProperty.call(config.endpoints, requested)) {
+    throw new Error(
+      `unknown fallback_endpoint "${requested}". Available: ${Object.keys(config.endpoints).join(', ')}`
+    );
+  }
+  return { provided: true, name: requested };
 }
 
 // --- Per-endpoint FIFO concurrency queues ---------------------------------
@@ -970,9 +1420,12 @@ function buildPayload(endpoint, requestTemplate) {
   };
 }
 
-async function queryWithFallback(primaryName, requestTemplate, config) {
+async function queryWithFallback(primaryName, requestTemplate, config, fallback = { provided: false, name: null }) {
+  const orderedNames = fallback.provided
+    ? (fallback.name ? [fallback.name] : [])
+    : config.fallbackOrder;
   const candidates = [];
-  for (const name of [primaryName, ...config.fallbackOrder]) {
+  for (const name of [primaryName, ...orderedNames]) {
     if (name && !candidates.includes(name)) candidates.push(name);
   }
 
@@ -997,6 +1450,7 @@ async function queryWithFallback(primaryName, requestTemplate, config) {
           ...(result.upstreamModel ? { upstreamModel: result.upstreamModel } : {}),
           ...(result.usage ? { usage: result.usage } : {}),
           fallbackUsed: name !== primaryName,
+          ...(fallback.provided ? { fallbackEndpoint: fallback.name, fallbackRestricted: true } : {}),
           attempts
         }
       };
@@ -1077,6 +1531,7 @@ async function callTool(name, args) {
       throw new Error('critique_plan requires a non-empty "plan_markdown"');
     }
     const primary = requireEndpoint(config, params.endpoint);
+    const fallback = parseFallbackEndpoint(config, params.fallback_endpoint);
     const user = [
       'PLAN MARKDOWN:',
       params.plan_markdown,
@@ -1089,7 +1544,8 @@ async function callTool(name, args) {
     const result = await queryWithFallback(
       primary,
       { systemPrompt: CRITIQUE_SYSTEM, userPrompt: user, params },
-      config
+      config,
+      fallback
     );
     return { content: [{ type: 'text', text: result.text }], meta: result.meta };
   }
@@ -1101,6 +1557,7 @@ async function callTool(name, args) {
     }
     const context = typeof params.context === 'string' ? params.context : params.file_context;
     const primary = requireEndpoint(config, params.endpoint);
+    const fallback = parseFallbackEndpoint(config, params.fallback_endpoint);
     const system = typeof params.system === 'string' && params.system.trim() ? params.system : DEFAULT_SYSTEM;
     const user = typeof context === 'string' && context.trim()
       ? `TASK:\n${prompt}\n\nRELEVANT CONTEXT:\n${context}`
@@ -1108,7 +1565,8 @@ async function callTool(name, args) {
     const result = await queryWithFallback(
       primary,
       { systemPrompt: system, userPrompt: user, params },
-      config
+      config,
+      fallback
     );
     return { content: [{ type: 'text', text: result.text }], meta: result.meta };
   }
@@ -1308,6 +1766,395 @@ try {
   process.exit(1);
 }
 '@
+Install-File 'mcp/sync-team.js' @'
+#!/usr/bin/env node
+'use strict';
+
+// Materializes the persistent named team from squad-team.json into native
+// Muse agent wrappers and a human-readable roster. Zero npm dependencies.
+
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
+
+const GENERATED_MARKER =
+  '<!-- Generated by muse-squad sync-team.js; edit squad-team.json and re-run the installer. -->';
+const RESERVED_AGENTS = new Set(['worker', 'plan-reviewer', 'general-purpose']);
+const NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
+const RUNNER_MODEL = 'muse-ember-1.0';
+
+function die(message) {
+  process.stderr.write(`sync-team: ${message}\n`);
+  process.exit(1);
+}
+
+function warn(message) {
+  process.stderr.write(`sync-team: warning: ${message}\n`);
+}
+
+function log(message) {
+  process.stdout.write(`${message}\n`);
+}
+
+function expandHome(value) {
+  return String(value).replace(/^~(?=$|[\\/])/, os.homedir());
+}
+
+const USAGE = [
+  'Usage: node sync-team.js [options]',
+  '',
+  'Options:',
+  '  --config-dir PATH   Muse config directory (default: ~/.config/muse)',
+  '  --dir PATH          Alias for --config-dir',
+  '  --team-file PATH    Roster JSON (default: <config-dir>/squad-team.json)',
+  '  --endpoints-file PATH  endpoints.json (default: <config-dir>/endpoints.json)',
+  '  --project-name NAME Override project name used for projects{} overrides',
+  '  --uninstall         Remove only generated wrappers and roster',
+  '  --help, -h          Show this help',
+  '',
+  'Environment: MUSE_CONFIG_DIR, SQUAD_TEAM_FILE, MODELS_CONFIG_FILE'
+].join('\n');
+
+function parseArgs(argv) {
+  const opts = {};
+  const valueFlags = new Set([
+    '--config-dir', '--dir', '--team-file', '--endpoints-file', '--project-name'
+  ]);
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (arg === '--uninstall') {
+      opts.uninstall = true;
+    } else if (arg === '--help' || arg === '-h') {
+      opts.help = true;
+    } else if (valueFlags.has(arg)) {
+      const value = argv[++i];
+      if (!value) die(`${arg} requires a value`);
+      const key = arg.replace(/^--/, '').replace(/-/g, '_');
+      opts[key] = value;
+      if (arg === '--dir') opts.config_dir = value;
+    } else {
+      die(`unknown option: ${arg}`);
+    }
+  }
+  return opts;
+}
+
+function readJson(file, label, required) {
+  if (!fs.existsSync(file)) {
+    if (required) die(`${label} not found: ${file}`);
+    warn(`${label} not found: ${file}; classifying non-muse values as custom-coder aliases`);
+    return null;
+  }
+  let raw;
+  try {
+    raw = fs.readFileSync(file, 'utf8');
+  } catch (error) {
+    if (required) die(`cannot read ${label} ${file}: ${error.message}`);
+    warn(`cannot read ${label} ${file}: ${error.message}`);
+    return null;
+  }
+  try {
+    return JSON.parse(raw);
+  } catch (error) {
+    if (required) die(`invalid JSON in ${label} ${file}: ${error.message}`);
+    warn(`invalid JSON in ${label} ${file}: ${error.message}`);
+    return null;
+  }
+}
+
+function endpointAliases(endpoints) {
+  if (!endpoints || !endpoints.endpoints || typeof endpoints.endpoints !== 'object') {
+    return null;
+  }
+  return new Set(Object.keys(endpoints.endpoints));
+}
+
+function kindOf(value, aliases) {
+  if (aliases && aliases.has(value)) return 'endpoint';
+  if (!aliases && !/^muse-/.test(value)) return 'endpoint';
+  return 'native';
+}
+
+function validateMembers(members) {
+  if (!Array.isArray(members) || members.length === 0) {
+    die('squad-team.json must contain a non-empty "members" array');
+  }
+  const seen = new Set();
+  for (const member of members) {
+    if (!member || typeof member !== 'object') die('each member must be an object');
+    if (typeof member.name !== 'string' || !NAME_RE.test(member.name)) {
+      die(`member name must be a lowercase slug: ${JSON.stringify(member.name)}`);
+    }
+    if (RESERVED_AGENTS.has(member.name)) {
+      die(`member name "${member.name}" is reserved for a generic agent`);
+    }
+    if (seen.has(member.name)) die(`duplicate member name: ${member.name}`);
+    seen.add(member.name);
+    if (typeof member.display_name !== 'string' || !member.display_name) {
+      die(`member ${member.name} needs a display_name`);
+    }
+    if (typeof member.role !== 'string' || !member.role.trim()) {
+      die(`member ${member.name} needs a non-empty "role"`);
+    }
+    for (const field of ['responsibility', 'primary', 'backup', 'charter']) {
+      if (typeof member[field] !== 'string' || !member[field]) {
+        die(`member ${member.name} needs a non-empty "${field}"`);
+      }
+    }
+  }
+}
+
+function applyProjectOverrides(team, projectName, cwd) {
+  const projects = team.projects && typeof team.projects === 'object' ? team.projects : {};
+  const keys = [cwd, projectName].filter(Boolean);
+  let merged = { ...team };
+  for (const key of keys) {
+    const override = projects[key];
+    if (!override || typeof override !== 'object') continue;
+    if (typeof override.team_name === 'string') merged.team_name = override.team_name;
+    if (override.members && typeof override.members === 'object') {
+      merged.members = merged.members.map((member) => {
+        const patch = override.members[member.name];
+        return patch && typeof patch === 'object' ? { ...member, ...patch } : member;
+      });
+    }
+  }
+  return merged;
+}
+
+function escapeCell(value) {
+  return String(value).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
+}
+
+function buildRoster(team, members, aliases, teamFile) {
+  const teamName = typeof team.team_name === 'string' && team.team_name
+    ? team.team_name
+    : 'Muse Squad';
+  const memoryDir = typeof team.memory_dir === 'string' && team.memory_dir
+    ? team.memory_dir
+    : '.muse/squad';
+  const lines = [
+    `# ${teamName}`,
+    '',
+    GENERATED_MARKER,
+    '',
+    `Generated from \`${path.basename(teamFile)}\` by \`mcp/sync-team.js\`. ` +
+      'Edit the roster config and re-run the installer instead of editing this file.',
+    '',
+    '| @name | Role | Primary | Backup | Scope |',
+    '| --- | --- | --- | --- | --- |'
+  ];
+  for (const member of members) {
+    const primaryKind = kindOf(member.primary, aliases) === 'endpoint' ? 'custom-coder' : 'native';
+    const backupKind = kindOf(member.backup, aliases) === 'endpoint' ? 'custom-coder' : 'native';
+    lines.push(
+      `| @${member.name} | ${escapeCell(member.role)} | ` +
+      `\`${member.primary}\` (${primaryKind}) | ` +
+      `\`${member.backup}\` (${backupKind}) | ${escapeCell(member.responsibility)} |`
+    );
+  }
+  lines.push(
+    '',
+    '## Invoking members',
+    '',
+    'Mention `@<name>` in normal chat or spawn that named agent from `/squad-plan` and ' +
+      '`/squad-execute`. Each wrapper reads the shared decisions log and its own history ' +
+      'before work, and appends lasting learnings when done.',
+    '',
+    '## Project memory',
+    '',
+    `- \`${memoryDir}/decisions.md\` - shared architectural decisions, appended by the Scribe and waves.`,
+    `- \`${memoryDir}/history/<name>.md\` - per-member conventions, file maps, and gotchas.`,
+    '',
+    'Create the directory and both paths on first use in a repository if they do not exist yet.'
+  );
+  return `${lines.join('\n')}\n`;
+}
+
+function buildWrapper(member, team, aliases) {
+  const primaryKind = kindOf(member.primary, aliases);
+  const backupKind = kindOf(member.backup, aliases);
+  const memoryDir = typeof team.memory_dir === 'string' && team.memory_dir
+    ? team.memory_dir
+    : '.muse/squad';
+  const decisions = `${memoryDir}/decisions.md`;
+  const history = `${memoryDir}/history/${member.name}.md`;
+  const runnerModel = primaryKind === 'endpoint' ? RUNNER_MODEL : member.primary;
+  const tag = member.primary;
+
+  const routing = [];
+  if (primaryKind === 'endpoint') {
+    routing.push(
+      `- Primary: \`${member.primary}\` (custom-coder endpoint). The \`model: ${RUNNER_MODEL}\` frontmatter makes this a lightweight tool-runner; delegate heavy code generation or plan critique to the MCP tool.`,
+      `- Call \`custom-coder:generate_code\` (or \`critique_plan\` for plans) with \`endpoint="${member.primary}"\`.`,
+      `- Pass \`fallback_endpoint="${member.backup}"\` on that call so the router tries only this member's backup, never the global \`fallback_order\`.`
+    );
+    if (backupKind === 'native') {
+      routing.push(
+        `- Backup \`${member.backup}\` is a native Muse model: if the MCP call cannot be served, pass \`fallback_endpoint=""\` to disable MCP fallback and continue natively on \`${member.backup}\`.`
+      );
+    }
+  } else {
+    routing.push(
+      `- Primary: \`${member.primary}\` (native Muse model), pinned in frontmatter.`,
+      `- If the primary is blocked or unavailable, report it and use backup \`${member.backup}\`.`
+    );
+    if (backupKind === 'endpoint') {
+      routing.push(
+        `- Backup \`${member.backup}\` is a custom-coder endpoint: call \`custom-coder:critique_plan\` or \`generate_code\` with \`endpoint="${member.backup}"\` and \`fallback_endpoint="${member.backup}"\` to avoid unrelated global fallbacks.`
+      );
+    } else {
+      routing.push(`- Backup \`${member.backup}\` is a native Muse model; continue natively and note the switch.`);
+    }
+  }
+
+  const description = `Copilot Squad ${member.role}. Use proactively for ${member.responsibility.toLowerCase()}. Invoke as @${member.name}.`;
+  const lines = [
+    '---',
+    `name: ${member.name}`,
+    `description: ${JSON.stringify(description)}`,
+    `model: ${runnerModel}`,
+    '---',
+    GENERATED_MARKER,
+    '',
+    `# @${member.name} - ${member.display_name} (${member.role})`,
+    '',
+    `You are ${member.display_name}, the ${member.role} member of Copilot Squad.`,
+    '',
+    '## Charter',
+    '',
+    member.charter,
+    '',
+    '## Routing',
+    '',
+    `Use this agent for: ${member.responsibility}.`,
+    'Mention `@' + member.name + '` in normal chat, or spawn this named agent from the squad slash commands.',
+    '',
+    '## Model routing and backup chain',
+    '',
+    ...routing,
+    'Report the actual `servedBy`, `servedModel`, and `fallbackUsed` from tool meta; never infer who answered from config.',
+    '',
+    '## Project memory',
+    '',
+    `Before starting, read \`${decisions}\` and \`${history}\` when present. If \`${memoryDir}/\` does not exist in this repository, create it with \`${decisions}\` and an empty \`history/\` directory before proceeding.`,
+    `When finished, append only concise lasting learnings to \`${history}\` - file conventions, gotchas, and decisions that matter next time. Never rewrite earlier notes.`,
+    '',
+    '## TUI label',
+    '',
+    `Use the short task title \`[${member.display_name} (${member.role}) | ${tag}] <action>\` with the action under ~50 characters.`
+  ];
+  return `${lines.join('\n')}\n`;
+}
+
+function normalized(content) {
+  return String(content).replace(/\r?\n+$/, '') + '\n';
+}
+
+function writeIfChanged(dest, content, label) {
+  fs.mkdirSync(path.dirname(dest), { recursive: true });
+  const updated = normalized(content);
+  let existing = null;
+  if (fs.existsSync(dest)) existing = fs.readFileSync(dest, 'utf8');
+  if (existing !== null && normalized(existing) === updated) {
+    log(`  unchanged  ${dest}`);
+    return;
+  }
+  fs.writeFileSync(dest, updated, 'utf8');
+  log(`  ${existing === null ? 'generated' : 'updated'}  ${dest}`);
+}
+
+function removeIfGenerated(dest, label) {
+  if (!fs.existsSync(dest)) {
+    log(`  absent     ${dest}`);
+    return;
+  }
+  const content = fs.readFileSync(dest, 'utf8');
+  if (!content.includes(GENERATED_MARKER)) {
+    log(`  kept       ${dest} (not generated by muse-squad)`);
+    return;
+  }
+  fs.unlinkSync(dest);
+  log(`  removed    ${dest}`);
+}
+
+function removeGeneratedAgents(configDir) {
+  const agentsDir = path.join(configDir, 'agents');
+  if (!fs.existsSync(agentsDir)) return;
+  for (const entry of fs.readdirSync(agentsDir)) {
+    if (!entry.endsWith('.md')) continue;
+    const dest = path.join(agentsDir, entry);
+    let content;
+    try {
+      content = fs.readFileSync(dest, 'utf8');
+    } catch (error) {
+      warn(`cannot read ${dest}: ${error.message}`);
+      continue;
+    }
+    if (!content.includes(GENERATED_MARKER)) continue;
+    try {
+      fs.unlinkSync(dest);
+      log(`  removed    ${dest}`);
+    } catch (error) {
+      warn(`cannot remove ${dest}: ${error.message}`);
+    }
+  }
+}
+
+function uninstall(configDir, teamFile) {
+  // Scan by marker instead of trusting squad-team.json: a deleted or edited
+  // roster must not leave stale generated wrappers behind on uninstall.
+  void teamFile;
+  removeGeneratedAgents(configDir);
+  removeIfGenerated(path.join(configDir, 'squad', 'team.md'), 'team.md');
+  const squadDir = path.join(configDir, 'squad');
+  try {
+    if (fs.existsSync(squadDir) && fs.readdirSync(squadDir).length === 0) fs.rmdirSync(squadDir);
+  } catch (error) {
+    warn(`cannot remove empty squad directory ${squadDir}: ${error.message}`);
+  }
+}
+
+function main() {
+  const opts = parseArgs(process.argv.slice(2));
+  if (opts.help) {
+    process.stdout.write(`${USAGE}\n`);
+    return;
+  }
+
+  const configDir = expandHome(opts.config_dir || process.env.MUSE_CONFIG_DIR ||
+    path.join(os.homedir(), '.config', 'muse'));
+  const teamFile = expandHome(opts.team_file || process.env.SQUAD_TEAM_FILE ||
+    path.join(configDir, 'squad-team.json'));
+  const endpointsFile = expandHome(opts.endpoints_file || process.env.MODELS_CONFIG_FILE ||
+    path.join(configDir, 'endpoints.json'));
+  const projectName = opts.project_name || path.basename(process.cwd());
+
+  if (opts.uninstall) {
+    uninstall(configDir, teamFile);
+    return;
+  }
+
+  const team = readJson(teamFile, 'squad-team.json', true);
+  const resolved = applyProjectOverrides(team, projectName, process.cwd());
+  validateMembers(resolved.members);
+  const aliases = endpointAliases(readJson(endpointsFile, 'endpoints.json', false));
+
+  log(`sync-team: ${resolved.members.length} members, project ${projectName}`);
+  writeIfChanged(
+    path.join(configDir, 'squad', 'team.md'),
+    buildRoster(resolved, resolved.members, aliases, teamFile)
+  );
+  for (const member of resolved.members) {
+    writeIfChanged(
+      path.join(configDir, 'agents', `${member.name}.md`),
+      buildWrapper(member, resolved, aliases)
+    );
+  }
+}
+
+main();
+'@
 Install-Endpoints-Config @'
 {
   "schema_version": 1,
@@ -1346,6 +2193,118 @@ Install-Endpoints-Config @'
   }
 }
 '@
+function Get-Team-Defaults {
+  @'
+{
+  "schema_version": 1,
+  "team_name": "Copilot Squad",
+  "memory_dir": ".muse/squad",
+  "members": [
+    {
+      "name": "keaton",
+      "display_name": "Keaton",
+      "role": "Lead",
+      "responsibility": "Architecture, task decomposition, and adversarial plan review",
+      "primary": "muse-spark-1.3-contributor",
+      "backup": "grill-reviewer",
+      "charter": "Domain expertise: system architecture, dependency order, risk analysis, and decision-complete planning. Voice: concise, decisive, and evidence-first; ask for the exact file or command instead of guessing. Guardrails: do not edit product code while planning, cite concrete files and verification steps, and surface ambiguity before it becomes an implementation assumption."
+    },
+    {
+      "name": "fenster",
+      "display_name": "Fenster",
+      "role": "Frontend",
+      "responsibility": "UI components, styles, accessibility, and client-side state",
+      "primary": "local-coder",
+      "backup": "muse-ember-1.0",
+      "charter": "Domain expertise: UI components, styling systems, accessibility, and browser-side state. Voice: pragmatic and detail-oriented; describe the visible behavior a change should produce. Guardrails: stay inside frontend files, preserve existing design tokens and conventions, and never introduce a new framework or dependency without explicit approval."
+    },
+    {
+      "name": "mcmanus",
+      "display_name": "McManus",
+      "role": "Backend",
+      "responsibility": "APIs, persistence, server-side logic, and data migrations",
+      "primary": "local-coder",
+      "backup": "grill-reviewer",
+      "charter": "Domain expertise: APIs, persistence layers, server-side logic, and safe data migrations. Voice: precise and failure-mode first; name the error path before the happy path. Guardrails: keep changes scoped to backend files, preserve public contracts unless the plan says otherwise, and never write a destructive migration without a rollback path."
+    },
+    {
+      "name": "hockney",
+      "display_name": "Hockney",
+      "role": "Tester",
+      "responsibility": "Verification, test suites, regression coverage, and CI checks",
+      "primary": "local-coder",
+      "backup": "muse-ember-1.0",
+      "charter": "Domain expertise: unit and integration tests, regression analysis, and CI verification. Voice: skeptical and evidence-driven; report exact commands and results. Guardrails: never weaken or delete a test to make a run pass, add a regression test for every fixed bug, and do not claim success from a partial pass."
+    },
+    {
+      "name": "verbal",
+      "display_name": "Verbal",
+      "role": "Scribe",
+      "responsibility": "Durable decisions log, handoff notes, and per-member project memory",
+      "primary": "muse-ember-1.0",
+      "backup": "local-coder",
+      "charter": "Domain expertise: architectural decision records, execution logs, and durable project conventions. Voice: terse and factual; record why a decision was made, not just what happened. Guardrails: append only, never invent decisions, never rewrite earlier history, and keep every entry short enough to survive context compaction."
+    }
+  ],
+  "projects": {}
+}
+'@
+}
+Install-Agents-Policy @'
+<!-- muse-squad:begin -->
+## Muse Squad Default Delegation Policy
+
+This block is managed by muse-squad. Put durable changes in the muse-squad repo payload and re-run the installer; edits inside this block are replaced on update. Text outside the block is yours and is never overwritten.
+
+### Proactive subagent delegation
+
+In ordinary Muse Code sessions - even without `/squad-plan` or `/squad-execute` - delegate self-contained work to the installed agents:
+
+- `worker` / `general-purpose`: bounded code edits, refactors, bug fixes, and unit-test implementation outside the named roster.
+- Read-only exploration helpers: codebase mapping and investigation.
+- `plan-reviewer`: review plans, designs, or risky diffs before implementation.
+- Named `@team` members: use the persistent roster for recurring roles (see below).
+
+Keep the main session focused on decisions and integration. Delegating scoped work preserves the main context window and subscription quota.
+
+### Persistent named team
+
+Read `~/.config/muse/squad-team.json` (or the generated `~/.config/muse/squad/team.md`) and use `@<name>` for recurring work in normal sessions:
+
+- `@keaton` (Lead): architecture, decomposition, and plan review.
+- `@fenster` (Frontend): UI components, styles, and client-side files.
+- `@mcmanus` (Backend): APIs, persistence, and server-side files.
+- `@hockney` (Tester): verification, test suites, and regression coverage.
+- `@verbal` (Scribe): durable decisions and handoff notes.
+
+Each member has a charter, a `primary` model/endpoint, and a `backup`. For `custom-coder` calls, pass the member's `backup` as `fallback_endpoint` so only that member's chain is used. In a repository, initialize `.muse/squad/decisions.md` and `.muse/squad/history/` on first use. Named members read both the shared decisions file and their own history file before work, and append concise lasting learnings when finished. `@verbal` appends decisions after each wave or plan sign-off.
+
+### Cost-saving custom-coder routing
+
+When `custom-coder` is available, prefer it for boilerplate generation, unit-test drafting, and secondary code or plan critiques:
+
+- `generate_code` for small, scoped diffs.
+- `critique_plan` for a second opinion on plans and designs.
+- `list_endpoints` and `coder_status` to check aliases, limits, and health before batching work.
+
+Use the aliases and limits in `~/.config/muse/endpoints.json`. Treat `servedBy`, `servedModel`, and `fallbackUsed` from tool result `meta` as the source of truth. If the tool reports that it is unavailable or misconfigured, warn once and continue with native tools.
+
+### Global guardrails
+
+- Respect the `muse_models` concurrency caps for parallel native subagents. Extra work waits for a later wave.
+- Format every spawned subagent's short task description exactly as `[<Name> (<Role>) | <model-or-endpoint>] <concise action>` for named members (for example `[Fenster (Frontend) | local-coder] Build login form`), or `[<agent-role> | <model-tag>] <concise action>` for generic helpers. Keep the action under ~50 characters; never guess a model from the role.
+- Include a short Subagents / Models roster in user-facing summaries when delegation is used.
+- Apply generated code surgically: a targeted unified diff or a single function/block with native edit tools. Reject full-file rewrites, truncation markers, and unapplyable diffs.
+- Run the fastest incremental check on changed files immediately after each patch. Full builds and full test suites belong to the final verification step.
+- Never call work done until verification passes or the remaining gaps are stated explicitly.
+
+### Keep normal sessions lightweight
+
+Do not create `.muse/PLAN.md` in a normal session unless `/squad-plan` is invoked or the user explicitly asks for a formal multi-wave plan. Wave batching, execution logs, and the strict verification gate are for the slash commands. In normal sessions, use the guardrails above with a brief task brief instead.
+<!-- muse-squad:end -->
+'@
+Configure-Team
+Invoke-Sync-Team 'install'
 Register-Mcp 'install'
 if ($mode -eq 'install' -and $firstInstall) {
   Write-Host ''

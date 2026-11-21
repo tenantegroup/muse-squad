@@ -6,6 +6,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PAYLOAD_DIR="$ROOT/payload"
 VERSION_FILE="$ROOT/VERSION"
 ENDPOINTS_DEFAULT="$PAYLOAD_DIR/mcp/endpoints.default.json"
+SQUAD_TEAM_DEFAULT="$PAYLOAD_DIR/squad-team.default.json"
+AGENTS_POLICY="$PAYLOAD_DIR/AGENTS.md"
 
 die() { printf 'error: %s\n' "$*" >&2; exit 1; }
 
@@ -22,6 +24,7 @@ MANAGED_PATHS=(
   "skills/squad-execute/SKILL.md"
   "mcp/bridge.js"
   "mcp/register-settings.js"
+  "mcp/sync-team.js"
 )
 
 for rel in "${MANAGED_PATHS[@]}"; do
@@ -32,8 +35,18 @@ for rel in "${MANAGED_PATHS[@]}"; do
   fi
 done
 [[ -f "$ENDPOINTS_DEFAULT" ]] || die "missing $ENDPOINTS_DEFAULT"
+[[ -f "$SQUAD_TEAM_DEFAULT" ]] || die "missing $SQUAD_TEAM_DEFAULT"
+if LC_ALL=C grep -q "'@" "$SQUAD_TEAM_DEFAULT"; then
+  die "team config contains a PowerShell here-string terminator ('@): $SQUAD_TEAM_DEFAULT"
+fi
+[[ -f "$AGENTS_POLICY" ]] || die "missing $AGENTS_POLICY"
+if LC_ALL=C grep -q "'@" "$AGENTS_POLICY"; then
+  die "agents policy contains a PowerShell here-string terminator ('@): $AGENTS_POLICY"
+fi
 node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$ENDPOINTS_DEFAULT" ||
   die "$ENDPOINTS_DEFAULT is not valid JSON"
+node -e 'JSON.parse(require("fs").readFileSync(process.argv[1], "utf8"))' "$SQUAD_TEAM_DEFAULT" ||
+  die "$SQUAD_TEAM_DEFAULT is not valid JSON"
 
 emit_bash() {
   local out="$ROOT/install" i=0 rel delim content
@@ -51,6 +64,8 @@ CONFIG_DIR="${MUSE_CONFIG_DIR:-${HOME}/.config/muse}"
 MODE="install"
 SKIP_MCP=0
 BACKUP_CHOICE="auto"
+RECONFIGURE_TEAM=0
+USE_DEFAULTS=0
 REPO_RAW_BASE="https://raw.githubusercontent.com/tenantegroup/muse-squad/main"
 
 usage() {
@@ -60,15 +75,18 @@ muse-squad installer
 Usage:
   curl -fsSL https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install | bash
   bash install [--dir PATH] [--update] [--uninstall] [--no-mcp] [--help]
+  bash install [--reconfigure-team] [--defaults]
 
 Options:
-  --dir PATH       Install into PATH instead of $HOME/.config/muse
-  --update         Download and run the latest installer from GitHub, then install
-  --uninstall      Remove managed files and unregister custom-coder
-  --no-mcp         Skip custom-coder MCP registration
-  --backup         Force a backup prompt/backup
-  --no-backup      Skip the backup prompt and backup
-  --help, -h       Show this help
+  --dir PATH          Install into PATH instead of $HOME/.config/muse
+  --update            Download and run the latest installer from GitHub, then install
+  --uninstall         Remove managed files and unregister custom-coder
+  --no-mcp            Skip custom-coder MCP registration
+  --backup            Force a backup prompt/backup
+  --no-backup         Skip the backup prompt and backup
+  --reconfigure-team  Rerun the interactive team wizard on an existing install
+  --defaults          Skip the team wizard and use the default roster
+  --help, -h          Show this help
 
 Environment:
   MUSE_CONFIG_DIR     Equivalent to --dir (useful with curl | bash)
@@ -92,6 +110,8 @@ while (( $# > 0 )); do
     --no-mcp) SKIP_MCP=1; shift ;;
     --backup) BACKUP_CHOICE="yes"; shift ;;
     --no-backup) BACKUP_CHOICE="no"; shift ;;
+    --reconfigure-team) RECONFIGURE_TEAM=1; shift ;;
+    --defaults) USE_DEFAULTS=1; shift ;;
     -h|--help) usage; exit 0 ;;
     *) fail "unknown option: $1" ;;
   esac
@@ -167,6 +187,92 @@ uninstall_file() {
   fi
 }
 
+AGENTS_BEGIN='<!-- muse-squad:begin -->'
+AGENTS_END='<!-- muse-squad:end -->'
+
+policy_target() {
+  if [[ -f "$CONFIG_DIR/AGENTS.md" ]]; then
+    printf '%s\n' "$CONFIG_DIR/AGENTS.md"
+  elif [[ -f "$CONFIG_DIR/MUSE.md" ]]; then
+    printf '%s\n' "$CONFIG_DIR/MUSE.md"
+  else
+    printf '%s\n' "$CONFIG_DIR/AGENTS.md"
+  fi
+}
+
+trim_trailing_newlines() {
+  local value="$1"
+  while [[ "$value" == *$'\n' ]]; do value="${value%$'\n'}"; done
+  printf '%s' "$value"
+}
+
+install_agents_policy() {
+  local dest content existing updated before after bak
+  dest="$(policy_target)"
+  content="$(cat)"
+  mkdir -p "$(dirname "$dest")" || fail "cannot create directory for $dest"
+  existing=""
+  if [[ -f "$dest" ]]; then existing="$(cat "$dest")"; fi
+
+  if [[ "$existing" == *"$AGENTS_BEGIN"* || "$existing" == *"$AGENTS_END"* ]]; then
+    if [[ "$existing" != *"$AGENTS_BEGIN"*"$AGENTS_END"* ||
+          "$existing" == *"$AGENTS_END"*"$AGENTS_BEGIN"* ]]; then
+      log "  warning    $dest has a partial or reordered muse-squad block; left unchanged"
+      return 0
+    fi
+    before="${existing%%$AGENTS_BEGIN*}"
+    after="${existing#*$AGENTS_END}"
+    updated="$(trim_trailing_newlines "$before")${content}$(trim_trailing_newlines "$after")"
+  elif [[ -n "$existing" ]]; then
+    updated="$(trim_trailing_newlines "$existing")"$'\n\n'"${content}"
+  else
+    updated="${content}"
+  fi
+  updated="$(trim_trailing_newlines "$updated")"$'\n'
+
+  if [[ -f "$dest" ]] && cmp -s <(printf '%s' "$updated") "$dest"; then
+    log "  unchanged  $dest"
+    return 0
+  fi
+  if [[ -f "$dest" ]]; then
+    bak="${dest}.bak.$(date +%Y%m%d%H%M%S)"
+    mv "$dest" "$bak" || fail "cannot back up $dest"
+    log "  backed up  $dest -> $bak"
+  fi
+  printf '%s' "$updated" > "$dest" || fail "cannot install $dest"
+  log "  installed  $dest"
+}
+
+uninstall_agents_policy() {
+  local dest existing before after updated
+  for dest in "$CONFIG_DIR/AGENTS.md" "$CONFIG_DIR/MUSE.md"; do
+    [[ -f "$dest" ]] || continue
+    existing="$(cat "$dest")"
+    if [[ "$existing" != *"$AGENTS_BEGIN"* || "$existing" != *"$AGENTS_END"* ]]; then
+      continue
+    fi
+    if [[ "$existing" == *"$AGENTS_END"*"$AGENTS_BEGIN"* ]]; then
+      log "  warning    $dest has a reordered muse-squad block; left unchanged"
+      continue
+    fi
+    before="$(trim_trailing_newlines "${existing%%$AGENTS_BEGIN*}")"
+    after="$(trim_trailing_newlines "${existing#*$AGENTS_END}")"
+    if [[ -n "$before" && -n "$after" ]]; then
+      updated="${before}"$'\n\n'"${after}"$'\n'
+    elif [[ -n "$before" ]]; then
+      updated="${before}"$'\n'
+    elif [[ -n "$after" ]]; then
+      updated="${after}"$'\n'
+    else
+      rm -f "$dest" || fail "cannot remove $dest"
+      log "  removed    $dest"
+      continue
+    fi
+    printf '%s' "$updated" > "$dest" || fail "cannot update $dest"
+    log "  updated    $dest"
+  done
+}
+
 install_endpoints_config() {
   local dest="$CONFIG_DIR/endpoints.json" tmp
   if [[ -f "$dest" ]]; then
@@ -179,6 +285,304 @@ install_endpoints_config() {
   chmod 600 "$tmp" || fail "cannot set permissions on $dest"
   mv "$tmp" "$dest" || fail "cannot install $dest"
   log "  created    $dest"
+}
+
+install_squad_team_config() {
+  local dest="$CONFIG_DIR/squad-team.json" tmp
+  if [[ -f "$dest" ]]; then
+    log "  unchanged  $dest"
+    return 0
+  fi
+  mkdir -p "$(dirname "$dest")" || fail "cannot create directory for $dest"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/muse-squad-team.XXXXXX")" || fail "mktemp failed"
+  emit_team_defaults > "$tmp"
+  mv "$tmp" "$dest" || fail "cannot install $dest"
+  log "  created    $dest"
+}
+
+available_models() {
+  local endpoints="$CONFIG_DIR/endpoints.json"
+  printf '%s\n' 'muse-spark-1.3-contributor' 'muse-ember-1.0' 'muse-wonder-1.0'
+  if command -v node >/dev/null 2>&1 && [[ -f "$endpoints" ]]; then
+    node -e '
+      const fs = require("fs");
+      const config = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+      const seen = new Set();
+      for (const name of Object.keys(config.muse_models || {})) if (!seen.has(name)) {
+        seen.add(name); console.log(name);
+      }
+      for (const name of Object.keys(config.endpoints || {})) if (!seen.has(name)) {
+        seen.add(name); console.log(name);
+      }
+    ' "$endpoints" 2>/dev/null || true
+  fi
+}
+
+wizard_interactive() {
+  [[ "$MODE" == "install" ]] || return 1
+  (( USE_DEFAULTS )) && return 1
+  [[ "${MUSE_SQUAD_FORCE_INTERACTIVE:-0}" == "1" ]] && return 0
+  [[ -t 0 ]]
+}
+
+trim_value() {
+  local value="$1"
+  value="${value#"${value%%[![:space:]]*}"}"
+  value="${value%"${value##*[![:space:]]}"}"
+  printf '%s' "$value"
+}
+
+normalize_member_name() {
+  local value="$1" slug
+  slug="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')"
+  [[ -n "$slug" ]] || slug="member"
+  case "$slug" in
+    worker|plan-reviewer|general-purpose) slug="${slug}-1" ;;
+  esac
+  printf '%s' "$slug"
+}
+
+prompt_default() {
+  local prompt="$1" default="$2" answer
+  printf '%s [%s]: ' "$prompt" "$default" >&2
+  if ! IFS= read -r answer; then answer="$default"; fi
+  [[ -n "$answer" ]] || answer="$default"
+  printf '%s' "$answer"
+}
+
+resolve_model_selection() {
+  local answer="$1" default="$2"
+  [[ -z "$answer" ]] && { printf '%s' "$default"; return 0; }
+  if [[ "$answer" =~ ^[0-9]+$ ]]; then
+    local index=$((answer - 1))
+    if (( index >= 0 && index < ${#WIZARD_MODELS[@]} )); then
+      printf '%s' "${WIZARD_MODELS[$index]}"
+      return 0
+    fi
+    fail "invalid model number: $answer"
+  fi
+  printf '%s' "$answer"
+}
+
+is_name_used() {
+  local candidate="$1" used
+  for used in "${USED_NAMES[@]-}"; do
+    [[ "$used" == "$candidate" ]] && return 0
+  done
+  return 1
+}
+
+render_team_config() {
+  local members_file="$1" output="$2" defaults_file node_file
+  defaults_file="$(mktemp "${TMPDIR:-/tmp}/muse-squad-defaults.XXXXXX")" || fail "mktemp failed"
+  node_file="$(mktemp "${TMPDIR:-/tmp}/muse-squad-render.XXXXXX")" || fail "mktemp failed"
+  emit_team_defaults > "$defaults_file"
+  cat > "$node_file" <<'NODE'
+const fs = require('fs');
+const membersFile = process.argv[2];
+const defaultFile = process.argv[3];
+const defaults = JSON.parse(fs.readFileSync(defaultFile, 'utf8'));
+const byRole = new Map((defaults.members || []).map((member) => [member.role, member]));
+
+function displayName(name) {
+  return String(name).split('-').filter(Boolean)
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1)).join(' ');
+}
+
+const members = fs.readFileSync(membersFile, 'utf8').split(/\r?\n/)
+  .filter((line) => line.length > 0)
+  .map((line) => {
+    const fields = line.split('\t');
+    if (fields.length !== 4) throw new Error(`bad member line: ${line}`);
+    const [name, role, primary, backup] = fields;
+    const template = byRole.get(role);
+    return {
+      name,
+      display_name: displayName(name),
+      role,
+      responsibility: template
+        ? template.responsibility
+        : `${role} work and bounded implementation tasks`,
+      primary,
+      backup,
+      charter: template
+        ? template.charter
+        : `Domain expertise: ${role.toLowerCase()} tasks. Voice: concise and evidence-first. ` +
+          'Guardrails: stay scoped to assigned files, preserve existing conventions, and verify ' +
+          'changes before reporting done.'
+    };
+  });
+
+const team = {
+  schema_version: defaults.schema_version,
+  team_name: defaults.team_name,
+  memory_dir: defaults.memory_dir,
+  members,
+  projects: defaults.projects || {}
+};
+process.stdout.write(JSON.stringify(team, null, 2) + '\n');
+NODE
+  if ! node "$node_file" "$members_file" "$defaults_file" > "$output"; then
+    rm -f "$node_file" "$defaults_file"
+    fail "team config generation failed"
+  fi
+  rm -f "$node_file" "$defaults_file"
+}
+
+configure_team() {
+  local dest="$CONFIG_DIR/squad-team.json" action="created"
+  if [[ -f "$dest" ]]; then
+    action="updated"
+    if (( ! RECONFIGURE_TEAM )); then
+      log "  unchanged  $dest"
+      return 0
+    fi
+    if ! wizard_interactive; then
+      log "  unchanged  $dest (team wizard skipped)"
+      return 0
+    fi
+  else
+    if ! wizard_interactive || ! command -v node >/dev/null 2>&1; then
+      install_squad_team_config
+      return 0
+    fi
+  fi
+
+  if ! command -v node >/dev/null 2>&1; then
+    log "  warning    node not found; keeping existing team config"
+    return 0
+  fi
+
+  local customize_answer="Y"
+  printf 'Customize Squad team members & models now? [Y/n]: ' >&2
+  if ! IFS= read -r customize_answer; then customize_answer="Y"; fi
+  [[ -n "$customize_answer" ]] || customize_answer="Y"
+  case "$customize_answer" in
+    [Yy]|[Yy][Ee][Ss]) ;;
+    [Nn]|[Nn][Oo])
+      if [[ -f "$dest" ]]; then
+        log "  unchanged  $dest"
+      else
+        install_squad_team_config
+      fi
+      return 0 ;;
+    *)
+      fail "expected Y or n for team customization prompt" ;;
+  esac
+
+  local model
+  WIZARD_MODELS=()
+  while IFS= read -r model; do
+    [[ -n "$model" ]] || continue
+    if [[ " ${WIZARD_MODELS[*]-} " != *" $model "* ]]; then
+      WIZARD_MODELS+=("$model")
+    fi
+  done < <(available_models)
+
+  WIZARD_MODEL_MENU=""
+  local i
+  for i in "${!WIZARD_MODELS[@]}"; do
+    [[ -n "$WIZARD_MODEL_MENU" ]] && WIZARD_MODEL_MENU+=", "
+    WIZARD_MODEL_MENU+="$((i + 1)): ${WIZARD_MODELS[$i]}"
+  done
+
+  local -a default_names=(keaton fenster mcmanus hockney verbal)
+  local -a default_roles=(Lead Frontend Backend Tester Scribe)
+  local -a default_primary=(muse-spark-1.3-contributor local-coder local-coder local-coder muse-ember-1.0)
+  local -a default_backup=(grill-reviewer muse-ember-1.0 grill-reviewer muse-ember-1.0 local-coder)
+  local -a names=() roles=() primaries=() backups=()
+  USED_NAMES=()
+  local name role primary backup answer
+
+  for i in 0 1 2 3 4; do
+    while :; do
+      name="$(prompt_default "Member $((i + 1)) [${default_roles[$i]}] name" "${default_names[$i]}")"
+      name="$(normalize_member_name "$name")"
+      if is_name_used "$name"; then
+        printf '  name already in use: %s\n' "$name"
+        continue
+      fi
+      break
+    done
+    role="$(prompt_default "Role for $name" "${default_roles[$i]}")"
+    role="$(trim_value "$role" | tr -d '\t')"
+    [[ -n "$role" ]] || role="${default_roles[$i]}"
+    primary="$(prompt_default "Primary model/endpoint for $name ($WIZARD_MODEL_MENU)" "${default_primary[$i]}")"
+    primary="$(resolve_model_selection "$primary" "${default_primary[$i]}")"
+    backup="$(prompt_default "Backup model/endpoint for $name" "${default_backup[$i]}")"
+    backup="$(resolve_model_selection "$backup" "${default_backup[$i]}")"
+    names+=("$name")
+    roles+=("$role")
+    primaries+=("$primary")
+    backups+=("$backup")
+    USED_NAMES+=("$name")
+  done
+
+  while :; do
+    printf 'Add another team member? [y/N]: ' >&2
+    if ! IFS= read -r answer; then answer=""; fi
+    case "$answer" in
+      [Yy]|[Yy][Ee][Ss]) ;;
+      *) break ;;
+    esac
+
+    name=""
+    while :; do
+      printf 'Extra member name: ' >&2
+      if ! IFS= read -r name; then name=""; fi
+      name="$(normalize_member_name "$name")"
+      if is_name_used "$name"; then
+        printf '  name already in use: %s\n' "$name"
+        continue
+      fi
+      [[ -n "$name" ]] || { printf '  name cannot be empty\n'; continue; }
+      break
+    done
+    printf 'Role for %s: ' "$name" >&2
+    if ! IFS= read -r role; then role=""; fi
+    role="$(trim_value "$role" | tr -d '\t')"
+    [[ -n "$role" ]] || role="Contributor"
+    primary="$(prompt_default "Primary model/endpoint for $name ($WIZARD_MODEL_MENU)" 'muse-ember-1.0')"
+    primary="$(resolve_model_selection "$primary" 'muse-ember-1.0')"
+    backup="$(prompt_default "Backup model/endpoint for $name" 'local-coder')"
+    backup="$(resolve_model_selection "$backup" 'local-coder')"
+    names+=("$name")
+    roles+=("$role")
+    primaries+=("$primary")
+    backups+=("$backup")
+    USED_NAMES+=("$name")
+  done
+
+  local members_file config_tmp
+  members_file="$(mktemp "${TMPDIR:-/tmp}/muse-squad-members.XXXXXX")" || fail "mktemp failed"
+  config_tmp="$(mktemp "${TMPDIR:-/tmp}/muse-squad-team.XXXXXX")" || fail "mktemp failed"
+  : > "$members_file"
+  for i in "${!names[@]}"; do
+    printf '%s\t%s\t%s\t%s\n' \
+      "${names[$i]}" "${roles[$i]}" "${primaries[$i]}" "${backups[$i]}" >> "$members_file"
+  done
+  render_team_config "$members_file" "$config_tmp"
+  mkdir -p "$(dirname "$dest")" || fail "cannot create directory for $dest"
+  mv "$config_tmp" "$dest" || fail "cannot install $dest"
+  rm -f "$members_file"
+  log "  $action    $dest"
+}
+
+run_sync_team() {
+  local action="$1" script="$CONFIG_DIR/mcp/sync-team.js"
+  if ! command -v node >/dev/null 2>&1; then
+    log "  warning    node not found on PATH; skipping team materialization"
+    return 0
+  fi
+  if [[ ! -f "$script" ]]; then
+    log "  warning    $script missing; skipping team materialization"
+    return 0
+  fi
+  local -a args=("$script" --config-dir "$CONFIG_DIR")
+  if [[ "$action" == "uninstall" ]]; then
+    args+=(--uninstall)
+  fi
+  node "${args[@]}" || fail "team materialization failed"
 }
 
 register_mcp() {
@@ -222,10 +626,11 @@ self_update() {
     fail "--update requires curl or wget"
   fi
   chmod +x "$tmp" || true
-  local -a args=(--dir "$CONFIG_DIR")
+  local -a args=(--dir "$CONFIG_DIR" --defaults)
   (( SKIP_MCP )) && args+=(--no-mcp)
   [[ "$BACKUP_CHOICE" == "yes" ]] && args+=(--backup)
   [[ "$BACKUP_CHOICE" == "no" ]] && args+=(--no-backup)
+  # --update must never trigger a reconfigure on the downloaded installer.
   log "  running    latest installer"
   bash "$tmp" "${args[@]}"
   rc=$?
@@ -249,6 +654,13 @@ backup_config
 
 if [[ "$MODE" == "uninstall" ]]; then
   register_mcp unregister
+  uninstall_agents_policy
+  run_sync_team uninstall
+  uninstall_file squad-team.json
+  if [[ -d "$CONFIG_DIR/squad" ]]; then
+    rm -rf "$CONFIG_DIR/squad" || fail "cannot remove $CONFIG_DIR/squad"
+    log "  removed    $CONFIG_DIR/squad"
+  fi
 BODY
 
     for rel in "${MANAGED_PATHS[@]}"; do
@@ -278,7 +690,19 @@ MID
     cat "$ENDPOINTS_DEFAULT"
     printf 'MSQ_ENDPOINTS_CONFIG\n'
 
+    printf "emit_team_defaults() {\n  cat <<'MSQ_TEAM_DEFAULTS'\n"
+    cat "$SQUAD_TEAM_DEFAULT"
+    printf "MSQ_TEAM_DEFAULTS\n}\n"
+
+    printf "install_agents_policy <<'MSQ_AGENTS_POLICY'\n"
+    printf '%s\n' '<!-- muse-squad:begin -->'
+    cat "$AGENTS_POLICY"
+    printf '%s\n' '<!-- muse-squad:end -->'
+    printf 'MSQ_AGENTS_POLICY\n'
+
     cat <<'FOOT'
+configure_team
+run_sync_team install
 register_mcp install
 if [[ "$MODE" == "install" && "$FIRST_INSTALL" == "1" ]]; then
   log ""
@@ -313,6 +737,8 @@ $mode = 'install'
 $help = $false
 $skipMcp = $false
 $backupChoice = 'auto'
+$reconfigureTeam = $false
+$useDefaults = $false
 $repoRawBase = 'https://raw.githubusercontent.com/tenantegroup/muse-squad/main'
 if ($null -eq $args) { $args = @() }
 
@@ -323,6 +749,8 @@ for ($i = 0; $i -lt $args.Count; $i++) {
     '--no-mcp' { $skipMcp = $true }
     '--backup' { $backupChoice = 'yes' }
     '--no-backup' { $backupChoice = 'no' }
+    '--reconfigure-team' { $reconfigureTeam = $true }
+    '--defaults' { $useDefaults = $true }
     '--dir' {
       if (($i + 1) -ge $args.Count) { throw '--dir requires a value' }
       $configDir = $args[++$i]
@@ -349,15 +777,18 @@ muse-squad installer
 Usage:
   irm https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install.ps1 | iex
   powershell -File install.ps1 [--dir PATH] [--update] [--uninstall] [--no-mcp]
+  powershell -File install.ps1 [--reconfigure-team] [--defaults]
 
 Options:
-  --dir PATH       Install into PATH instead of ~/.config/muse
-  --update         Download and run the latest installer from GitHub, then install
-  --uninstall      Remove managed files and unregister custom-coder
-  --no-mcp         Skip custom-coder MCP registration
-  --backup         Force a backup prompt/backup
-  --no-backup      Skip the backup prompt and backup
-  --help, -h       Show this help
+  --dir PATH          Install into PATH instead of ~/.config/muse
+  --update            Download and run the latest installer from GitHub, then install
+  --uninstall         Remove managed files and unregister custom-coder
+  --no-mcp            Skip custom-coder MCP registration
+  --backup            Force a backup prompt/backup
+  --no-backup         Skip the backup prompt and backup
+  --reconfigure-team  Rerun the interactive team wizard on an existing install
+  --defaults          Skip the team wizard and use the default roster
+  --help, -h          Show this help
 
 Environment:
   MUSE_CONFIG_DIR     Equivalent to --dir (useful with irm | iex)
@@ -455,6 +886,103 @@ function Uninstall-File([string]$rel) {
   }
 }
 
+$agentsBegin = '<!-- muse-squad:begin -->'
+$agentsEnd = '<!-- muse-squad:end -->'
+
+function Get-Policy-File {
+  $agents = Get-Dest 'AGENTS.md'
+  if (Test-Path -LiteralPath $agents -PathType Leaf) { return $agents }
+  $muse = Get-Dest 'MUSE.md'
+  if (Test-Path -LiteralPath $muse -PathType Leaf) { return $muse }
+  return $agents
+}
+
+function Trim-Newlines([string]$text, [string]$side) {
+  $chars = [char[]]@("`r", "`n")
+  if ($side -eq 'end') { return $text.TrimEnd($chars) }
+  if ($side -eq 'start') { return $text.TrimStart($chars) }
+  return $text.Trim($chars)
+}
+
+function Write-Policy-File([string]$dest, [string]$updated, [string]$verb, [bool]$makeBackup) {
+  $parent = Split-Path -Parent $dest
+  if (-not (Test-Path -LiteralPath $parent)) {
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+  }
+  $normalized = $updated.TrimEnd([char[]]@("`r", "`n")) + "`n"
+  $existing = $null
+  if (Test-Path -LiteralPath $dest -PathType Leaf) { $existing = [IO.File]::ReadAllText($dest) }
+  if (($null -ne $existing) -and ($existing -ceq $normalized)) {
+    Write-Host "  unchanged  $dest"
+    return
+  }
+  if (($null -ne $existing) -and $makeBackup) {
+    $bak = "$dest.bak." + (Get-Date -Format 'yyyyMMddHHmmss')
+    Move-Item -LiteralPath $dest -Destination $bak -Force
+    Write-Host "  backed up  $dest -> $bak"
+  }
+  [IO.File]::WriteAllText($dest, $normalized, [System.Text.UTF8Encoding]::new($false))
+  Write-Host "  $verb  $dest"
+}
+
+function Install-Agents-Policy([string]$content) {
+  $dest = Get-Policy-File
+  $block = $content.TrimEnd([char[]]@("`r", "`n"))
+  $existing = $null
+  if (Test-Path -LiteralPath $dest -PathType Leaf) { $existing = [IO.File]::ReadAllText($dest) }
+  $beginIx = -1
+  $endIx = -1
+  if ($null -ne $existing) {
+    $beginIx = $existing.IndexOf($agentsBegin, [StringComparison]::Ordinal)
+    $endIx = $existing.IndexOf($agentsEnd, [StringComparison]::Ordinal)
+  }
+  $parts = @()
+  if (($beginIx -ge 0) -or ($endIx -ge 0)) {
+    if (($beginIx -lt 0) -or ($endIx -lt 0) -or ($endIx -lt $beginIx)) {
+      Write-Host "  warning    $dest has a partial or reordered muse-squad block; left unchanged"
+      return
+    }
+    $before = Trim-Newlines ($existing.Substring(0, $beginIx)) 'end'
+    $after = Trim-Newlines ($existing.Substring($endIx + $agentsEnd.Length)) 'start'
+    if ($before.Length -gt 0) { $parts += $before }
+    $parts += $block
+    if ($after.Length -gt 0) { $parts += $after }
+  } else {
+    if ($null -ne $existing) {
+      $before = Trim-Newlines $existing 'end'
+      if ($before.Length -gt 0) { $parts += $before }
+    }
+    $parts += $block
+  }
+  Write-Policy-File $dest ([string]::Join("`n`n", $parts)) 'installed' $true
+}
+
+function Uninstall-Agents-Policy {
+  foreach ($name in @('AGENTS.md', 'MUSE.md')) {
+    $dest = Get-Dest $name
+    if (-not (Test-Path -LiteralPath $dest -PathType Leaf)) { continue }
+    $existing = [IO.File]::ReadAllText($dest)
+    $beginIx = $existing.IndexOf($agentsBegin, [StringComparison]::Ordinal)
+    $endIx = $existing.IndexOf($agentsEnd, [StringComparison]::Ordinal)
+    if (($beginIx -lt 0) -and ($endIx -lt 0)) { continue }
+    if (($beginIx -lt 0) -or ($endIx -lt 0) -or ($endIx -lt $beginIx)) {
+      Write-Host "  warning    $dest has a partial or reordered muse-squad block; left unchanged"
+      continue
+    }
+    $before = Trim-Newlines ($existing.Substring(0, $beginIx)) 'end'
+    $after = Trim-Newlines ($existing.Substring($endIx + $agentsEnd.Length)) 'start'
+    $parts = @()
+    if ($before.Length -gt 0) { $parts += $before }
+    if ($after.Length -gt 0) { $parts += $after }
+    if ($parts.Count -eq 0) {
+      Remove-Item -LiteralPath $dest -Force
+      Write-Host "  removed    $dest"
+      continue
+    }
+    Write-Policy-File $dest ([string]::Join("`n`n", $parts)) 'updated' $false
+  }
+}
+
 function Install-Endpoints-Config([string]$content) {
   $dest = Get-Dest 'endpoints.json'
   if (Test-Path -LiteralPath $dest) {
@@ -468,6 +996,289 @@ function Install-Endpoints-Config([string]$content) {
   $normalized = $content -replace "(?:\r?\n)+\z", "`n"
   [IO.File]::WriteAllText($dest, $normalized, [System.Text.UTF8Encoding]::new($false))
   Write-Host "  created    $dest"
+}
+
+function Install-Squad-Team-Config {
+  $dest = Get-Dest 'squad-team.json'
+  if (Test-Path -LiteralPath $dest) {
+    Write-Host "  unchanged  $dest"
+    return
+  }
+  $parent = Split-Path -Parent $dest
+  if (-not (Test-Path -LiteralPath $parent)) {
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+  }
+  $normalized = (Get-Team-Defaults) -replace "(?:\r?\n)+\z", "`n"
+  [IO.File]::WriteAllText($dest, $normalized, [System.Text.UTF8Encoding]::new($false))
+  Write-Host "  created    $dest"
+}
+
+function Test-Interactive-Input {
+  if ($env:MUSE_SQUAD_FORCE_INTERACTIVE -eq '1') { return $true }
+  try {
+    return ([Environment]::UserInteractive -and -not [Console]::IsInputRedirected)
+  } catch {
+    return $false
+  }
+}
+
+function Get-Available-Models {
+  $models = New-Object 'System.Collections.Generic.List[string]'
+  foreach ($name in @('muse-spark-1.3-contributor', 'muse-ember-1.0', 'muse-wonder-1.0')) {
+    if (-not $models.Contains($name)) { $models.Add($name) }
+  }
+  $endpointsFile = Get-Dest 'endpoints.json'
+  if ((Get-Command node -ErrorAction SilentlyContinue) -and (Test-Path -LiteralPath $endpointsFile)) {
+    $script = @'
+const fs = require('fs');
+const config = JSON.parse(fs.readFileSync(process.argv[1], 'utf8'));
+const seen = new Set();
+for (const name of Object.keys(config.muse_models || {})) if (!seen.has(name)) {
+  seen.add(name); console.log(name);
+}
+for (const name of Object.keys(config.endpoints || {})) if (!seen.has(name)) {
+  seen.add(name); console.log(name);
+}
+'@
+    $output = & node -e $script $endpointsFile 2>$null
+    foreach ($line in $output) {
+      $name = ([string]$line).Trim()
+      if ($name -and -not $models.Contains($name)) { $models.Add($name) }
+    }
+  }
+  return $models.ToArray()
+}
+
+function Get-Model-Menu([string[]]$models) {
+  $items = @()
+  for ($i = 0; $i -lt $models.Count; $i++) {
+    $items += "$($i + 1): $($models[$i])"
+  }
+  return ($items -join ', ')
+}
+
+function Read-Defaulted([string]$prompt, [string]$default) {
+  $answer = Read-Host "$prompt [$default]"
+  if ([string]::IsNullOrWhiteSpace($answer)) { return $default }
+  return $answer
+}
+
+function Read-Required([string]$prompt, [string]$fallback) {
+  $answer = Read-Host $prompt
+  if ([string]::IsNullOrWhiteSpace($answer)) { return $fallback }
+  return $answer
+}
+
+function ConvertTo-Member-Name([string]$value) {
+  $slug = $value.ToLowerInvariant() -replace '[^a-z0-9]+', '-'
+  $slug = $slug.Trim('-')
+  if ([string]::IsNullOrEmpty($slug)) { $slug = 'member' }
+  if (@('worker', 'plan-reviewer', 'general-purpose') -contains $slug) { $slug = "$slug-1" }
+  return $slug
+}
+
+function Resolve-Model([string]$answer, [string]$default) {
+  if ([string]::IsNullOrWhiteSpace($answer)) { return $default }
+  if ($answer -match '^\d+$') {
+    $index = [int]$answer - 1
+    if ($index -ge 0 -and $index -lt $script:WizardModels.Count) {
+      return $script:WizardModels[$index]
+    }
+    throw "Invalid model number: $answer"
+  }
+  return $answer
+}
+
+function New-Team-Config([object[]]$members) {
+  $defaults = Get-Team-Defaults | ConvertFrom-Json
+  $byRole = @{}
+  foreach ($member in $defaults.members) { $byRole[$member.role] = $member }
+
+  $built = @()
+  foreach ($member in $members) {
+    $template = $null
+    if ($byRole.ContainsKey($member.role)) { $template = $byRole[$member.role] }
+    $responsibility = if ($template) {
+      $template.responsibility
+    } else {
+      "$($member.role) work and bounded implementation tasks"
+    }
+    $charter = if ($template) {
+      $template.charter
+    } else {
+      "Domain expertise: $($member.role.ToLowerInvariant()) tasks. Voice: concise and evidence-first. " +
+        'Guardrails: stay scoped to assigned files, preserve existing conventions, and verify ' +
+        'changes before reporting done.'
+    }
+    $display = (($member.name -split '-' | Where-Object { $_ } | ForEach-Object {
+      $_.Substring(0, 1).ToUpperInvariant() + $_.Substring(1)
+    }) -join ' ')
+
+    $built += [pscustomobject]@{
+      name           = $member.name
+      display_name   = $display
+      role           = $member.role
+      responsibility = $responsibility
+      primary        = $member.primary
+      backup         = $member.backup
+      charter        = $charter
+    }
+  }
+
+  $team = [ordered]@{
+    schema_version = $defaults.schema_version
+    team_name      = $defaults.team_name
+    memory_dir     = $defaults.memory_dir
+    members        = @($built)
+    projects       = $defaults.projects
+  }
+  return ($team | ConvertTo-Json -Depth 8)
+}
+
+function Write-Team-Config([string]$content, [string]$action) {
+  $dest = Get-Dest 'squad-team.json'
+  $parent = Split-Path -Parent $dest
+  if (-not (Test-Path -LiteralPath $parent)) {
+    New-Item -ItemType Directory -Path $parent -Force | Out-Null
+  }
+  $normalized = $content -replace "(?:\r?\n)+\z", "`n"
+  [IO.File]::WriteAllText($dest, $normalized, [System.Text.UTF8Encoding]::new($false))
+  Write-Host "  $action  $dest"
+}
+
+function Configure-Team {
+  $dest = Get-Dest 'squad-team.json'
+  $action = 'created'
+  if (Test-Path -LiteralPath $dest) {
+    $action = 'updated'
+    if (-not $reconfigureTeam) {
+      Write-Host "  unchanged  $dest"
+      return
+    }
+    if ($useDefaults -or -not (Test-Interactive-Input)) {
+      Write-Host "  unchanged  $dest (team wizard skipped)"
+      return
+    }
+  } else {
+    if ($useDefaults -or -not (Test-Interactive-Input) -or
+        -not (Get-Command node -ErrorAction SilentlyContinue)) {
+      Install-Squad-Team-Config
+      return
+    }
+  }
+
+  if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Write-Host '  warning    node not found; keeping existing team config'
+    return
+  }
+
+  $customize = Read-Host 'Customize Squad team members & models now? [Y/n]'
+  if ([string]::IsNullOrWhiteSpace($customize)) { $customize = 'Y' }
+  if ($customize -match '^[Nn]([Oo])?$') {
+    if (Test-Path -LiteralPath $dest) {
+      Write-Host "  unchanged  $dest"
+    } else {
+      Install-Squad-Team-Config
+    }
+    return
+  }
+  if ($customize -notmatch '^[Yy]([Ee][Ss])?$') {
+    throw 'Expected Y or n for team customization prompt'
+  }
+
+  $script:WizardModels = Get-Available-Models
+  $menu = Get-Model-Menu $script:WizardModels
+  $defaultNames = @('keaton', 'fenster', 'mcmanus', 'hockney', 'verbal')
+  $defaultRoles = @('Lead', 'Frontend', 'Backend', 'Tester', 'Scribe')
+  $defaultPrimary = @(
+    'muse-spark-1.3-contributor', 'local-coder', 'local-coder', 'local-coder', 'muse-ember-1.0'
+  )
+  $defaultBackup = @(
+    'grill-reviewer', 'muse-ember-1.0', 'grill-reviewer', 'muse-ember-1.0', 'local-coder'
+  )
+
+  $members = @()
+  $used = New-Object 'System.Collections.Generic.HashSet[string]'
+
+  for ($i = 0; $i -lt 5; $i++) {
+    while ($true) {
+      $rawName = Read-Defaulted "Member $($i + 1) [$($defaultRoles[$i])] name" $defaultNames[$i]
+      $name = ConvertTo-Member-Name $rawName
+      if ($used.Contains($name)) {
+        Write-Host "  name already in use: $name"
+        continue
+      }
+      [void]$used.Add($name)
+      break
+    }
+    $role = (Read-Defaulted "Role for $name" $defaultRoles[$i]).Trim()
+    if ([string]::IsNullOrEmpty($role)) { $role = $defaultRoles[$i] }
+    $primary = Resolve-Model `
+      (Read-Defaulted "Primary model/endpoint for $name ($menu)" $defaultPrimary[$i]) $defaultPrimary[$i]
+    $backup = Resolve-Model `
+      (Read-Defaulted "Backup model/endpoint for $name" $defaultBackup[$i]) $defaultBackup[$i]
+    $members += [pscustomobject]@{ name = $name; role = $role; primary = $primary; backup = $backup }
+  }
+
+  while ($true) {
+    $answer = Read-Host 'Add another team member? [y/N]'
+    if ($answer -notmatch '^[Yy]([Ee][Ss])?$') { break }
+
+    while ($true) {
+      $rawName = Read-Required 'Extra member name' ''
+      if ([string]::IsNullOrWhiteSpace($rawName)) {
+        Write-Host '  name cannot be empty'
+        continue
+      }
+      $name = ConvertTo-Member-Name $rawName
+      if ($used.Contains($name)) {
+        Write-Host "  name already in use: $name"
+        continue
+      }
+      [void]$used.Add($name)
+      break
+    }
+    $role = (Read-Required "Role for $name" 'Contributor').Trim()
+    if ([string]::IsNullOrEmpty($role)) { $role = 'Contributor' }
+    $primary = Resolve-Model `
+      (Read-Defaulted "Primary model/endpoint for $name ($menu)" 'muse-ember-1.0') 'muse-ember-1.0'
+    $backup = Resolve-Model `
+      (Read-Defaulted "Backup model/endpoint for $name" 'local-coder') 'local-coder'
+    $members += [pscustomobject]@{ name = $name; role = $role; primary = $primary; backup = $backup }
+  }
+
+  Write-Team-Config (New-Team-Config $members) $action
+}
+
+function Uninstall-Team {
+  $teamFile = Get-Dest 'squad-team.json'
+  if (Test-Path -LiteralPath $teamFile) {
+    Remove-Item -LiteralPath $teamFile -Force
+    Write-Host "  removed    $teamFile"
+  }
+  $squadDir = Get-Dest 'squad'
+  if (Test-Path -LiteralPath $squadDir -PathType Container) {
+    Remove-Item -LiteralPath $squadDir -Recurse -Force
+    Write-Host "  removed    $squadDir"
+  }
+}
+
+function Invoke-Sync-Team([string]$action) {
+  if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Write-Host '  warning    node not found on PATH; skipping team materialization'
+    return
+  }
+  $script = Get-Dest 'mcp/sync-team.js'
+  if (-not (Test-Path -LiteralPath $script)) {
+    Write-Host "  warning    $script missing; skipping team materialization"
+    return
+  }
+  $nodeArgs = @($script, '--config-dir', $configDir)
+  if ($action -eq 'uninstall') { $nodeArgs += '--uninstall' }
+  & node @nodeArgs
+  if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) {
+    throw "team materialization failed with exit code $LASTEXITCODE"
+  }
 }
 
 function Register-Mcp([string]$action) {
@@ -514,10 +1325,11 @@ function Invoke-SelfUpdate {
     if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
     throw "cannot download latest installer: $($_.Exception.Message)"
   }
-  $updateArgs = @('--dir', $configDir)
+  $updateArgs = @('--dir', $configDir, '--defaults')
   if ($skipMcp -or $env:MUSE_SQUAD_SKIP_MCP -eq '1') { $updateArgs += '--no-mcp' }
   if ($backupChoice -eq 'yes') { $updateArgs += '--backup' }
   if ($backupChoice -eq 'no') { $updateArgs += '--no-backup' }
+  # --update must never trigger a reconfigure on the downloaded installer.
   Write-Host '  running    latest installer'
   try {
     $shell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } elseif (Get-Command powershell -ErrorAction SilentlyContinue) { 'powershell' } else { $null }
@@ -548,6 +1360,9 @@ Backup-Config
 
 if ($mode -eq 'uninstall') {
   Register-Mcp 'unregister'
+  Uninstall-Agents-Policy
+  Invoke-Sync-Team 'uninstall'
+  Uninstall-Team
 BODY
 
     for rel in "${MANAGED_PATHS[@]}"; do
@@ -575,7 +1390,19 @@ MID
     cat "$ENDPOINTS_DEFAULT"
     printf "'@\n"
 
+    printf "function Get-Team-Defaults {\n  @'\n"
+    cat "$SQUAD_TEAM_DEFAULT"
+    printf "'@\n}\n"
+
+    printf "Install-Agents-Policy @'\n"
+    printf '%s\n' '<!-- muse-squad:begin -->'
+    cat "$AGENTS_POLICY"
+    printf '%s\n' '<!-- muse-squad:end -->'
+    printf "'@\n"
+
     cat <<'FOOT'
+Configure-Team
+Invoke-Sync-Team 'install'
 Register-Mcp 'install'
 if ($mode -eq 'install' -and $firstInstall) {
   Write-Host ''

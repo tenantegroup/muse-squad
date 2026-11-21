@@ -3,39 +3,54 @@ name: squad-execute
 description: Executes the approved `.muse/PLAN.md` using parallel subagents in isolated worktrees, with a verification gate that blocks premature completion.
 ---
 
-## Subagent Task Labeling and Reporting (TUI Visibility)
+## Named Team Roster and Project Memory (read first)
 
-When spawning any subagent, **always** set its short task title / description to:
+At startup, read `~/.config/muse/squad-team.json` (or the generated roster at `~/.config/muse/squad/team.md`) and route each wave by responsibility:
 
-`[<agent-role> | <model-tag>] <concise action>`
+- Lead `@keaton` — architecture, sequencing, and risk review for the wave.
+- Frontend `@fenster` — UI components, styles, accessibility, and client-side files.
+- Backend `@mcmanus` — APIs, persistence, server-side logic, and data files.
+- Tester `@hockney` — verification commands, test suites, and regression coverage.
+- Scribe `@verbal` — append decisions to `.muse/squad/decisions.md` after each wave and maintain history files.
 
-- `<agent-role>` is the role, plus an index when there are peers: `worker-1`, `worker-2`, `scout-1`, `verifier-1`.
-- `<model-tag>` is lowercase and stable: `ember` for `muse-ember-1.0`, `spark` for `muse-spark-1.3-contributor`, `wonder` for `muse-wonder-*` if configured, or the `custom-coder` endpoint alias (`local-coder`, `grill-reviewer`) when work goes through that endpoint. Combine with `+` when a native agent delegates to `custom-coder`, e.g. `ember+local-coder`. If the specific native model is unknown but it is a native Muse subagent, use `native`; use `unknown` only as a last resort. **Never omit the tag.** **Do not guess or infer from role defaults** (e.g. do not label a worker/reviewer `ember` or `spark` unless the runtime, spawn result, or session metadata explicitly reports that exact model). If you later learn the actual model, correct the roster/summary and note the correction.
+If `.muse/squad/` does not exist in this repository yet, create `.muse/squad/decisions.md` and `.muse/squad/history/` before spawning members. Every named member reads `.muse/squad/decisions.md` and `.muse/squad/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished.
+
+Spawn named members for tasks that match their charter; use generic `worker` subagents only for work outside the roster or when the named spawn is unavailable. Keep isolated Git worktrees (`--subagent-worktree-isolation` behavior) for bounded implementation tasks.
+
+## TUI Task Labels and Reporting
+
+When spawning any subagent, **always** set its short task title / description to the roster-aware form:
+
+`[<Name> (<Role>) | <model-or-endpoint>] <concise action>`
+
+- `<Name>` and `<Role>` come from the roster: `Keaton (Lead)`, `Fenster (Frontend)`, `McManus (Backend)`, `Hockney (Tester)`, `Verbal (Scribe)`.
+- `<model-or-endpoint>` is that member's `primary` value: `muse-spark-1.3-contributor`, `muse-ember-1.0`, `local-coder`, etc. When work is delegated through `custom-coder`, append the actual `servedBy` from tool meta, e.g. `local-coder+grill-reviewer`. Do not guess a model from the role.
+- For generic helpers outside the roster (`worker-1`, `scout-1`, `plan-reviewer`), keep `[<agent-role> | <model-tag>] <action>` using `ember`, `spark`, or `native` tags.
 - Keep `<concise action>` under ~50 characters so the TUI footer (`└ ◈ <task> running <elapsed>`) does not truncate the useful part. Start with a verb; no trailing punctuation.
-- Use exactly `[role | tag] action`: lowercase tags, one space on each side of `|`, no extra prefix or wrapper.
 
 Examples:
 
 ```text
-[scout-1 | ember] Map mcp/bridge.js and endpoints.json
-[plan-reviewer | spark] Audit .muse/PLAN.md for edge cases
-[worker-1 | ember] Implement FIFO semaphore queue
-[worker-2 | ember+local-coder] Generate unit tests for fallback
-[worker-3 | native] Apply scoped fix in api/
+[Keaton (Lead) | muse-spark-1.3-contributor] Sequence wave dependencies
+[Fenster (Frontend) | local-coder] Build login form
+[McManus (Backend) | local-coder+grill-reviewer] Add retry queue
+[Hockney (Tester) | local-coder] Run regression suite
+[Verbal (Scribe) | muse-ember-1.0] Log wave decisions
+[worker-1 | ember] Apply scoped fix in api/
 ```
 
 If work is done **inline** because subagent spawning failed, was rejected, or is unavailable, do not invent a spawn — report it in the summary as `[inline | native] <action>`.
 
-**Always include a "Subagents / Models" roster in your user-facing wave/progress and completion summaries** so the model is visible even if the TUI label omits it. For each helper list: role, model-tag, action, and outcome/status. For `custom-coder` tool calls, report the actual `servedBy` endpoint/model and `fallbackUsed` from the tool result meta (not inferred from config/default) and the outcome (e.g. `custom-coder:generate_code | servedBy local-coder (<model>) — ok`). If result meta is unavailable, state that explicitly. When practical, include role|model-tag in execution-log entries.
+**Always include a "Subagents / Models" roster in your user-facing wave/progress and completion summaries** so the model is visible even if the TUI label omits it. For each helper list: name/role, model tag, action, and outcome/status. For `custom-coder` tool calls, report the actual `servedBy`, `servedModel`, `fallbackUsed`, and any `fallbackEndpoint` from tool result meta (not inferred from config/default) and the outcome (e.g. `custom-coder:generate_code | servedBy local-coder (<model>) — ok`). If result meta is unavailable, state that explicitly. When practical, include name/role and model tag in execution-log entries.
 
-Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` section - that section is the durable handoff record when resuming a long or interrupted session. Group independent tasks into parallel waves and delegate each bounded task to `worker` subagents using isolated Git worktrees (`--subagent-worktree-isolation` behavior). Track each helper (spawned or inline) with its role and model-tag for the roster.
+Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` section - that section is the durable handoff record when resuming a long or interrupted session. Group independent tasks into successive waves and track each helper (spawned or inline) with its name/role and model tag for the roster.
 
 ## Endpoint Health and Execution Mode (read first)
 
 At the start, call `custom-coder:list_endpoints` (or read `~/.config/muse/endpoints.json`) to learn `muse_models` limits and whether custom-coder is available.
 
 - If custom-coder is unavailable, misconfigured, or not working properly (for example `available: false`, `ok: false`/`warning`, missing/unreadable config, or unreachable), **warn the user clearly** with the reported issue and continue in **native-only mode**: do not block execution. Have workers implement changes directly with native Muse tools/editing instead of calling `custom-coder:generate_code`, and skip `custom-coder` critiques. If a custom-coder call fails later at runtime, treat that the same way (warn and continue natively). Use sensible default concurrency if limits are unknown (for example at most 2 concurrent native workers of the same model) and batch into waves.
-- If custom-coder is available, use `custom-coder:generate_code` (endpoint `local-coder` when present) for heavy code generation when helpful: pass a bounded prompt plus relevant file context, then apply and verify the returned diff locally. Never spawn more simultaneous native subagents of a given model than `muse_models` allows (for example at most 4 `muse-ember-1.0` or 2 `muse-spark-1.3-contributor` workers). Batch waves to respect limits.
+- If custom-coder is available, use `custom-coder:generate_code` (endpoint `local-coder` when present) for heavy code generation when helpful: pass a bounded prompt plus relevant file context, then apply and verify the returned diff locally. For a named member, use that member's `primary` as `endpoint` and its `backup` as `fallback_endpoint` so the router does not traverse an unrelated global chain. Never spawn more simultaneous native subagents of a given model than `muse_models` allows (for example at most 4 `muse-ember-1.0` or 2 `muse-spark-1.3-contributor` workers). Batch waves to respect limits.
 
 Multiple parallel workers may safely call `custom-coder` MCP tools concurrently when available: `bridge.js` queues requests FIFO and serializes them per endpoint's `max_concurrency` (local endpoints default to `1` to avoid GPU/RAM OOM). A queued call waits for a slot rather than failing over; fallback only happens after retries fail or the queue wait exceeds `queue_timeout_ms`. Do not implement separate locking in the workers.
 
@@ -59,7 +74,7 @@ After every wave — before advancing to the next wave and before reporting comp
 1. Update `.muse/TODO.md` (create it from the plan if it does not exist). Check off only items whose changes are applied and verified; leave or add `- [ ]` items for remaining or newly discovered work. Record the exact verification commands and their results in the checklist.
 2. Run every verification command listed in `.muse/PLAN.md` from the repository root — for example `npm test`, `cargo check`, `pytest`, or `go test ./...`. If the plan lists none, detect the project's typechecker and test commands from its manifests, add them to `.muse/TODO.md`, and run them.
 3. If any command fails, fix the failure in another bounded wave (delegating to a `worker` where appropriate) and repeat this gate. Never mark an item done or claim success based on a partial pass.
-4. Append a short entry to the `## Execution Log & Decisions` section at the bottom of `.muse/PLAN.md` (create the section if absent). Record the wave number, what landed, architectural decisions and *why*, gotchas discovered, exact verification commands/results, and any remaining work or blockers. Append only — never rewrite or delete earlier entries — so the on-disk record survives compaction and session restarts.
+4. Append a short entry to the `## Execution Log & Decisions` section at the bottom of `.muse/PLAN.md` (create the section if absent). Record the wave number, what landed, architectural decisions and *why*, gotchas discovered, exact verification commands/results, and any remaining work or blockers. Append only — never rewrite or delete earlier entries — so the on-disk record survives compaction and session restarts. Ask `@verbal` (Scribe) to append durable decisions to `.muse/squad/decisions.md` and each member to append lasting learnings to its own `.muse/squad/history/<name>.md`.
 5. Only when all TODO items are checked and all verification commands pass, summarize what was verified and return control to the user, including the **Subagents / Models** roster for the run (per wave where useful).
 
 ## Session Handoff Notes

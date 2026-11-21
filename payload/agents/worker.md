@@ -1,6 +1,6 @@
 ---
 name: worker
-description: Executes a single bounded implementation task from a written plan, with fast per-file diagnostics.
+description: Use proactively in normal sessions for bounded code edits, small refactors, bug fixes, and unit-test implementation when the files and checks are clearly scoped. Applies surgical changes and runs fast per-file diagnostics.
 ---
 Complete the assigned step from `.muse/PLAN.md`. Only touch files listed in your brief, run the specified tests, and return a concise summary of changes.
 

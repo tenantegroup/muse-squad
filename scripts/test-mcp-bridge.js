@@ -125,6 +125,13 @@ function writeConfig(configFile, baseUrl, overrides = {}) {
         max_tokens: 4096, max_input_chars: 5000,
         extra_body: { top_p: 0.9 },
         on_context_exceeded: 'truncate'
+      },
+      'third-coder': {
+        base_url: baseUrl, api_key: 'third-key', model: 'third-model',
+        temperature: 0.4, max_concurrency: 1,
+        max_tokens: 4096, max_input_chars: 5000,
+        extra_body: { top_p: 0.9 },
+        on_context_exceeded: 'truncate'
       }
     },
     ...overrides
@@ -211,6 +218,11 @@ function run(port, tempDir, configFile) {
     assert(generateSchema.properties.task_spec, 'generate_code accepts task_spec alias');
     assert(generateSchema.properties.file_context, 'generate_code accepts file_context alias');
     assert(generateSchema.anyOf, 'generate_code accepts either prompt or task_spec');
+    assert(generateSchema.properties.fallback_endpoint, 'generate_code accepts fallback_endpoint');
+    assert(
+      list.result.tools.find((item) => item.name === 'critique_plan').inputSchema.properties.fallback_endpoint,
+      'critique_plan accepts fallback_endpoint'
+    );
 
     const status = await tool(3, 'coder_status', {});
     const statusText = status.result.content[0].text;
@@ -277,6 +289,59 @@ function run(port, tempDir, configFile) {
     assert(localCount() === beforeFallback + 1, '401 is not retried');
     assert(!fallback.result.content[0].text.startsWith('>'), 'fallback note does not pollute output');
     setMode('ok');
+
+    // --- Member-specific fallback_endpoint overrides the global fallback_order ---
+    setMode('unauth');
+    writeConfig(configFile, baseUrl, {
+      default: 'local-coder',
+      fallback_order: ['local-coder', 'third-coder'],
+      max_retries: 0
+    });
+    const thirdBefore = calls.filter((call) => call.key === 'third-key').length;
+    const memberFallback = await tool(30, 'generate_code', {
+      endpoint: 'local-coder', fallback_endpoint: 'grill-reviewer', prompt: 'member backup'
+    });
+    assert(memberFallback.result.content[0].text === FALLBACK, 'member backup serves the request');
+    assert(memberFallback.result.meta.servedBy === 'grill-reviewer', 'member backup is reported');
+    assert(memberFallback.result.meta.fallbackRestricted === true, 'restricted chain is reported in meta');
+    assert(memberFallback.result.meta.fallbackEndpoint === 'grill-reviewer', 'fallback endpoint is in meta');
+    assert(
+      JSON.stringify(memberFallback.result.meta.attempts.map((item) => item.endpoint)) ===
+        JSON.stringify(['local-coder']),
+      'only the failed primary is recorded before the member backup serves the request'
+    );
+    assert(
+      calls.filter((call) => call.key === 'third-key').length === thirdBefore,
+      'global fallback_order was skipped'
+    );
+    setMode('ok');
+
+    setMode('unauth');
+    const noFallback = await tool(31, 'generate_code', {
+      endpoint: 'local-coder', fallback_endpoint: '', prompt: 'native backup handles this'
+    });
+    assert(noFallback.result.isError === true, 'empty fallback_endpoint disables MCP fallback');
+    assert(noFallback.result.content[0].text.includes('All endpoints failed'), 'no fallback is attempted');
+    assert(noFallback.result.meta === undefined, 'failed call carries no meta');
+    setMode('ok');
+
+    const badFallback = await tool(32, 'generate_code', {
+      endpoint: 'local-coder', fallback_endpoint: 'nope', prompt: 'x'
+    });
+    assert(badFallback.result.isError === true, 'unknown fallback_endpoint returns isError');
+    assert(
+      badFallback.result.content[0].text.includes('unknown fallback_endpoint'),
+      'unknown fallback_endpoint error is clear'
+    );
+
+    setMode('unauth');
+    const critiqueFallback = await tool(33, 'critique_plan', {
+      endpoint: 'local-coder', fallback_endpoint: 'grill-reviewer', plan_markdown: '# Plan\nStep 1'
+    });
+    assert(critiqueFallback.result.content[0].text === CRITIQUE, 'critique_plan uses member backup');
+    assert(critiqueFallback.result.meta.servedBy === 'grill-reviewer', 'critique backup is reported');
+    setMode('ok');
+    writeConfig(configFile, baseUrl, { default: 'local-coder' });
 
     const beforeUnknown = calls.length;
     const unknown = await tool(10, 'generate_code', { endpoint: 'nope', prompt: 'x' });

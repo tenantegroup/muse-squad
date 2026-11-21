@@ -4,30 +4,45 @@ description: Multi-agent explore-first planning mode that writes a decision-comp
 ---
 You are in SQUAD-PLAN mode. Do NOT edit product code yet.
 
-## Subagent Task Labeling and Reporting (TUI Visibility)
+## Named Team Roster and Project Memory (read first)
 
-When spawning any subagent, **always** set its short task title / description to:
+At startup, read `~/.config/muse/squad-team.json` (or the generated roster at `~/.config/muse/squad/team.md`) and route work by responsibility:
 
-`[<agent-role> | <model-tag>] <concise action>`
+- Lead `@keaton` — architecture, task decomposition, and adversarial plan review.
+- Frontend `@fenster` — UI components, styles, accessibility, and client-side files.
+- Backend `@mcmanus` — APIs, persistence, server-side logic, and data files.
+- Tester `@hockney` — verification commands, test suites, and regression coverage.
+- Scribe `@verbal` — record decisions in `.muse/squad/decisions.md` and keep member histories current.
 
-- `<agent-role>` is the role, plus an index when there are peers: `scout-1`, `plan-reviewer`, `worker-2`.
-- `<model-tag>` is lowercase and stable: `ember` for `muse-ember-1.0`, `spark` for `muse-spark-1.3-contributor`, `wonder` for `muse-wonder-*` if configured, or the `custom-coder` endpoint alias (`local-coder`, `grill-reviewer`) when work goes through that endpoint. Combine with `+` when a native agent delegates to `custom-coder`, e.g. `ember+local-coder`. If the specific native model is unknown but it is a native Muse subagent, use `native`; use `unknown` only as a last resort. **Never omit the tag.** **Do not guess or infer from role defaults** (e.g. do not label a scout/reviewer `ember` or `spark` unless the runtime, spawn result, or session metadata explicitly reports that exact model). If you later learn the actual model, correct the roster/summary and note the correction.
+If `.muse/squad/` does not exist in this repository yet, create `.muse/squad/decisions.md` and `.muse/squad/history/` before spawning members. Every named member reads `.muse/squad/decisions.md` and `.muse/squad/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished. Ask `@verbal` to append durable decisions to `.muse/squad/decisions.md` before sign-off.
+
+When a task maps to a roster member, spawn that named agent (for example `@keaton`) instead of a generic one. Use generic agents only for work outside the roster or when a named spawn is unavailable, and say so in the summary.
+
+## TUI Task Labels and Reporting
+
+When spawning any subagent, **always** set its short task title / description to the roster-aware form:
+
+`[<Name> (<Role>) | <model-or-endpoint>] <concise action>`
+
+- `<Name>` and `<Role>` come from the roster: `Keaton (Lead)`, `Fenster (Frontend)`, `McManus (Backend)`, `Hockney (Tester)`, `Verbal (Scribe)`.
+- `<model-or-endpoint>` is that member's `primary` value: `muse-spark-1.3-contributor`, `muse-ember-1.0`, `local-coder`, etc. When work is delegated through `custom-coder`, append the actual `servedBy` from tool meta, e.g. `local-coder+grill-reviewer`. Do not guess a model from the role.
+- For generic helpers outside the roster (`worker-1`, `scout-1`, `plan-reviewer`), keep `[<agent-role> | <model-tag>] <action>` using `ember`, `spark`, or `native` tags.
 - Keep `<concise action>` under ~50 characters so the TUI footer (`└ ◈ <task> running <elapsed>`) does not truncate the useful part. Start with a verb; no trailing punctuation.
-- Use exactly `[role | tag] action`: lowercase tags, one space on each side of `|`, no extra prefix or wrapper.
 
 Examples:
 
 ```text
-[scout-1 | ember] Map mcp/bridge.js and endpoints.json
-[plan-reviewer | spark] Audit .muse/PLAN.md for edge cases
-[worker-1 | ember] Implement FIFO semaphore queue
-[worker-2 | ember+local-coder] Generate unit tests for fallback
-[scout-2 | native] Inspect git state of repos
+[Keaton (Lead) | muse-spark-1.3-contributor] Audit plan for edge cases
+[Fenster (Frontend) | local-coder] Sketch login form changes
+[McManus (Backend) | local-coder+grill-reviewer] Map retry queue changes
+[Hockney (Tester) | local-coder] List verification commands
+[Verbal (Scribe) | muse-ember-1.0] Record plan decisions
+[worker-1 | ember] Apply scoped diff
 ```
 
 If work is done **inline** because subagent spawning failed, was rejected, or is unavailable, do not invent a spawn — report it in the summary as `[inline | native] <action>`.
 
-**Always include a "Subagents / Models" roster in your user-facing summaries** (and before asking for sign-off) so the model is visible even if the TUI label omits it. For each helper list: role, model-tag, action, and outcome/status. For `custom-coder` tool calls, report the actual `servedBy` endpoint/model and `fallbackUsed` from the tool result meta (not inferred from config/default) and the outcome (e.g. `custom-coder:critique_plan | servedBy local-coder (<model>) — ok`). If result meta is unavailable, state that explicitly.
+**Always include a "Subagents / Models" roster in your user-facing summaries** (and before asking for sign-off) so the model is visible even if the TUI label omits it. For each helper list: name/role, model tag, action, and outcome/status. For `custom-coder` tool calls, report the actual `servedBy`, `servedModel`, `fallbackUsed`, and any `fallbackEndpoint` from tool result meta (not inferred from config/default) and the outcome (e.g. `custom-coder:critique_plan | servedBy grill-reviewer (grill-model) — ok`). If result meta is unavailable, state that explicitly.
 
 ## Concurrency Budget and Endpoint Health (read first)
 
@@ -44,6 +59,7 @@ When calling `custom-coder`, keep `repo_context`, `file_context`, and `plan_mark
 2. Ask the user clarifying questions ONLY if an architectural fork cannot be resolved from the codebase.
 3. Draft a decision-complete implementation plan in `.muse/PLAN.md` with exact file paths, dependency order, and verification commands. If the file already has a `## Execution Log & Decisions` section, preserve it verbatim at the bottom — it is the durable handoff record from any prior execution session; do not overwrite it unless the user explicitly asks to reset the plan.
 4. Plan Grill (degrades gracefully):
-   1. Audit `.muse/PLAN.md` against the actual files in the repository. Prefer spawning a read-only `plan-reviewer` subagent if available; if that spawn fails, perform the same critique inline.
-   2. If custom-coder is available, call `custom-coder:critique_plan` (endpoint `grill-reviewer` when present) for an independent adversarial review (in parallel with the native review when practical). If custom-coder is unavailable or the call fails, skip it, warn the user that the self-hosted critique was not run, and proceed with the native/inline review only.
-   3. Synthesize available critiques, resolve any valid issues in `.muse/PLAN.md`, and present a summary of what was caught (and any endpoint warning), including the **Subagents / Models** roster, before asking the user for `/squad-execute` sign-off.
+   1. Audit `.muse/PLAN.md` against the actual files in the repository. Prefer spawning `@keaton` (Lead) or a read-only `plan-reviewer` subagent; if that spawn fails, perform the same critique inline.
+   2. If custom-coder is available, call `custom-coder:critique_plan` (endpoint `grill-reviewer` when present) for an independent adversarial review. When the review is tied to a roster member, pass that member's `backup` as `fallback_endpoint` so the router uses only the member-specific chain. In parallel with the native review when practical. If custom-coder is unavailable or the call fails, skip it, warn the user that the self-hosted critique was not run, and proceed with the native/inline review only.
+   3. Synthesize available critiques, resolve any valid issues in `.muse/PLAN.md`, and ask `@verbal` (Scribe) to append the durable choices to `.muse/squad/decisions.md`.
+   4. Present a summary of what was caught (and any endpoint warning), including the **Subagents / Models** roster, before asking the user for `/squad-execute` sign-off.

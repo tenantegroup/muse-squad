@@ -11,9 +11,14 @@ Nothing here is magic. It is just files that the installer drops into `~/.config
 
 | File | What it does |
 | --- | --- |
+| `AGENTS.md` | Global policy that makes Muse use these agents and `custom-coder` proactively in normal sessions. |
 | `agents/plan-reviewer.md` | Reads your plan and pokes holes in it. Never edits code. |
 | `agents/worker.md` | Does one small coding task, then runs quick checks on the files it touched. |
 | `agents/general-purpose.md` | Same worker rules, used when Muse asks for its built-in general-purpose agent. |
+| `squad-team.json` | The persistent named team roster (`@keaton`, `@fenster`, etc.). |
+| `mcp/sync-team.js` | Generates the roster page and one native agent wrapper per member. |
+| `squad/team.md` | Human-readable roster generated from `squad-team.json`. |
+| `agents/<name>.md` | Generated wrappers for the named team members. |
 | `skills/squad-plan/SKILL.md` | The `/squad-plan` command. Writes `.muse/PLAN.md`. |
 | `skills/squad-execute/SKILL.md` | The `/squad-execute` command. Does the work in waves and checks it. |
 | `mcp/bridge.js` | The `custom-coder` helper server. Talks to your own models. |
@@ -55,6 +60,8 @@ These URLs point straight at the files in this public repo. The installers are s
 | `--no-mcp` | Skip adding the `custom-coder` MCP server. |
 | `--backup` | Force the backup prompt, even if backup was disabled by environment. |
 | `--no-backup` | Skip the backup prompt and backup. |
+| `--reconfigure-team` | Rerun the interactive team wizard on an existing install. |
+| `--defaults` | Skip the team wizard and use the default roster. |
 | `--help` or `-h` | Show help. |
 
 If you are piping the script straight into bash, use an environment variable instead of `--dir`:
@@ -64,6 +71,22 @@ MUSE_CONFIG_DIR=/tmp/muse-test bash <(curl -fsSL https://raw.githubusercontent.c
 ```
 
 Running the installer again is safe. Unchanged files are skipped. Files you edited are saved as `<file>.bak.<timestamp>` first.
+
+The installer also manages one marked section in `~/.config/muse/AGENTS.md`. If you already use `~/.config/muse/MUSE.md` instead, it appends the section there. Anything you wrote outside the markers is left alone. Uninstall removes only the marked section.
+
+On install, an interactive terminal offers a short team wizard; non-interactive installs use the defaults silently. The installer then runs `mcp/sync-team.js` to generate `squad/team.md` and the named agent wrappers. Normal re-runs and `--update` never overwrite an existing `squad-team.json`. Uninstall removes `squad-team.json`, the generated `squad/` directory, and wrappers carrying the generated marker — but keeps `endpoints.json`.
+
+### Team setup wizard
+
+On a fresh install in a real terminal (or after `--reconfigure-team`), the installer asks:
+
+```text
+Customize Squad team members & models now? [Y/n]
+```
+
+Press Enter for the default team, or `Y` to rename the five members, change their roles, and pick each primary/backup model. The model menu is built from the three built-in Muse models, any extra `muse_models` keys, and every alias under `endpoints` in `endpoints.json`. You can type a menu number or any model/endpoint name directly. Extra members are optional.
+
+`curl | bash` has no TTY, so it skips the wizard silently. `--defaults` does the same even in a terminal. `--update` always forwards `--defaults` to the downloaded installer, so an existing custom roster is preserved while wrapper templates refresh.
 
 ### Backups
 
@@ -79,7 +102,7 @@ Press Enter (or type `Y`) to make a backup. Type `n` to skip. The backup is a pl
 ~/.config/muse.backup.20261120-143022-12345
 ```
 
-It copies the **whole** Muse config folder — `endpoints.json`, `settings.json`, agents, skills, MCP files, and any custom files you added. The installer prints the exact path and a restore reminder when it is done.
+It copies the **whole** Muse config folder — `endpoints.json`, `settings.json`, `AGENTS.md` / `MUSE.md`, agents, skills, MCP files, and any custom files you added. The installer prints the exact path and a restore reminder when it is done.
 
 With `curl | bash` there is no keyboard to read, so it backs up automatically. Use `--no-backup` or `MUSE_SQUAD_NO_BACKUP=1` if you really want to skip that. `--backup` forces it back on.
 
@@ -125,15 +148,67 @@ That log is the point: if your chat gets long or you come back tomorrow, the "wh
 
 You do not have to do anything special. Just keep answering its questions until it says it is done.
 
+### Normal CLI sessions (no slash command)
+
+You do not need `/squad-plan` or `/squad-execute` to get help. The installed `AGENTS.md` / `MUSE.md` policy tells Muse to use these agents proactively in ordinary sessions:
+
+- Delegate bounded edits, refactors, bug fixes, test writing, and code exploration to `worker` / `general-purpose`.
+- Ask `plan-reviewer` for a read-only second opinion before risky or ambiguous changes.
+- Use named `@team` members for recurring roles (see below).
+- Prefer `custom-coder:generate_code` for small diffs and `custom-coder:critique_plan` for cheap secondary reviews, using the aliases in `endpoints.json`.
+- Respect `muse_models` caps, label every subagent, apply surgical edits, and run incremental checks after patches.
+
+Normal sessions stay lightweight: no `.muse/PLAN.md` unless you invoke `/squad-plan` or explicitly ask for a formal multi-wave plan.
+
+### Persistent named team
+
+`squad-team.json` defines five named members with a role, a responsibility, a `primary` model/endpoint, a `backup`, and a charter:
+
+| Mention | Role | Primary | Backup | Use for |
+| --- | --- | --- | --- | --- |
+| `@keaton` | Lead | `muse-spark-1.3-contributor` | `grill-reviewer` | Architecture, decomposition, plan review |
+| `@fenster` | Frontend | `local-coder` | `muse-ember-1.0` | UI, styles, client-side files |
+| `@mcmanus` | Backend | `local-coder` | `grill-reviewer` | APIs, persistence, server-side files |
+| `@hockney` | Tester | `local-coder` | `muse-ember-1.0` | Tests and verification |
+| `@verbal` | Scribe | `muse-ember-1.0` | `local-coder` | Decisions and handoff notes |
+
+The wizard can rename any member, replace a role (including a custom role such as `Security`), and change either model. Mention the resulting `@<name>` in normal chat or spawn that named agent from `/squad-plan` and `/squad-execute`.
+
+`sync-team.js` turns that roster into `squad/team.md` and `agents/<name>.md`. A member whose primary is a native Muse model gets that model in `model:` frontmatter. A member whose primary is a `custom-coder` alias gets `model: muse-ember-1.0` as a lightweight tool-runner and delegates heavy work to `generate_code` / `critique_plan` with `endpoint="<primary>"` and `fallback_endpoint="<backup>"` when the backup is another endpoint.
+
+Project memory lives in the repo, not in your global config:
+
+- `.muse/squad/decisions.md` — shared decisions, appended by the Scribe and after waves.
+- `.muse/squad/history/<name>.md` — per-member conventions, file maps, and gotchas.
+
+The first `/squad-plan`, `/squad-execute`, or named-member session creates those paths if missing. Each member reads them before work and appends concise learnings when finished.
+
+To override the roster for one project, add a keyed entry under `projects` in `squad-team.json` using the repo directory name (or its absolute path), with a `members` object containing partial overrides:
+
+```json
+{
+  "projects": {
+    "my-api": {
+      "team_name": "My API Squad",
+      "members": { "mcmanus": { "primary": "grill-reviewer" } }
+    }
+  }
+}
+```
+
+Re-run the installer (or `node ~/.config/muse/mcp/sync-team.js`) after editing the roster. The generic `worker.md`, `plan-reviewer.md`, and `general-purpose.md` stay untouched.
+
 ### Seeing what is running
 
-Subagent titles use a short label so the Muse TUI footer stays readable:
+Named members use a role-aware label; generic helpers keep the short role/tag form:
 
 ```text
+[Fenster (Frontend) | local-coder] Build login form
+[McManus (Backend) | local-coder+grill-reviewer] Add retry queue
 [worker-1 | ember] Implement FIFO semaphore queue
 ```
 
-The first part is the role. The tag is the model (`ember`, `spark`, `wonder`) or a `custom-coder` endpoint alias (`local-coder`, `grill-reviewer`). Mixed work uses `ember+local-coder`. That whole title is what appears after `└ ◈` in the footer.
+The tag is the member's `primary` (or the generic model tag); when `custom-coder` serves a request, the actual `servedBy` can be appended with `+`. Keep the action under ~50 characters. That whole title is what appears after `└ ◈` in the footer.
 
 ---
 
@@ -150,6 +225,8 @@ On install, the script creates:
 It does not touch your other MCP servers.
 
 The bridge reads `endpoints.json` on **every tool call**. Edit the file and the next call uses the new values. No restart needed.
+
+`generate_code` and `critique_plan` accept an optional `fallback_endpoint`. Omit it to use the global `fallback_order`; pass an endpoint alias to try only that backup after the primary; pass `""` to disable MCP fallback when the member's backup is a native Muse model. Unknown aliases fail immediately.
 
 ---
 
