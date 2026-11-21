@@ -139,8 +139,12 @@ schema = 1
 #                  providers in chain order.
 # type = "http"    OpenAI-compatible endpoint the MCP router can call.
 #                  api_key accepts a plaintext value or ${ENV_VAR}.
+#
+# enabled = true   Set false to disable a provider. The router, doctor, and
+#                  generated wrappers skip disabled providers.
 
 [providers.Home-Ornith]
+enabled = true             # set false to disable this provider
 type = "http"
 base_url = "http://127.0.0.1:8000/v1"
 api_key = "local-key"             # or "${LOCAL_MODEL_API_KEY}"
@@ -156,6 +160,7 @@ queue_timeout_ms = 300000
 max_retries = 2
 
 [providers.DeepSeek-Flash]
+enabled = true
 type = "http"
 base_url = "https://api.deepseek.com/v1"
 api_key = "${DEEPSEEK_API_KEY}"
@@ -164,16 +169,19 @@ max_concurrency = 4
 timeout_ms = 600000
 
 [providers.Muse-Spark]
+enabled = true
 type = "native"
 model = "muse-spark-1.3-contributor"
 max_concurrency = 2
 
 [providers.Muse-Ember]
+enabled = true
 type = "native"
 model = "muse-ember-1.0"
 max_concurrency = 4
 
 [providers.Muse-Wonder]
+enabled = true
 type = "native"
 model = "muse-wonder-1.0"
 max_concurrency = 2
@@ -222,6 +230,7 @@ Each `[providers.<Name>]` table has a `type`:
 | Setting | Applies to | Meaning |
 | --- | --- | --- |
 | `type` | both | `"native"` or `"http"`. |
+| `enabled` | both | Defaults to `true`. Set `false` to disable a provider; the router, doctor, and generated wrappers skip it. Member references may stay as-is, and its other settings (including unset `${ENV_VAR}` keys) will not block config loading. |
 | `model` | both | The native model ID or the model name sent to the HTTP server. |
 | `max_concurrency` | both | Max simultaneous calls to this provider. Keep local servers at `1` to avoid GPU/RAM pressure. |
 | `base_url` | http | The OpenAI-compatible base URL, usually ending in `/v1`. |
@@ -255,6 +264,7 @@ An `api_key` may be a plaintext string or `${ENV_VAR}`. For example:
 
 ```toml
 [providers.DeepSeek-Flash]
+enabled = true
 type = "http"
 base_url = "https://api.deepseek.com/v1"
 api_key = "${DEEPSEEK_API_KEY}"
@@ -276,7 +286,7 @@ On install, `mcp/register-settings.js` adds a server named `muse-squad` to `sett
 | `member_status` | `member_status(member?)` | Inspect one member's chain, or all members when omitted. |
 | `list_providers` | `list_providers` | See providers, types, limits, and queue settings. Keys are redacted. |
 
-`generate_code` and `critique_plan` are **member-scoped**. The router resolves that member's `primary` first, then its `fallback` providers in order. Native providers cannot be called by the router; it skips them and tries the member's HTTP providers in chain order.
+`generate_code` and `critique_plan` are **member-scoped**. The router resolves that member's `primary` first, then its `fallback` providers in order. Native providers cannot be called by the router; it skips them and tries the member's HTTP providers in chain order. Providers with `enabled = false` are skipped entirely, including in native wrappers; no chain edit is needed.
 
 - For a native-primary member, run the native subagent first. If it fails on quota, rate limits, or subscription limits, retry the same step through `muse-squad:generate_code` or `muse-squad:critique_plan` with `member="<name>"`; the router uses that member's HTTP fallbacks.
 - For an HTTP-primary member, the generated wrapper pins a lightweight native runner and delegates heavy work to `muse-squad` with `member="<name>"`.
@@ -308,7 +318,7 @@ Runs the read-only `mcp/doctor.js` and reports:
 
 1. that `settings.json` has `mcpServers["muse-squad"]` pointing at `mcp/bridge.js`;
 2. that `muse-squad.toml` parses with `schema = 1`, has at least one member, and every provider reference in every member chain resolves;
-3. a live reachability check for each HTTP provider (`OK`, `AUTH`, `HTTP`, `DOWN`, `TIMEOUT`); native providers are reported as `native` and are not pinged;
+3. a live reachability check for each HTTP provider (`OK`, `AUTH`, `HTTP`, `DOWN`, `TIMEOUT`); native providers are reported as `native` and are not pinged, while `enabled = false` providers are reported as `DISABLED` and are not pinged;
 4. that `squad/team.md` and the generated `agents/<name>.md` wrappers match the TOML, with no leftover wrappers;
 5. that keys are redacted, including under `--json`.
 

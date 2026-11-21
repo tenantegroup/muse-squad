@@ -67,6 +67,7 @@ function toml({ schema = 1, squadName = 'Doctor Squad', memoryDir = '.muse/squad
   const lines = [`schema = ${schema}`, ''];
   for (const [name, provider] of Object.entries(providers)) {
     lines.push(`[providers.${name}]`, `type = ${q(provider.type)}`);
+    if (provider.enabled === false) lines.push('enabled = false');
     if (provider.type === 'http') {
       lines.push(
         `base_url = ${q(provider.base_url)}`,
@@ -229,6 +230,34 @@ async function main() {
     );
     const urls = requests.map((request) => request.url).sort();
     assert(JSON.stringify(urls) === JSON.stringify(['/models', '/v1/models']), 'both models URLs were used');
+
+    // Disabled providers are reported explicitly and never pinged.
+    const disabledConfig = {
+      providers: {
+        ...goodConfig.providers,
+        'Http-Models': { ...goodHttp['Http-Models'], enabled: false }
+      },
+      members: goodConfig.members
+    };
+    writeConfig(disabledConfig);
+    sync();
+    const disabledText = await expectDoctor(args);
+    expectContains(disabledText.stdout, 'DISABLED', 'disabled provider status in text output');
+    expectContains(disabledText.stdout, 'enabled = false', 'disabled provider detail in text output');
+    requests.length = 0;
+    const disabledResult = await expectDoctor([...args, '--json']);
+    const disabledReport = JSON.parse(disabledResult.stdout);
+    assert(disabledReport.ok === true && disabledReport.problems === 0,
+      'disabled providers do not make the report unhealthy');
+    const disabledEntry = disabledReport.checks.providers.find(
+      (provider) => provider.provider === 'Http-Models'
+    );
+    assert(disabledEntry && disabledEntry.status === 'DISABLED' && disabledEntry.ok === true,
+      'disabled provider is reported as DISABLED');
+    assert(requests.length === 1 && requests[0].url === '/v1/models',
+      `disabled provider is not pinged, saw ${requests.length} requests`);
+    writeConfig(goodConfig);
+    sync();
 
     // Provider statuses: AUTH / HTTP / TIMEOUT / DOWN, with no ping for native providers.
     const statusConfig = {

@@ -169,6 +169,7 @@ function writeConfig(configFile, baseUrl) {
     'model = "alpha-model"',
     'temperature = 0.2'
   ];
+  if (settings.alpha.enabled === false) lines.push('enabled = false');
   numberLines(lines, settings.alpha);
   lines.push(
     '',
@@ -182,6 +183,7 @@ function writeConfig(configFile, baseUrl) {
     `api_key = "${BETA_SECRET}"`,
     'model = "beta-model"'
   );
+  if (settings.beta.enabled === false) lines.push('enabled = false');
   numberLines(lines, settings.beta);
   lines.push(
     '',
@@ -563,6 +565,34 @@ async function run(port, tempDir, configFile) {
     const reloadedSolo = afterReload.members.find((member) => member.name === 'solo').providers[0];
     assert(reloadedSolo.activeCalls === 0 && reloadedSolo.queuedCalls === 0,
       'no slots or waiters are stranded after reload');
+
+    // --- Disabled providers are skipped without editing member chains -----
+    resetConfig(configFile, baseUrl);
+    settings.alpha.enabled = false;
+    writeConfig(configFile, baseUrl);
+    setMode('ok');
+    resetStats();
+    const disabledListing = JSON.parse((await bridge.tool('list_providers', {})).result.content[0].text);
+    assert(disabledListing.providers.Alpha.enabled === false,
+      'list_providers reports the disabled provider');
+    assert(disabledListing.providers.Beta.enabled === true,
+      'list_providers keeps other providers enabled');
+    const hybridStatusText = (await bridge.tool('member_status', { member: 'hybrid' }))
+      .result.content[0].text;
+    const hybridStatus = JSON.parse(hybridStatusText);
+    const alphaEntry = hybridStatus.selected.providers.find((item) => item.name === 'Alpha');
+    assert(alphaEntry.enabled === false && alphaEntry.callableByMcp === false,
+      'member_status marks a disabled provider not callable');
+    const beforeDisabled = calls.length;
+    const skipped = await bridge.tool('generate_code', { member: 'hybrid', prompt: 'skip-alpha' });
+    assert(skipped.result.content[0].text === BETA_OUTPUT, 'disabled primary is skipped');
+    assert(servedBy(skipped.result.meta, 'Beta'), 'fallback serves after the disabled primary');
+    assert(skipped.result.meta.attempts.some(
+      (item) => item.provider === 'Alpha' && /disabled/i.test(item.error)
+    ), 'disabled skip is recorded in attempts');
+    assert(calls.slice(beforeDisabled).every((item) => item.provider !== 'alpha'),
+      'no HTTP request is sent to a disabled provider');
+    resetConfig(configFile, baseUrl);
 
     // --- Only the truncation warning is prepended ------------------------
     resetConfig(configFile, baseUrl);

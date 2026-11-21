@@ -148,6 +148,16 @@ async function checkProviders(config, timeoutMs, secrets) {
       if (secret) secrets.add(String(secret));
     }
 
+    if (provider.enabled === false) {
+      results.push({
+        provider: provider.name,
+        status: 'DISABLED',
+        ok: true,
+        detail: 'enabled = false (not pinged)'
+      });
+      continue;
+    }
+
     if (provider.type === 'native') {
       results.push({
         provider: provider.name,

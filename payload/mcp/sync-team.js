@@ -73,7 +73,12 @@ function firstSentence(text) {
 
 function chain(config, member) {
   const names = [member.primary, ...member.fallback];
-  return [...new Set(names)];
+  return [...new Set(names)].filter((name) => config.providers[name].enabled !== false);
+}
+
+function disabledChain(config, member) {
+  const names = [member.primary, ...member.fallback];
+  return [...new Set(names)].filter((name) => config.providers[name].enabled === false);
 }
 
 function chainLabel(config, member) {
@@ -101,11 +106,16 @@ function buildRoster(config, configFile) {
 
   for (const member of Object.values(config.squad.members)) {
     const primary = config.providers[member.primary];
+    const primaryLabel = primary.enabled === false
+      ? `\`${member.primary}\` (disabled)`
+      : `\`${member.primary}\` (${primary.type})`;
     const fallbacks = member.fallback.length
-      ? member.fallback.map((name) => `\`${name}\``).join(', ')
+      ? member.fallback.map((name) => config.providers[name].enabled === false
+        ? `\`${name}\` (disabled)`
+        : `\`${name}\``).join(', ')
       : '(none)';
     lines.push(
-      `| @${member.name} | \`${member.primary}\` (${primary.type}) | ${fallbacks} | ` +
+      `| @${member.name} | ${primaryLabel} | ${fallbacks} | ` +
       `${escapeCell(firstSentence(member.charter))} |`
     );
   }
@@ -134,28 +144,48 @@ function buildWrapper(config, memberName, configFile) {
   const member = config.squad.members[memberName];
   if (!member) throw new Error(`unknown member "${memberName}"`);
 
-  const primary = config.providers[member.primary];
-  const runnerModel = primary.type === 'http' ? RUNNER_MODEL : primary.model;
+  const configuredPrimary = config.providers[member.primary];
+  const activeChain = chain(config, member);
+  if (activeChain.length === 0) {
+    throw new Error(`member "${memberName}" has no enabled providers`);
+  }
+  const disabled = disabledChain(config, member);
+  const pinnedName = activeChain[0];
+  const pinnedProvider = config.providers[pinnedName];
+  const primaryLabel = configuredPrimary.enabled === false ? 'Provider' : 'Primary';
+  const runnerModel = pinnedProvider.type === 'http' ? RUNNER_MODEL : pinnedProvider.model;
+  const activeFallback = member.fallback.filter(
+    (name) => config.providers[name].enabled !== false
+  );
   const decisions = `${config.squad.memory_dir}/decisions.md`;
   const history = `${config.squad.memory_dir}/history/${member.name}.md`;
-  const chainNames = chain(config, member);
   const routing = [];
 
   routing.push(`Provider chain: ${chainLabel(config, member)}.`);
-
-  if (primary.type === 'native') {
+  if (disabled.length > 0) {
     routing.push(
-      `- Primary \`${member.primary}\` is a native Muse model and is pinned in frontmatter.`,
+      `- Disabled providers are skipped: ${disabled.map((name) => `\`${name}\``).join(', ')}.`
+    );
+  }
+  if (configuredPrimary.enabled === false) {
+    routing.push(
+      `- Configured primary \`${member.primary}\` is disabled; \`${pinnedName}\` is pinned in frontmatter instead.`
+    );
+  }
+
+  if (pinnedProvider.type === 'native') {
+    routing.push(
+      `- ${primaryLabel} \`${pinnedName}\` is a native Muse model and is pinned in frontmatter.`,
       `- If this native turn fails because of quota, rate limits, or subscription limits, retry the SAME STEP through \`muse-squad:generate_code\` (or \`muse-squad:critique_plan\` for plans) with \`member="${member.name}"\`.`,
       '- The router skips native providers it cannot call and tries the first HTTP provider in this member\'s chain.'
     );
   } else {
     routing.push(
-      `- Primary \`${member.primary}\` is an HTTP provider. The \`model: ${RUNNER_MODEL}\` frontmatter makes this a lightweight tool-runner; delegate heavy code generation to \`muse-squad:generate_code\` or plan critique to \`muse-squad:critique_plan\` with \`member="${member.name}"\`.`
+      `- ${primaryLabel} \`${pinnedName}\` is an HTTP provider. The \`model: ${RUNNER_MODEL}\` frontmatter makes this a lightweight tool-runner; delegate heavy code generation to \`muse-squad:generate_code\` or plan critique to \`muse-squad:critique_plan\` with \`member="${member.name}"\`.`
     );
   }
 
-  for (const name of member.fallback) {
+  for (const name of activeFallback) {
     const provider = config.providers[name];
     if (provider.type === 'http') {
       routing.push(
@@ -168,9 +198,12 @@ function buildWrapper(config, memberName, configFile) {
     }
   }
 
-  if (member.fallback.length === 0) {
+  if (activeFallback.length === 0) {
+    const fallbackLabel = disabled.some((name) => member.fallback.includes(name))
+      ? 'enabled fallback'
+      : 'fallback';
     routing.push(
-      '- This member has no fallback. If its provider fails, stop and report the error; do not switch models or work inline.'
+      `- This member has no ${fallbackLabel}. If its provider fails, stop and report the error; do not switch models or work inline.`
     );
   } else {
     routing.push(

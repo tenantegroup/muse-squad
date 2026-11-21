@@ -1014,7 +1014,7 @@ Edit only `muse-squad.toml`. Do not hand-edit `squad/team.md`, `agents/<name>.md
 
 The file uses `schema = 1` and these tables:
 
-- `[providers.<Name>]` — a provider name may contain letters, numbers, `.`, `_`, and `-`. `type = "native"` requires `model` and `max_concurrency`. `type = "http"` requires `base_url`, `api_key`, and `model`, and accepts `temperature`, `top_p`, `max_tokens`, `max_input_chars`, `on_context_exceeded`, `max_concurrency`, `timeout_ms`, `queue_timeout_ms`, and `max_retries`. `api_key` may be plaintext or `${ENV_VAR}`.
+- `[providers.<Name>]` — a provider name may contain letters, numbers, `.`, `_`, and `-`. `enabled` defaults to `true`; set `false` to disable the provider without removing it from member chains. `type = "native"` requires `model` and `max_concurrency`. `type = "http"` requires `base_url`, `api_key`, and `model`, and accepts `temperature`, `top_p`, `max_tokens`, `max_input_chars`, `on_context_exceeded`, `max_concurrency`, `timeout_ms`, `queue_timeout_ms`, and `max_retries`. `api_key` may be plaintext or `${ENV_VAR}`.
 - `[squad.<name>]` — one per member, with only `primary`, an ordered `fallback` array, and `charter`.
 
 Every member needs at least one provider in its chain: `primary` and every `fallback` entry must match a provider table name exactly. Validate all cross-references before writing. Never invent a provider name. Member names are lowercase slugs (`a-z0-9-`); retired helper names are reserved. Keep `schema = 1`. Do not add display names, responsibilities, labels, or any new member keys. Use `#` for TOML comments, not `;`.
@@ -1026,7 +1026,7 @@ Ask which change to make unless the user already stated it clearly:
 - add, rename, or remove a provider (check every member chain before removing);
 - add, rename, or remove a member (at least one member must remain);
 - change a member's `primary`, reorder or replace its `fallback` array, or rewrite its `charter`;
-- change any provider setting, including moving a secret into `${ENV_VAR}`.
+- change any provider setting, including moving a secret into `${ENV_VAR}` or setting `enabled = false` to disable a provider without removing it from member chains.
 
 Before writing, copy `muse-squad.toml` to a timestamped sibling backup such as `muse-squad.toml.bak.20261121-143022`. Apply the smallest valid TOML edit, then parse the result and re-check every provider reference. If parsing or validation fails, restore the backup and stop.
 
@@ -1071,7 +1071,7 @@ The check does not call `muse-squad` generation tools, so it still works when an
 
 1. `settings.json` — that `mcpServers["muse-squad"]` exists, launches `node`, and points at the bundled `mcp/bridge.js` with this config directory.
 2. `muse-squad.toml` — that `schema = 1`, the file parses, every provider has valid settings, and every member has `primary`, an ordered `fallback` array, and a `charter`. Every provider name in every member chain must resolve to a provider table. At least one member is required.
-3. HTTP providers — a live `GET /v1/models` (or `GET /models` when `base_url` already ends in `/v1`) with a short timeout. `OK` means reachable, `AUTH` means 401/403, `HTTP` means another error status, `DOWN` / `TIMEOUT` means no answer. Native providers are reported as `native` and are not pinged; the MCP router skips them too.
+3. HTTP providers — a live `GET /v1/models` (or `GET /models` when `base_url` already ends in `/v1`) with a short timeout. `OK` means reachable, `AUTH` means 401/403, `HTTP` means another error status, `DOWN` / `TIMEOUT` means no answer. Native providers are reported as `native` and are not pinged; the MCP router skips them too. Providers with `enabled = false` are reported as `DISABLED`, are not pinged, and are skipped by routing and wrappers.
 4. Roster and wrappers — that `squad/team.md` and every global `agents/<name>.md` match what `sync-team.js` would generate from the TOML, that only current members have generated wrappers, and that no leftover non-member agent files remain.
 5. Secrets — every `api_key` is redacted in all output, including `--json`.
 
@@ -1082,6 +1082,7 @@ Exit code `0` means all checks passed, `1` means at least one check failed, and 
 - Missing or bad `muse-squad` registration: re-run the installer, or run `node "$MUSE_CONFIG_DIR/mcp/register-settings.js"` with the installer's usual `--settings` and `--bridge` arguments.
 - Config parse or cross-reference failure: fix `muse-squad.toml` with `/squad-team`. An unknown provider in a member's chain blocks that member's routing.
 - `DOWN` / `TIMEOUT`: check that the HTTP model server is running, `base_url` is correct, and the port is exposed. A native provider needs no ping.
+- `DISABLED`: expected when `enabled = false`; the provider is intentionally skipped. Set `enabled = true` when it should serve work again.
 - `AUTH`: check that provider's `api_key` or its `${ENV_VAR}` source; never echo the key into chat.
 - Roster drift or leftover wrappers: run `node "$MUSE_CONFIG_DIR/mcp/sync-team.js" --config-dir "$MUSE_CONFIG_DIR"`, or use `/squad-team` if the TOML itself needs editing.
 
@@ -1125,7 +1126,7 @@ Always include a "Subagents / Providers" roster in user-facing summaries and bef
 
 ## Provider limits and health (read first)
 
-At the start, call `muse-squad:list_providers` (or read `muse-squad.toml`) to learn each provider's `max_concurrency`, `max_input_chars`, and `type`. Native providers are built into Muse and cannot be called by the MCP router; the router skips them and tries that member's HTTP providers in chain order.
+At the start, call `muse-squad:list_providers` (or read `muse-squad.toml`) to learn each provider's `enabled`, `max_concurrency`, `max_input_chars`, and `type`. Native providers are built into Muse and cannot be called by the MCP router; the router skips them and tries that member's HTTP providers in chain order. Providers with `enabled = false` are skipped entirely, including as a configured primary.
 
 - Never spawn more simultaneous native subagents of one native provider than its `max_concurrency`; batch extra exploration into later waves.
 - Parallel calls to `muse-squad` are safe: the router queues requests and serializes them per HTTP provider's `max_concurrency`.
@@ -1138,9 +1139,9 @@ At the start, call `muse-squad:list_providers` (or read `muse-squad.toml`) to le
 - `generate_code(member, prompt|task_spec, context|file_context, optional system/temperature/max_tokens)`
 - `critique_plan(member, plan_markdown, optional repo_context/temperature/max_tokens)`
 
-The router resolves the named member's `primary` first, then its `fallback` providers in order. Native providers are skipped by the router; HTTP providers are tried in chain order. There is no global fallback and no silent model switching.
+The router resolves the named member's `primary` first, then its `fallback` providers in order. Native providers are skipped by the router; HTTP providers are tried in chain order. Disabled providers are skipped entirely, even when listed as `primary`. There is no global fallback and no silent model switching.
 
-- **Native-primary member:** run the native subagent first. If it fails because of quota, rate limits, or subscription limits, retry that exact step through `muse-squad:critique_plan` (plan and review steps) or `muse-squad:generate_code` (code and diff steps) with `member="<name>"`. The router uses that member's HTTP fallbacks. Do not treat the failed native turn as the member's result.
+- **Native-primary member:** run the native subagent first. If the configured primary is disabled, skip the native turn and follow the generated wrapper's pinned provider. If it fails because of quota, rate limits, or subscription limits, retry that exact step through `muse-squad:critique_plan` (plan and review steps) or `muse-squad:generate_code` (code and diff steps) with `member="<name>"`. The router uses that member's HTTP fallbacks. Do not treat the failed native turn as the member's result.
 - **HTTP-primary member:** the generated wrapper pins a lightweight native runner and delegates heavy work to `muse-squad` with `member="<name>"`.
 
 If the member chain cannot serve the request, the tool returns a hard error listing every attempt. Stop planning, report the error and its attempts verbatim, and ask the user to fix that member's chain with `/squad-team`. Do not retry with a different member, a different provider, or inline work.
@@ -1194,16 +1195,16 @@ Always include a "Subagents / Providers" roster in wave, progress, and completio
 
 ## Provider limits, health, and member-scoped routing (read first)
 
-At the start, call `muse-squad:list_providers` (or read `muse-squad.toml`) to learn each provider's `type`, `max_concurrency`, and `max_input_chars`. Use `muse-squad:member_status("<name>")` to inspect a member's chain before assigning work. Native providers are built into Muse and cannot be called by the MCP router; the router skips them and tries that member's HTTP providers in chain order.
+At the start, call `muse-squad:list_providers` (or read `muse-squad.toml`) to learn each provider's `enabled`, `type`, `max_concurrency`, and `max_input_chars`. Use `muse-squad:member_status("<name>")` to inspect a member's chain before assigning work. Native providers are built into Muse and cannot be called by the MCP router; the router skips them and tries that member's HTTP providers in chain order. Providers with `enabled = false` are skipped entirely, including as a configured primary.
 
 `muse-squad:generate_code` and `muse-squad:critique_plan` are member-scoped:
 
 - `generate_code(member, prompt|task_spec, context|file_context, optional system/temperature/max_tokens)`
 - `critique_plan(member, plan_markdown, optional repo_context/temperature/max_tokens)`
 
-The router resolves the named member's `primary` first, then its `fallback` providers in order. There is no global fallback and no silent model switching.
+The router resolves the named member's `primary` first, then its `fallback` providers in order. Disabled providers are skipped entirely, even when listed as `primary`. There is no global fallback and no silent model switching.
 
-- **Native-primary member:** run the native subagent first. If it fails because of quota, rate limits, or subscription limits, retry that exact step through `muse-squad:generate_code` (implementation steps) or `muse-squad:critique_plan` (reviews) with `member="<name>"`. The router uses that member's HTTP fallbacks. Do not treat the failed native turn as the member's result.
+- **Native-primary member:** run the native subagent first. If the configured primary is disabled, skip the native turn and follow the generated wrapper's pinned provider. If it fails because of quota, rate limits, or subscription limits, retry that exact step through `muse-squad:generate_code` (implementation steps) or `muse-squad:critique_plan` (reviews) with `member="<name>"`. The router uses that member's HTTP fallbacks. Do not treat the failed native turn as the member's result.
 - **HTTP-primary member:** the generated wrapper pins a lightweight native runner and delegates heavy work to `muse-squad` with `member="<name>"`.
 - Parallel calls to `muse-squad` are safe: the router queues requests and serializes them per HTTP provider's `max_concurrency`. Do not add separate locking in members.
 
@@ -1625,6 +1626,10 @@ async function queryWithMember(memberInfo, requestTemplate) {
       attempts.push({ provider: name, error: 'provider not found in config' });
       continue;
     }
+    if (provider.enabled === false) {
+      attempts.push({ provider: name, error: 'provider is disabled in muse-squad.toml' });
+      continue;
+    }
     if (provider.type !== 'http') {
       attempts.push({
         provider: name,
@@ -1672,8 +1677,9 @@ function memberSummary(config, name) {
     return {
       name: providerName,
       type: provider.type,
+      enabled: provider.enabled !== false,
       model: provider.model,
-      callableByMcp: provider.type === 'http',
+      callableByMcp: provider.type === 'http' && provider.enabled !== false,
       ...queueSnapshot(providerName)
     };
   });
@@ -1692,6 +1698,7 @@ function providerSummary(config, name) {
   return {
     name,
     type: provider.type,
+    enabled: provider.enabled !== false,
     model: provider.model,
     ...(provider.base_url === undefined ? {} : { baseUrl: provider.base_url }),
     temperature: provider.temperature,
@@ -1899,7 +1906,7 @@ const PROVIDER_NAME_RE = /^[A-Za-z0-9._-]+$/;
 const MEMBER_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 
 const PROVIDER_KEYS = new Set([
-  'type', 'base_url', 'api_key', 'model', 'temperature', 'top_p',
+  'type', 'enabled', 'base_url', 'api_key', 'model', 'temperature', 'top_p',
   'max_tokens', 'max_input_chars', 'on_context_exceeded', 'extra_body',
   'max_concurrency', 'timeout_ms', 'queue_timeout_ms', 'max_retries'
 ]);
@@ -2112,18 +2119,31 @@ function parseToml(raw, file) {
   return root;
 }
 
-function expandEnv(value, file, keyPath) {
-  if (Array.isArray(value)) return value.map((item) => expandEnv(item, file, keyPath));
+function disabledApiKeyPaths(parsed) {
+  const providers = parsed.providers && typeof parsed.providers === 'object' &&
+    !Array.isArray(parsed.providers) ? parsed.providers : {};
+  return new Set(
+    Object.entries(providers)
+      .filter(([, provider]) => provider && provider.enabled === false)
+      .map(([name]) => `providers.${name}.api_key`)
+  );
+}
+
+function expandEnv(value, file, keyPath, disabledKeys = new Set()) {
+  if (Array.isArray(value)) {
+    return value.map((item) => expandEnv(item, file, keyPath, disabledKeys));
+  }
   if (value && typeof value === 'object') {
     const copy = {};
     for (const [key, item] of Object.entries(value)) {
-      copy[key] = expandEnv(item, file, keyPath ? `${keyPath}.${key}` : key);
+      copy[key] = expandEnv(item, file, keyPath ? `${keyPath}.${key}` : key, disabledKeys);
     }
     return copy;
   }
   if (typeof value !== 'string') return value;
   const key = String(keyPath || '').split('.').pop();
   if (key !== 'api_key' || !value.includes('${')) return value;
+  if (disabledKeys.has(keyPath)) return '';
   return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (match, name) => {
     const resolved = process.env[name];
     if (resolved === undefined || resolved === '') {
@@ -2178,6 +2198,24 @@ function normalizeProvider(name, raw, file) {
   if (type !== 'http' && type !== 'native') {
     throw new Error(`${label}.type must be "http" or "native"`);
   }
+  if (raw.enabled !== undefined && typeof raw.enabled !== 'boolean') {
+    throw new Error(`${label}.enabled must be a boolean`);
+  }
+  const enabled = raw.enabled === undefined ? true : raw.enabled;
+  if (!enabled) {
+    return {
+      name,
+      type,
+      enabled: false,
+      model: typeof raw.model === 'string' ? raw.model : '',
+      extra_body: {},
+      api_key: '',
+      max_concurrency: 1,
+      timeout_ms: 600000,
+      queue_timeout_ms: 300000,
+      max_retries: 2
+    };
+  }
   if (type === 'native' && (raw.base_url !== undefined || raw.api_key !== undefined)) {
     throw new Error(`${label}: native providers cannot declare base_url or api_key`);
   }
@@ -2191,6 +2229,7 @@ function normalizeProvider(name, raw, file) {
   const provider = {
     name,
     type,
+    enabled,
     model: requireString(raw.model, `${label}.model`),
     temperature: raw.temperature === undefined
       ? undefined
@@ -2305,7 +2344,7 @@ function loadConfig(options = {}) {
     throw new Error(`cannot read ${file}: ${error.message}`);
   }
   const parsed = parseToml(raw, file);
-  return validateConfig(expandEnv(parsed, file, ''), file);
+  return validateConfig(expandEnv(parsed, file, '', disabledApiKeyPaths(parsed)), file);
 }
 
 function redactSecrets(value) {
@@ -2546,6 +2585,16 @@ async function checkProviders(config, timeoutMs, secrets) {
   for (const provider of Object.values(config.providers)) {
     for (const secret of [provider.api_key]) {
       if (secret) secrets.add(String(secret));
+    }
+
+    if (provider.enabled === false) {
+      results.push({
+        provider: provider.name,
+        status: 'DISABLED',
+        ok: true,
+        detail: 'enabled = false (not pinged)'
+      });
+      continue;
     }
 
     if (provider.type === 'native') {
@@ -2937,7 +2986,12 @@ function firstSentence(text) {
 
 function chain(config, member) {
   const names = [member.primary, ...member.fallback];
-  return [...new Set(names)];
+  return [...new Set(names)].filter((name) => config.providers[name].enabled !== false);
+}
+
+function disabledChain(config, member) {
+  const names = [member.primary, ...member.fallback];
+  return [...new Set(names)].filter((name) => config.providers[name].enabled === false);
 }
 
 function chainLabel(config, member) {
@@ -2965,11 +3019,16 @@ function buildRoster(config, configFile) {
 
   for (const member of Object.values(config.squad.members)) {
     const primary = config.providers[member.primary];
+    const primaryLabel = primary.enabled === false
+      ? `\`${member.primary}\` (disabled)`
+      : `\`${member.primary}\` (${primary.type})`;
     const fallbacks = member.fallback.length
-      ? member.fallback.map((name) => `\`${name}\``).join(', ')
+      ? member.fallback.map((name) => config.providers[name].enabled === false
+        ? `\`${name}\` (disabled)`
+        : `\`${name}\``).join(', ')
       : '(none)';
     lines.push(
-      `| @${member.name} | \`${member.primary}\` (${primary.type}) | ${fallbacks} | ` +
+      `| @${member.name} | ${primaryLabel} | ${fallbacks} | ` +
       `${escapeCell(firstSentence(member.charter))} |`
     );
   }
@@ -2998,28 +3057,48 @@ function buildWrapper(config, memberName, configFile) {
   const member = config.squad.members[memberName];
   if (!member) throw new Error(`unknown member "${memberName}"`);
 
-  const primary = config.providers[member.primary];
-  const runnerModel = primary.type === 'http' ? RUNNER_MODEL : primary.model;
+  const configuredPrimary = config.providers[member.primary];
+  const activeChain = chain(config, member);
+  if (activeChain.length === 0) {
+    throw new Error(`member "${memberName}" has no enabled providers`);
+  }
+  const disabled = disabledChain(config, member);
+  const pinnedName = activeChain[0];
+  const pinnedProvider = config.providers[pinnedName];
+  const primaryLabel = configuredPrimary.enabled === false ? 'Provider' : 'Primary';
+  const runnerModel = pinnedProvider.type === 'http' ? RUNNER_MODEL : pinnedProvider.model;
+  const activeFallback = member.fallback.filter(
+    (name) => config.providers[name].enabled !== false
+  );
   const decisions = `${config.squad.memory_dir}/decisions.md`;
   const history = `${config.squad.memory_dir}/history/${member.name}.md`;
-  const chainNames = chain(config, member);
   const routing = [];
 
   routing.push(`Provider chain: ${chainLabel(config, member)}.`);
-
-  if (primary.type === 'native') {
+  if (disabled.length > 0) {
     routing.push(
-      `- Primary \`${member.primary}\` is a native Muse model and is pinned in frontmatter.`,
+      `- Disabled providers are skipped: ${disabled.map((name) => `\`${name}\``).join(', ')}.`
+    );
+  }
+  if (configuredPrimary.enabled === false) {
+    routing.push(
+      `- Configured primary \`${member.primary}\` is disabled; \`${pinnedName}\` is pinned in frontmatter instead.`
+    );
+  }
+
+  if (pinnedProvider.type === 'native') {
+    routing.push(
+      `- ${primaryLabel} \`${pinnedName}\` is a native Muse model and is pinned in frontmatter.`,
       `- If this native turn fails because of quota, rate limits, or subscription limits, retry the SAME STEP through \`muse-squad:generate_code\` (or \`muse-squad:critique_plan\` for plans) with \`member="${member.name}"\`.`,
       '- The router skips native providers it cannot call and tries the first HTTP provider in this member\'s chain.'
     );
   } else {
     routing.push(
-      `- Primary \`${member.primary}\` is an HTTP provider. The \`model: ${RUNNER_MODEL}\` frontmatter makes this a lightweight tool-runner; delegate heavy code generation to \`muse-squad:generate_code\` or plan critique to \`muse-squad:critique_plan\` with \`member="${member.name}"\`.`
+      `- ${primaryLabel} \`${pinnedName}\` is an HTTP provider. The \`model: ${RUNNER_MODEL}\` frontmatter makes this a lightweight tool-runner; delegate heavy code generation to \`muse-squad:generate_code\` or plan critique to \`muse-squad:critique_plan\` with \`member="${member.name}"\`.`
     );
   }
 
-  for (const name of member.fallback) {
+  for (const name of activeFallback) {
     const provider = config.providers[name];
     if (provider.type === 'http') {
       routing.push(
@@ -3032,9 +3111,12 @@ function buildWrapper(config, memberName, configFile) {
     }
   }
 
-  if (member.fallback.length === 0) {
+  if (activeFallback.length === 0) {
+    const fallbackLabel = disabled.some((name) => member.fallback.includes(name))
+      ? 'enabled fallback'
+      : 'fallback';
     routing.push(
-      '- This member has no fallback. If its provider fails, stop and report the error; do not switch models or work inline.'
+      `- This member has no ${fallbackLabel}. If its provider fails, stop and report the error; do not switch models or work inline.`
     );
   } else {
     routing.push(
@@ -3223,9 +3305,14 @@ schema = 1
 # type = "http"    OpenAI-compatible endpoint the MCP router can call.
 #                  api_key accepts a plaintext value or ${ENV_VAR}.
 #
+# enabled = true   Set false to disable a provider. The router, doctor, and
+#                  generated wrappers skip disabled providers; no need to
+#                  remove it from member chains or change max_concurrency.
+#
 # Use # comments in this file (TOML does not use ; comments).
 
 [providers.Home-Ornith]
+enabled = true             # set false to disable this provider
 type = "http"
 base_url = "http://127.0.0.1:8000/v1"
 api_key = "local-key"             # or "${LOCAL_MODEL_API_KEY}"
@@ -3241,6 +3328,7 @@ queue_timeout_ms = 300000
 max_retries = 2
 
 [providers.DeepSeek-Flash]
+enabled = true
 type = "http"
 base_url = "https://api.deepseek.com/v1"
 api_key = "replace-me"            # e.g. "${DEEPSEEK_API_KEY}"
@@ -3249,16 +3337,19 @@ max_concurrency = 4
 timeout_ms = 600000
 
 [providers.Muse-Spark]
+enabled = true
 type = "native"
 model = "muse-spark-1.3-contributor"
 max_concurrency = 2
 
 [providers.Muse-Ember]
+enabled = true
 type = "native"
 model = "muse-ember-1.0"
 max_concurrency = 4
 
 [providers.Muse-Wonder]
+enabled = true
 type = "native"
 model = "muse-wonder-1.0"
 max_concurrency = 2
@@ -3306,7 +3397,7 @@ This block is managed by muse-squad. Put durable changes in the muse-squad repo 
 
 `~/.config/muse/muse-squad.toml` is the single source of truth (`schema = 1`). It holds the AI providers and the squad in one TOML file. There is no second config file and no migration step; edit the TOML directly or use `/squad-team`.
 
-- Providers live under `[providers.<Name>]`. `type = "native"` providers are built into Muse; `type = "http"` providers point at an OpenAI-compatible server.
+- Providers live under `[providers.<Name>]`. `type = "native"` providers are built into Muse; `type = "http"` providers point at an OpenAI-compatible server. Every provider has `enabled = true` by default; set `enabled = false` to disable one without removing it from member chains.
 - Members live under `[squad.<name>]` and define only `primary`, an ordered `fallback` array, and a `charter`. At least one member is required.
 - The generated roster is `~/.config/muse/squad/team.md`; generated member wrappers are `~/.config/muse/agents/<name>.md`. Do not hand-edit generated files.
 
@@ -3325,9 +3416,9 @@ The MCP server is `muse-squad`. It exposes:
 - `member_status(member?)` — omit `member` for an overview.
 - `list_providers`
 
-`generate_code` and `critique_plan` are member-scoped. The router resolves that member's `primary` first, then its `fallback` providers in order. Native providers cannot be called by the router; they are skipped, and the router tries that member's HTTP providers in chain order. If no provider in the member's chain can serve the request, the tool returns a hard error listing every attempt. There is no global fallback and no silent model switching.
+`generate_code` and `critique_plan` are member-scoped. The router resolves that member's `primary` first, then its `fallback` providers in order. Native providers cannot be called by the router; they are skipped, and the router tries that member's HTTP providers in chain order. Providers with `enabled = false` are skipped entirely, even when listed as `primary`, and the next enabled provider in that member's chain serves the work. If no enabled provider in the member's chain can serve the request, the tool returns a hard error listing every attempt. There is no global fallback and no silent model switching.
 
-- For a native-primary member, run the native subagent first. If it fails because of quota, rate limits, or subscription limits, retry that same step through `muse-squad:generate_code` or `muse-squad:critique_plan` with `member="<name>"`. The router uses that member's HTTP fallbacks. Do not treat the failed native turn as the member's result.
+- For a native-primary member, run the native subagent first. If the configured primary is disabled, skip that native turn and follow the generated wrapper's pinned provider. If the native turn fails because of quota, rate limits, or subscription limits, retry that same step through `muse-squad:generate_code` or `muse-squad:critique_plan` with `member="<name>"`. The router uses that member's HTTP fallbacks. Do not treat the failed native turn as the member's result.
 - For an HTTP-primary member, the generated wrapper pins a lightweight native runner and delegates heavy work to `muse-squad:generate_code` or `muse-squad:critique_plan` with `member="<name>"`.
 - Use `member_status` and `list_providers` to inspect limits and health before batching work. API keys are redacted.
 

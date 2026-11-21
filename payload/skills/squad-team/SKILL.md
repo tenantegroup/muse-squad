@@ -16,7 +16,7 @@ Edit only `muse-squad.toml`. Do not hand-edit `squad/team.md`, `agents/<name>.md
 
 The file uses `schema = 1` and these tables:
 
-- `[providers.<Name>]` — a provider name may contain letters, numbers, `.`, `_`, and `-`. `type = "native"` requires `model` and `max_concurrency`. `type = "http"` requires `base_url`, `api_key`, and `model`, and accepts `temperature`, `top_p`, `max_tokens`, `max_input_chars`, `on_context_exceeded`, `max_concurrency`, `timeout_ms`, `queue_timeout_ms`, and `max_retries`. `api_key` may be plaintext or `${ENV_VAR}`.
+- `[providers.<Name>]` — a provider name may contain letters, numbers, `.`, `_`, and `-`. `enabled` defaults to `true`; set `false` to disable the provider without removing it from member chains. `type = "native"` requires `model` and `max_concurrency`. `type = "http"` requires `base_url`, `api_key`, and `model`, and accepts `temperature`, `top_p`, `max_tokens`, `max_input_chars`, `on_context_exceeded`, `max_concurrency`, `timeout_ms`, `queue_timeout_ms`, and `max_retries`. `api_key` may be plaintext or `${ENV_VAR}`.
 - `[squad.<name>]` — one per member, with only `primary`, an ordered `fallback` array, and `charter`.
 
 Every member needs at least one provider in its chain: `primary` and every `fallback` entry must match a provider table name exactly. Validate all cross-references before writing. Never invent a provider name. Member names are lowercase slugs (`a-z0-9-`); retired helper names are reserved. Keep `schema = 1`. Do not add display names, responsibilities, labels, or any new member keys. Use `#` for TOML comments, not `;`.
@@ -28,7 +28,7 @@ Ask which change to make unless the user already stated it clearly:
 - add, rename, or remove a provider (check every member chain before removing);
 - add, rename, or remove a member (at least one member must remain);
 - change a member's `primary`, reorder or replace its `fallback` array, or rewrite its `charter`;
-- change any provider setting, including moving a secret into `${ENV_VAR}`.
+- change any provider setting, including moving a secret into `${ENV_VAR}` or setting `enabled = false` to disable a provider without removing it from member chains.
 
 Before writing, copy `muse-squad.toml` to a timestamped sibling backup such as `muse-squad.toml.bak.20261121-143022`. Apply the smallest valid TOML edit, then parse the result and re-check every provider reference. If parsing or validation fails, restore the backup and stop.
 

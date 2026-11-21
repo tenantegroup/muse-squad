@@ -373,6 +373,10 @@ async function queryWithMember(memberInfo, requestTemplate) {
       attempts.push({ provider: name, error: 'provider not found in config' });
       continue;
     }
+    if (provider.enabled === false) {
+      attempts.push({ provider: name, error: 'provider is disabled in muse-squad.toml' });
+      continue;
+    }
     if (provider.type !== 'http') {
       attempts.push({
         provider: name,
@@ -420,8 +424,9 @@ function memberSummary(config, name) {
     return {
       name: providerName,
       type: provider.type,
+      enabled: provider.enabled !== false,
       model: provider.model,
-      callableByMcp: provider.type === 'http',
+      callableByMcp: provider.type === 'http' && provider.enabled !== false,
       ...queueSnapshot(providerName)
     };
   });
@@ -440,6 +445,7 @@ function providerSummary(config, name) {
   return {
     name,
     type: provider.type,
+    enabled: provider.enabled !== false,
     model: provider.model,
     ...(provider.base_url === undefined ? {} : { baseUrl: provider.base_url }),
     temperature: provider.temperature,

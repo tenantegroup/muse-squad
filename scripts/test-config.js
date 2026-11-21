@@ -203,6 +203,23 @@ async function main() {
     assert(loaded.providers.Local.max_concurrency === 2, 'provider max_concurrency');
     assert(loaded.providers.Third.api_key === '', 'empty api_key is allowed');
     assert(loaded.providers.Second.type === 'native', 'native provider type');
+    assert(loaded.providers.Local.enabled === true, 'enabled defaults to true');
+    const disabledFile = path.join(tempDir, 'disabled.toml');
+    delete process.env.MUSE_SQUAD_TEST_DISABLED_KEY;
+    write(disabledFile, validConfigText().replace(
+      '[providers.Second]\ntype = "native"',
+      [
+        '[providers.Second]',
+        'enabled = false',
+        'max_concurrency = 0',
+        'api_key = "${MUSE_SQUAD_TEST_DISABLED_KEY}"',
+        'type = "native"'
+      ].join('\n')
+    ));
+    const disabledConfig = config.loadConfig({ config_file: disabledFile });
+    assert(disabledConfig.providers.Second.enabled === false, 'enabled = false is parsed');
+    assert(disabledConfig.providers.Second.api_key === '', 'disabled env key is not resolved');
+    assert(disabledConfig.providers.Local.enabled === true, 'other providers stay enabled');
     assert(loaded.squad.members.alpha.primary === 'Local', 'member primary');
     assert(JSON.stringify(loaded.squad.members.alpha.fallback) === '["Second","Third"]',
       'ordered fallback');
@@ -233,6 +250,14 @@ async function main() {
       assert(Number.isInteger(value) && value >= floor, `${key} has a usable default (got ${value})`);
     }
     assert(defaults.providers.Basic.api_key === '', 'api_key defaults to an empty string');
+    assert(defaults.providers.Basic.enabled === true, 'enabled defaults to true without an explicit key');
+
+    const bundledDefault = config.loadConfig({
+      config_file: path.join(ROOT, 'payload', 'muse-squad.default.toml')
+    });
+    for (const [name, provider] of Object.entries(bundledDefault.providers)) {
+      assert(provider.enabled === true, `bundled default provider ${name} is explicitly enabled`);
+    }
 
     delete process.env[ENV_KEY];
     expectThrows(() => config.loadConfig({ config_file: validFile }),
@@ -259,6 +284,16 @@ async function main() {
     const base = validConfigText();
 
     expectInvalid(base.replace('schema = 1', 'schema = 2'), /schema/, 'wrong schema');
+    expectInvalid(
+      base.replace('max_concurrency = 2', 'max_concurrency = 0'),
+      /max_concurrency/,
+      'zero max_concurrency is rejected for enabled providers'
+    );
+    expectInvalid(
+      base.replace('[providers.Second]\ntype = "native"', '[providers.Second]\nenabled = "no"\ntype = "native"'),
+      /enabled.*boolean/,
+      'non-boolean enabled is rejected'
+    );
     expectInvalid('schema = 1\n[squad.member]\nprimary = "P"\ncharter = "c"\n',
       /provider/, 'at least one provider');
     expectInvalid('schema = 1\n[providers.P]\ntype = "native"\nmodel = "m"\n[squad]\n',

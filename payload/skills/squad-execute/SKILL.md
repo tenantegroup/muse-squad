@@ -34,16 +34,16 @@ Always include a "Subagents / Providers" roster in wave, progress, and completio
 
 ## Provider limits, health, and member-scoped routing (read first)
 
-At the start, call `muse-squad:list_providers` (or read `muse-squad.toml`) to learn each provider's `type`, `max_concurrency`, and `max_input_chars`. Use `muse-squad:member_status("<name>")` to inspect a member's chain before assigning work. Native providers are built into Muse and cannot be called by the MCP router; the router skips them and tries that member's HTTP providers in chain order.
+At the start, call `muse-squad:list_providers` (or read `muse-squad.toml`) to learn each provider's `enabled`, `type`, `max_concurrency`, and `max_input_chars`. Use `muse-squad:member_status("<name>")` to inspect a member's chain before assigning work. Native providers are built into Muse and cannot be called by the MCP router; the router skips them and tries that member's HTTP providers in chain order. Providers with `enabled = false` are skipped entirely, including as a configured primary.
 
 `muse-squad:generate_code` and `muse-squad:critique_plan` are member-scoped:
 
 - `generate_code(member, prompt|task_spec, context|file_context, optional system/temperature/max_tokens)`
 - `critique_plan(member, plan_markdown, optional repo_context/temperature/max_tokens)`
 
-The router resolves the named member's `primary` first, then its `fallback` providers in order. There is no global fallback and no silent model switching.
+The router resolves the named member's `primary` first, then its `fallback` providers in order. Disabled providers are skipped entirely, even when listed as `primary`. There is no global fallback and no silent model switching.
 
-- **Native-primary member:** run the native subagent first. If it fails because of quota, rate limits, or subscription limits, retry that exact step through `muse-squad:generate_code` (implementation steps) or `muse-squad:critique_plan` (reviews) with `member="<name>"`. The router uses that member's HTTP fallbacks. Do not treat the failed native turn as the member's result.
+- **Native-primary member:** run the native subagent first. If the configured primary is disabled, skip the native turn and follow the generated wrapper's pinned provider. If it fails because of quota, rate limits, or subscription limits, retry that exact step through `muse-squad:generate_code` (implementation steps) or `muse-squad:critique_plan` (reviews) with `member="<name>"`. The router uses that member's HTTP fallbacks. Do not treat the failed native turn as the member's result.
 - **HTTP-primary member:** the generated wrapper pins a lightweight native runner and delegates heavy work to `muse-squad` with `member="<name>"`.
 - Parallel calls to `muse-squad` are safe: the router queues requests and serializes them per HTTP provider's `max_concurrency`. Do not add separate locking in members.
 

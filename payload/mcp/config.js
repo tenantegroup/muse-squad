@@ -14,7 +14,7 @@ const PROVIDER_NAME_RE = /^[A-Za-z0-9._-]+$/;
 const MEMBER_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
 
 const PROVIDER_KEYS = new Set([
-  'type', 'base_url', 'api_key', 'model', 'temperature', 'top_p',
+  'type', 'enabled', 'base_url', 'api_key', 'model', 'temperature', 'top_p',
   'max_tokens', 'max_input_chars', 'on_context_exceeded', 'extra_body',
   'max_concurrency', 'timeout_ms', 'queue_timeout_ms', 'max_retries'
 ]);
@@ -227,18 +227,31 @@ function parseToml(raw, file) {
   return root;
 }
 
-function expandEnv(value, file, keyPath) {
-  if (Array.isArray(value)) return value.map((item) => expandEnv(item, file, keyPath));
+function disabledApiKeyPaths(parsed) {
+  const providers = parsed.providers && typeof parsed.providers === 'object' &&
+    !Array.isArray(parsed.providers) ? parsed.providers : {};
+  return new Set(
+    Object.entries(providers)
+      .filter(([, provider]) => provider && provider.enabled === false)
+      .map(([name]) => `providers.${name}.api_key`)
+  );
+}
+
+function expandEnv(value, file, keyPath, disabledKeys = new Set()) {
+  if (Array.isArray(value)) {
+    return value.map((item) => expandEnv(item, file, keyPath, disabledKeys));
+  }
   if (value && typeof value === 'object') {
     const copy = {};
     for (const [key, item] of Object.entries(value)) {
-      copy[key] = expandEnv(item, file, keyPath ? `${keyPath}.${key}` : key);
+      copy[key] = expandEnv(item, file, keyPath ? `${keyPath}.${key}` : key, disabledKeys);
     }
     return copy;
   }
   if (typeof value !== 'string') return value;
   const key = String(keyPath || '').split('.').pop();
   if (key !== 'api_key' || !value.includes('${')) return value;
+  if (disabledKeys.has(keyPath)) return '';
   return value.replace(/\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g, (match, name) => {
     const resolved = process.env[name];
     if (resolved === undefined || resolved === '') {
@@ -293,6 +306,24 @@ function normalizeProvider(name, raw, file) {
   if (type !== 'http' && type !== 'native') {
     throw new Error(`${label}.type must be "http" or "native"`);
   }
+  if (raw.enabled !== undefined && typeof raw.enabled !== 'boolean') {
+    throw new Error(`${label}.enabled must be a boolean`);
+  }
+  const enabled = raw.enabled === undefined ? true : raw.enabled;
+  if (!enabled) {
+    return {
+      name,
+      type,
+      enabled: false,
+      model: typeof raw.model === 'string' ? raw.model : '',
+      extra_body: {},
+      api_key: '',
+      max_concurrency: 1,
+      timeout_ms: 600000,
+      queue_timeout_ms: 300000,
+      max_retries: 2
+    };
+  }
   if (type === 'native' && (raw.base_url !== undefined || raw.api_key !== undefined)) {
     throw new Error(`${label}: native providers cannot declare base_url or api_key`);
   }
@@ -306,6 +337,7 @@ function normalizeProvider(name, raw, file) {
   const provider = {
     name,
     type,
+    enabled,
     model: requireString(raw.model, `${label}.model`),
     temperature: raw.temperature === undefined
       ? undefined
@@ -420,7 +452,7 @@ function loadConfig(options = {}) {
     throw new Error(`cannot read ${file}: ${error.message}`);
   }
   const parsed = parseToml(raw, file);
-  return validateConfig(expandEnv(parsed, file, ''), file);
+  return validateConfig(expandEnv(parsed, file, '', disabledApiKeyPaths(parsed)), file);
 }
 
 function redactSecrets(value) {

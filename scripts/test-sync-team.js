@@ -42,6 +42,7 @@ function toml({ schema = 1, squadName = 'Test Squad', memoryDir = '.muse/squad',
   const lines = [`schema = ${schema}`, ''];
   for (const [name, provider] of Object.entries(providers)) {
     lines.push(`[providers.${name}]`, `type = ${q(provider.type)}`);
+    if (provider.enabled === false) lines.push('enabled = false');
     if (provider.type === 'http') {
       lines.push(
         `base_url = ${q(provider.base_url)}`,
@@ -260,6 +261,42 @@ try {
     expectRun(['--config-dir', configDir], { ...process.env, MUSE_CONFIG_DIR: configDir }),
     'unchanged',
     'MUSE_CONFIG_DIR is honored'
+  );
+
+  // Disabled providers are skipped without editing member chains.
+  const disabledProviders = {
+    ...providers,
+    'Native-Primary': { ...providers['Native-Primary'], enabled: false }
+  };
+  writeConfig({ providers: disabledProviders, members: updatedMembers });
+  expectContains(expectRun(baseArgs), 'updated', 'disabling a provider regenerates files');
+  const disabledRoster = fs.readFileSync(rosterFile, 'utf8');
+  expectContains(
+    disabledRoster,
+    '| @atlas | `Native-Primary` (disabled) |',
+    'roster marks a disabled primary'
+  );
+  expectContains(
+    disabledRoster,
+    '`Http-Fallback`, `Native-Fallback` |',
+    'roster keeps unchanged fallbacks'
+  );
+  const disabledAtlas = frontmatter(path.join(agentsDir, 'atlas.md'));
+  assert(disabledAtlas.fields.model === RUNNER_MODEL, 'disabled native primary is not pinned');
+  expectContains(
+    disabledAtlas.content,
+    'Disabled providers are skipped: `Native-Primary`.',
+    'wrapper explains the disabled provider'
+  );
+  expectContains(
+    disabledAtlas.content,
+    'Provider chain: `Http-Fallback` (http) -> `Native-Fallback` (native).',
+    'wrapper chain excludes disabled providers'
+  );
+  expectContains(
+    disabledAtlas.content,
+    'Configured primary `Native-Primary` is disabled; `Http-Fallback` is pinned in frontmatter instead.',
+    'wrapper explains the pinned replacement'
   );
 
   const uninstall = expectRun([...baseArgs, '--uninstall']);
