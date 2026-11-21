@@ -19,10 +19,15 @@ Nothing here is magic. It is just files that the installer drops into `~/.config
 | `mcp/sync-team.js` | Generates the roster page and one native agent wrapper per member. |
 | `squad/team.md` | Human-readable roster generated from `squad-team.json`. |
 | `agents/<name>.md` | Generated wrappers for the named team members. |
+| `.agents/agents/<name>.md` | Project-scoped wrappers for matching `projects` overrides; Muse loads these before global user agents. |
+| `.agents/squad/team.md` | Project-scoped roster generated when a `projects` override matches this repo. |
+| `skills/squad-team/SKILL.md` | The `/squad-team` command. Edits the roster and regenerates wrappers. |
+| `skills/squad-doctor/SKILL.md` | The `/squad-doctor` command. Diagnoses MCP registration, endpoints, and roster drift. |
 | `skills/squad-plan/SKILL.md` | The `/squad-plan` command. Writes `.muse/PLAN.md`. |
 | `skills/squad-execute/SKILL.md` | The `/squad-execute` command. Does the work in waves and checks it. |
 | `mcp/bridge.js` | The `custom-coder` helper server. Talks to your own models. |
 | `mcp/register-settings.js` | Adds `custom-coder` to Muse's settings without breaking your other settings. |
+| `mcp/doctor.js` | Read-only health-check CLI used by `/squad-doctor`. |
 
 ---
 
@@ -100,7 +105,7 @@ Customize Squad team members & models now? [Y/n]
 
 Press Enter for the default team, or `Y` to rename the five members, change their roles, and pick each primary/backup model. The model menu is built from the three built-in Muse models, any extra `muse_models` keys, and every alias under `endpoints` in `endpoints.json`. You can type a menu number or any model/endpoint name directly. Extra members are optional.
 
-`curl | bash` has no TTY, so it skips the wizard silently. `--defaults` does the same even in a terminal. `--update` always forwards `--defaults` to the downloaded installer, so an existing custom roster is preserved while wrapper templates refresh.
+`curl | bash` has no TTY, so it skips the wizard silently. `--defaults` does the same even in a terminal. `--update` always forwards `--defaults` to the downloaded installer, so an existing custom roster is preserved while wrapper templates refresh. Later, use `/squad-team` for targeted roster changes without re-running the wizard.
 
 ### Backups
 
@@ -126,7 +131,22 @@ Backups contain your plaintext API keys from `endpoints.json`. Keep them private
 
 ## How to use it
 
-### 1. Make a plan
+### 1. Manage your team (/squad-team)
+
+```
+/squad-team
+```
+
+It will:
+
+1. Read `squad-team.json`, `endpoints.json`, and the generated `squad/team.md`.
+2. Add, rename, or remove members; change roles, responsibilities, charters, or primary/backup models; or set a project-only override.
+3. Back up `squad-team.json`, validate names and models, apply the smallest JSON edit, and run `sync-team.js`.
+4. Regenerate `squad/team.md` and the named `agents/<name>.md` wrappers; a matching project override also produces `.agents/squad/team.md` and `.agents/agents/<name>.md`, then show the final roster.
+
+Use it when you want a different lead, a new specialist, cheaper local defaults, or a project-specific roster. It never edits `endpoints.json` or the generic agents. For the original interactive five-member setup, re-run the installer with `--reconfigure-team`.
+
+### 2. Make a plan
 
 In Muse Code, type:
 
@@ -143,7 +163,7 @@ It will:
 
 It will not change product code. If `.muse/PLAN.md` already has an `## Execution Log & Decisions` section, it leaves that alone.
 
-### 2. Do the work
+### 3. Do the work
 
 ```
 /squad-execute
@@ -161,6 +181,20 @@ It will:
 That log is the point: if your chat gets long or you come back tomorrow, the "why" is saved on disk.
 
 You do not have to do anything special. Just keep answering its questions until it says it is done.
+
+### 4. Diagnose problems (/squad-doctor)
+
+```
+/squad-doctor
+```
+
+It runs the read-only `mcp/doctor.js` and reports:
+
+1. whether `custom-coder` is registered in `settings.json`;
+2. a live `GET /v1/models` check for every `endpoints.json` alias;
+3. whether `squad-team.json`, `squad/team.md`, and the generated `agents/<name>.md` wrappers agree.
+
+It never prints API keys and does not need `custom-coder` to be working. Exit code `0` means healthy, `1` means a check failed, and `2` means the diagnostic could not run. Use it first when a local model server stops responding.
 
 ### Normal CLI sessions (no slash command)
 
@@ -186,9 +220,9 @@ Normal sessions stay lightweight: no `.muse/PLAN.md` unless you invoke `/squad-p
 | `@hockney` | Tester | `local-coder` | `muse-ember-1.0` | Tests and verification |
 | `@verbal` | Scribe | `muse-ember-1.0` | `local-coder` | Decisions and handoff notes |
 
-The wizard can rename any member, replace a role (including a custom role such as `Security`), and change either model. Mention the resulting `@<name>` in normal chat or spawn that named agent from `/squad-plan` and `/squad-execute`.
+Use `/squad-team` (or the installer wizard on a fresh install) to rename any member, replace a role (including a custom role such as `Security`), and change either model. Mention the resulting `@<name>` in normal chat or spawn that named agent from `/squad-plan` and `/squad-execute`.
 
-`sync-team.js` turns that roster into `squad/team.md` and `agents/<name>.md`. A member whose primary is a native Muse model gets that model in `model:` frontmatter. A member whose primary is a `custom-coder` alias gets `model: muse-ember-1.0` as a lightweight tool-runner and delegates heavy work to `generate_code` / `critique_plan` with `endpoint="<primary>"` and `fallback_endpoint="<backup>"` when the backup is another endpoint.
+`sync-team.js` turns that roster into `squad/team.md` and `agents/<name>.md`. A member whose primary is a native Muse model gets that model in `model:` frontmatter. A member whose primary is a `custom-coder` alias gets `model: muse-ember-1.0` as a lightweight tool-runner and delegates heavy work to `generate_code` / `critique_plan` with `endpoint="<primary>"` and `fallback_endpoint="<backup>"` when the backup is another endpoint. For a native-primary member whose backup is a custom endpoint, the generated prompt and both slash commands require the orchestrator to retry the same step through `custom-coder` if the native subagent fails on quota/rate limits: `@keaton` retries via `grill-reviewer` instead of silently dropping the step or switching models.
 
 Project memory lives in the repo, not in your global config:
 
@@ -197,7 +231,7 @@ Project memory lives in the repo, not in your global config:
 
 The first `/squad-plan`, `/squad-execute`, or named-member session creates those paths if missing. Each member reads them before work and appends concise learnings when finished.
 
-To override the roster for one project, add a keyed entry under `projects` in `squad-team.json` using the repo directory name (or its absolute path), with a `members` object containing partial overrides:
+`/squad-team` can also add a keyed entry under `projects` in `squad-team.json` using the repo directory name (or its absolute path), with a `members` object containing partial overrides:
 
 ```json
 {
@@ -210,7 +244,9 @@ To override the roster for one project, add a keyed entry under `projects` in `s
 }
 ```
 
-Re-run the installer (or `node ~/.config/muse/mcp/sync-team.js`) after editing the roster. The generic `worker.md`, `plan-reviewer.md`, and `general-purpose.md` stay untouched.
+Overrides never rewrite the global roster or wrappers. `sync-team.js` always generates `squad/team.md` and `agents/<name>.md` from the base roster. When it runs with `--project-dir "$PWD"` from a matching repo, it writes the merged roster to `.agents/squad/team.md` and only the patched wrappers to `.agents/agents/<name>.md`; Muse loads project agents before user agents, so `@mcmanus` uses `grill-reviewer` only in `my-api`. Stale generated project wrappers are removed when a patch is cleared.
+
+After editing the roster, run `node ~/.config/muse/mcp/sync-team.js --project-dir "$PWD"` from the repo root, re-run the installer, or use `/squad-team` (which runs it for you). The generic `worker.md`, `plan-reviewer.md`, and `general-purpose.md` stay untouched.
 
 ### Seeing what is running
 
@@ -308,7 +344,7 @@ Native subagents normally inherit the model you have selected in the main Muse C
 
 **About Muse subagents:** the router cannot see native Muse subagents, so `/squad-plan` and `/squad-execute` read `muse_models` and split work into waves themselves.
 
-**If endpoints are missing or not working:** muse-squad should still be usable. `/squad-plan` and `/squad-execute` check endpoint health up front, warn you, and fall back to native Muse models/subagents (no custom-coder generation/critique) instead of blocking. Fix `endpoints.json` and make sure the configured OpenAI-compatible server is reachable to re-enable `custom-coder` tools.
+**If endpoints are missing or not working:** muse-squad should still be usable. `/squad-plan` and `/squad-execute` check endpoint health up front, warn you, and fall back to native Muse models/subagents (no custom-coder generation/critique) instead of blocking. Fix `endpoints.json` and make sure the configured OpenAI-compatible server is reachable to re-enable `custom-coder` tools. Run `/squad-doctor` to see which alias is down without relying on the MCP server.
 
 > API keys sit in `endpoints.json` as plain text. Use local or limited keys, not a production key.
 
@@ -325,7 +361,7 @@ Uninstalling removes the managed files and unregisters `custom-coder`, but **kee
 | `coder_status` | See one endpoint's settings, current queue length, and limits. Keys are hidden. |
 | `list_endpoints` | See each endpoint's `max_concurrency`, `max_tokens`, `max_input_chars`, and `extra_body` keys (secrets hidden), plus `muse_models` and queue settings. The skills read this at startup. |
 
-If endpoints are not configured or unreadable, `coder_status`/`list_endpoints` return a warning payload (`available:false`) instead of failing so callers can fall back to native Muse models. `generate_code`/`critique_plan` will report a clear error until endpoints are fixed. |
+If endpoints are not configured or unreadable, `coder_status`/`list_endpoints` return a warning payload (`available:false`) instead of failing so callers can fall back to native Muse models. `generate_code`/`critique_plan` will report a clear error until endpoints are fixed.
 
 `generate_code` and `critique_plan` also accept an optional `max_tokens` override. `generate_code` accepts `task_spec` instead of `prompt`, and `file_context` instead of `context`.
 

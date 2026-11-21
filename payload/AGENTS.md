@@ -15,7 +15,7 @@ Keep the main session focused on decisions and integration. Delegating scoped wo
 
 ### Persistent named team
 
-Read `~/.config/muse/squad-team.json` (or the generated `~/.config/muse/squad/team.md`) and use `@<name>` for recurring work in normal sessions:
+Read `~/.config/muse/squad-team.json` (or the generated `~/.config/muse/squad/team.md`) and use `@<name>` for recurring work in normal sessions. In a repository, prefer `.agents/squad/team.md` and `.agents/agents/<name>.md` when present; those project-scoped files override the global roster and wrappers:
 
 - `@keaton` (Lead): architecture, decomposition, and plan review.
 - `@fenster` (Frontend): UI components, styles, and client-side files.
@@ -23,7 +23,7 @@ Read `~/.config/muse/squad-team.json` (or the generated `~/.config/muse/squad/te
 - `@hockney` (Tester): verification, test suites, and regression coverage.
 - `@verbal` (Scribe): durable decisions and handoff notes.
 
-Each member has a charter, a `primary` model/endpoint, and a `backup`. For `custom-coder` calls, pass the member's `backup` as `fallback_endpoint` so only that member's chain is used. In a repository, initialize `.muse/squad/decisions.md` and `.muse/squad/history/` on first use. Named members read both the shared decisions file and their own history file before work, and append concise lasting learnings when finished. `@verbal` appends decisions after each wave or plan sign-off.
+Use `/squad-team` for targeted roster changes; generated wrappers and the roster page are not hand-edited. Each member has a charter, a `primary` model/endpoint, and a `backup`. For `custom-coder` calls, pass the member's `backup` as `fallback_endpoint` so only that member's chain is used. In a repository, initialize `.muse/squad/decisions.md` and `.muse/squad/history/` on first use. Named members read both the shared decisions file and their own history file before work, and append concise lasting learnings when finished. `@verbal` appends decisions after each wave or plan sign-off.
 
 ### Cost-saving custom-coder routing
 
@@ -32,8 +32,11 @@ When `custom-coder` is available, prefer it for boilerplate generation, unit-tes
 - `generate_code` for small, scoped diffs.
 - `critique_plan` for a second opinion on plans and designs.
 - `list_endpoints` and `coder_status` to check aliases, limits, and health before batching work.
+- `/squad-doctor` when routing looks broken: it checks MCP registration, live `/v1/models` reachability for every alias, and roster/wrapper drift without using `custom-coder` or printing keys.
 
 Use the aliases and limits in `~/.config/muse/endpoints.json`. Treat `servedBy`, `servedModel`, and `fallbackUsed` from tool result `meta` as the source of truth. If the tool reports that it is unavailable or misconfigured, warn once and continue with native tools.
+
+If a named native subagent fails with a quota, rate-limit, or subscription error, the orchestrator retries that exact step through `custom-coder` using that member's `backup` as both `endpoint` and `fallback_endpoint`. Report the retry with the actual `servedBy` / `fallbackUsed`; never treat the failed turn as the member's result or silently switch models. Only fall back to inline/native work if custom-coder cannot serve the retry, and say so explicitly.
 
 ### Global guardrails
 

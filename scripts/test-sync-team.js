@@ -87,6 +87,12 @@ try {
   assert(keaton.fields.model === 'muse-spark-1.3-contributor', 'keaton pins native primary');
   expectContains(keaton.content, '`grill-reviewer`', 'keaton custom backup');
   expectContains(keaton.content, 'fallback_endpoint="grill-reviewer"', 'keaton restricted fallback');
+  expectContains(keaton.content, 'quota, rate-limit, or subscription error', 'keaton native quota fallback trigger');
+  expectContains(
+    keaton.content,
+    'the orchestrator must retry the same step through `custom-coder` using backup `grill-reviewer`',
+    'keaton orchestrator retry instruction'
+  );
   expectContains(keaton.content, '## Charter', 'keaton charter');
   expectContains(keaton.content, '.muse/squad/history/keaton.md', 'keaton history');
   expectContains(keaton.content, '[Keaton (Lead) | muse-spark-1.3-contributor]', 'keaton TUI label');
@@ -109,6 +115,11 @@ try {
   const verbal = frontmatter(path.join(configDir, 'agents', 'verbal.md'));
   assert(verbal.fields.model === 'muse-ember-1.0', 'verbal pins native primary');
   expectContains(verbal.content, '`local-coder`', 'verbal custom backup');
+  expectContains(
+    verbal.content,
+    'the orchestrator must retry the same step through `custom-coder` using backup `local-coder`',
+    'verbal orchestrator retry instruction'
+  );
   expectContains(verbal.content, '[Verbal (Scribe) | muse-ember-1.0]', 'verbal TUI label');
 
   assert(
@@ -126,24 +137,75 @@ try {
     members: { fenster: { primary: 'grill-reviewer' } }
   };
   fs.writeFileSync(teamFile, JSON.stringify(team, null, 2));
-  const overridden = run([
+  const repoDir = path.join(tempDir, 'my-api');
+  fs.mkdirSync(repoDir, { recursive: true });
+  const overrideArgs = [
     '--config-dir', configDir,
     '--team-file', teamFile,
     '--endpoints-file', endpointsFile,
-    '--project-name', 'override-project'
-  ]);
-  expectContains(overridden, 'updated', 'project override regenerated a wrapper');
-  expectContains(fs.readFileSync(path.join(configDir, 'squad', 'team.md'), 'utf8'), '# Override Squad', 'project team_name override');
-  const overriddenFenster = fs.readFileSync(path.join(configDir, 'agents', 'fenster.md'), 'utf8');
-  expectContains(overriddenFenster, 'endpoint="grill-reviewer"', 'project primary override');
-  assert(!overriddenFenster.includes('endpoint="local-coder"'), 'old primary override is gone');
+    '--project-name', 'override-project',
+    '--project-dir', repoDir
+  ];
+  const globalRosterBefore = fs.readFileSync(path.join(configDir, 'squad', 'team.md'), 'utf8');
+  const globalFensterBefore = fs.readFileSync(path.join(configDir, 'agents', 'fenster.md'), 'utf8');
 
-  const removed = run([...baseArgs, '--uninstall']);
+  const overridden = run(overrideArgs);
+  expectContains(overridden, 'project override override-project', 'project override output');
+  expectContains(overridden, 'generated', 'project override generated a wrapper');
+  assert(
+    fs.readFileSync(path.join(configDir, 'squad', 'team.md'), 'utf8') === globalRosterBefore,
+    'project override does not change the global roster'
+  );
+  assert(
+    fs.readFileSync(path.join(configDir, 'agents', 'fenster.md'), 'utf8') === globalFensterBefore,
+    'project override does not change the global wrapper'
+  );
+  expectContains(globalRosterBefore, '# Copilot Squad', 'global roster still uses the base team');
+
+  const projectRosterPath = path.join(repoDir, '.agents', 'squad', 'team.md');
+  const projectRoster = fs.readFileSync(projectRosterPath, 'utf8');
+  expectContains(projectRoster, '# Override Squad', 'project team_name override');
+  expectContains(projectRoster, 'Project override: `override-project`', 'project roster note');
+  expectContains(projectRoster, '`grill-reviewer` (custom-coder)', 'project roster model classification');
+
+  const projectFenster = frontmatter(path.join(repoDir, '.agents', 'agents', 'fenster.md'));
+  expectContains(projectFenster.content, 'endpoint="grill-reviewer"', 'project primary override');
+  assert(!projectFenster.content.includes('endpoint="local-coder"'), 'old primary override is gone');
+  assert(projectFenster.fields.model === 'muse-ember-1.0', 'project endpoint override stays a runner');
+  expectContains(
+    projectFenster.content,
+    'Muse loads this project definition before the global user agent.',
+    'project wrapper precedence note'
+  );
+  assert(
+    !fs.existsSync(path.join(repoDir, '.agents', 'agents', 'keaton.md')),
+    'unmodified members keep using the global wrapper'
+  );
+
+  delete team.projects['override-project'].members;
+  fs.writeFileSync(teamFile, JSON.stringify(team, null, 2));
+  const cleared = run(overrideArgs);
+  expectContains(cleared, 'removed', 'stale project wrapper cleanup');
+  assert(!fs.existsSync(path.join(repoDir, '.agents', 'agents', 'fenster.md')), 'stale project wrapper removed');
+  expectContains(fs.readFileSync(projectRosterPath, 'utf8'), '# Override Squad', 'project roster kept for team_name override');
+  assert(
+    fs.readFileSync(path.join(configDir, 'agents', 'fenster.md'), 'utf8') === globalFensterBefore,
+    'global wrapper is still base-only after clearing the patch'
+  );
+
+  team.projects['override-project'].members = { fenster: { primary: 'grill-reviewer' } };
+  fs.writeFileSync(teamFile, JSON.stringify(team, null, 2));
+  run(overrideArgs);
+  assert(fs.existsSync(path.join(repoDir, '.agents', 'agents', 'fenster.md')), 'project wrapper recreated');
+
+  const removed = run([...baseArgs, '--uninstall', '--project-dir', repoDir]);
   expectContains(removed, 'removed', 'uninstall reports removals');
   for (const name of ['keaton', 'fenster', 'mcmanus', 'hockney', 'verbal']) {
     assert(!fs.existsSync(path.join(configDir, 'agents', `${name}.md`)), `removed @${name} wrapper`);
   }
   assert(!fs.existsSync(path.join(configDir, 'squad', 'team.md')), 'removed team.md');
+  assert(!fs.existsSync(path.join(repoDir, '.agents', 'agents', 'fenster.md')), 'removed project wrapper');
+  assert(!fs.existsSync(projectRosterPath), 'removed project roster');
   assert(
     fs.readFileSync(genericAgent, 'utf8') === 'generic worker sentinel\n',
     'uninstall keeps generic worker.md'

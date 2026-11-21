@@ -20,9 +20,12 @@ MANAGED_PATHS=(
   "agents/plan-reviewer.md"
   "agents/general-purpose.md"
   "agents/worker.md"
+  "skills/squad-team/SKILL.md"
+  "skills/squad-doctor/SKILL.md"
   "skills/squad-plan/SKILL.md"
   "skills/squad-execute/SKILL.md"
   "mcp/bridge.js"
+  "mcp/doctor.js"
   "mcp/register-settings.js"
   "mcp/sync-team.js"
 )

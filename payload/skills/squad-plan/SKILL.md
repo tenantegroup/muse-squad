@@ -6,7 +6,7 @@ You are in SQUAD-PLAN mode. Do NOT edit product code yet.
 
 ## Named Team Roster and Project Memory (read first)
 
-At startup, read `~/.config/muse/squad-team.json` (or the generated roster at `~/.config/muse/squad/team.md`) and route work by responsibility:
+At startup, read `~/.config/muse/squad-team.json` (or the generated roster at `~/.config/muse/squad/team.md`). In this repository, prefer `.agents/squad/team.md` and the project wrappers in `.agents/agents/<name>.md` when present, then route work by responsibility:
 
 - Lead `@keaton` — architecture, task decomposition, and adversarial plan review.
 - Frontend `@fenster` — UI components, styles, accessibility, and client-side files.
@@ -43,6 +43,10 @@ Examples:
 If work is done **inline** because subagent spawning failed, was rejected, or is unavailable, do not invent a spawn — report it in the summary as `[inline | native] <action>`.
 
 **Always include a "Subagents / Models" roster in your user-facing summaries** (and before asking for sign-off) so the model is visible even if the TUI label omits it. For each helper list: name/role, model tag, action, and outcome/status. For `custom-coder` tool calls, report the actual `servedBy`, `servedModel`, `fallbackUsed`, and any `fallbackEndpoint` from tool result meta (not inferred from config/default) and the outcome (e.g. `custom-coder:critique_plan | servedBy grill-reviewer (grill-model) — ok`). If result meta is unavailable, state that explicitly.
+
+## Native Quota Fallback for Named Members
+
+If a named member's native primary (for example `@keaton` on `muse-spark-1.3-contributor`) fails with a quota, rate-limit, or subscription error, the orchestrator must retry the same step through `custom-coder` using that member's `backup` as the endpoint: `critique_plan` for plan/review steps, `generate_code` for code or diff steps. Pass the backup as both `endpoint` and `fallback_endpoint`. Do not treat the failed native turn as the member's result, silently switch to another native model, or mark the step done until the retry succeeds or the gap is stated explicitly. If custom-coder is unavailable for that retry, warn clearly before falling back to inline/native work. Record the retry in the Subagents / Models roster with the actual `servedBy` / `fallbackUsed` from tool meta.
 
 ## Concurrency Budget and Endpoint Health (read first)
 

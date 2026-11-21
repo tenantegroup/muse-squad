@@ -40,6 +40,7 @@ const USAGE = [
   '  --team-file PATH    Roster JSON (default: <config-dir>/squad-team.json)',
   '  --endpoints-file PATH  endpoints.json (default: <config-dir>/endpoints.json)',
   '  --project-name NAME Override project name used for projects{} overrides',
+  '  --project-dir PATH  Repo root for project-scoped overrides (default: cwd)',
   '  --uninstall         Remove only generated wrappers and roster',
   '  --help, -h          Show this help',
   '',
@@ -49,7 +50,7 @@ const USAGE = [
 function parseArgs(argv) {
   const opts = {};
   const valueFlags = new Set([
-    '--config-dir', '--dir', '--team-file', '--endpoints-file', '--project-name'
+    '--config-dir', '--dir', '--team-file', '--endpoints-file', '--project-name', '--project-dir'
   ]);
   for (let i = 0; i < argv.length; i++) {
     const arg = argv[i];
@@ -135,20 +136,25 @@ function validateMembers(members) {
   }
 }
 
-function applyProjectOverrides(team, projectName, cwd) {
+function findProjectOverride(team, projectName, cwd) {
   const projects = team.projects && typeof team.projects === 'object' ? team.projects : {};
   const keys = [cwd, projectName].filter(Boolean);
-  let merged = { ...team };
+  let found = null;
   for (const key of keys) {
     const override = projects[key];
-    if (!override || typeof override !== 'object') continue;
-    if (typeof override.team_name === 'string') merged.team_name = override.team_name;
-    if (override.members && typeof override.members === 'object') {
-      merged.members = merged.members.map((member) => {
-        const patch = override.members[member.name];
-        return patch && typeof patch === 'object' ? { ...member, ...patch } : member;
-      });
-    }
+    if (override && typeof override === 'object') found = { key, override };
+  }
+  return found;
+}
+
+function applyProjectOverride(team, override) {
+  let merged = { ...team };
+  if (typeof override.team_name === 'string') merged.team_name = override.team_name;
+  if (override.members && typeof override.members === 'object') {
+    merged.members = merged.members.map((member) => {
+      const patch = override.members[member.name];
+      return patch && typeof patch === 'object' ? { ...member, ...patch } : member;
+    });
   }
   return merged;
 }
@@ -157,7 +163,7 @@ function escapeCell(value) {
   return String(value).replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
 }
 
-function buildRoster(team, members, aliases, teamFile) {
+function buildRoster(team, members, aliases, teamFile, options = {}) {
   const teamName = typeof team.team_name === 'string' && team.team_name
     ? team.team_name
     : 'Muse Squad';
@@ -168,6 +174,9 @@ function buildRoster(team, members, aliases, teamFile) {
     `# ${teamName}`,
     '',
     GENERATED_MARKER,
+    ...(options.projectKey
+      ? [`Project override: \`${options.projectKey}\`. Read this roster instead of the global one in this repository.`]
+      : []),
     '',
     `Generated from \`${path.basename(teamFile)}\` by \`mcp/sync-team.js\`. ` +
       'Edit the roster config and re-run the installer instead of editing this file.',
@@ -202,7 +211,7 @@ function buildRoster(team, members, aliases, teamFile) {
   return `${lines.join('\n')}\n`;
 }
 
-function buildWrapper(member, team, aliases) {
+function buildWrapper(member, team, aliases, options = {}) {
   const primaryKind = kindOf(member.primary, aliases);
   const backupKind = kindOf(member.backup, aliases);
   const memoryDir = typeof team.memory_dir === 'string' && team.memory_dir
@@ -228,14 +237,16 @@ function buildWrapper(member, team, aliases) {
   } else {
     routing.push(
       `- Primary: \`${member.primary}\` (native Muse model), pinned in frontmatter.`,
-      `- If the primary is blocked or unavailable, report it and use backup \`${member.backup}\`.`
+      `- If this native turn fails with a quota, rate-limit, or subscription error, the orchestrator must retry the same step through \`custom-coder\` using backup \`${member.backup}\` (see below) instead of treating the failed turn as this member's result or silently switching models.`
     );
     if (backupKind === 'endpoint') {
       routing.push(
-        `- Backup \`${member.backup}\` is a custom-coder endpoint: call \`custom-coder:critique_plan\` or \`generate_code\` with \`endpoint="${member.backup}"\` and \`fallback_endpoint="${member.backup}"\` to avoid unrelated global fallbacks.`
+        `- Backup \`${member.backup}\` is a custom-coder endpoint: for code edits call \`custom-coder:generate_code\`, and for plans/reviews call \`custom-coder:critique_plan\`, with \`endpoint="${member.backup}"\` and \`fallback_endpoint="${member.backup}"\` so only this member's backup chain is used. Report \`servedBy\`, \`servedModel\`, and \`fallbackUsed\` from MCP meta.`
       );
     } else {
-      routing.push(`- Backup \`${member.backup}\` is a native Muse model; continue natively and note the switch.`);
+      routing.push(
+        `- Backup \`${member.backup}\` is also a native Muse model: retry the same step as a new native subagent on \`${member.backup}\` and note the switch; do not use custom-coder for this member's fallback.`
+      );
     }
   }
 
@@ -247,6 +258,9 @@ function buildWrapper(member, team, aliases) {
     `model: ${runnerModel}`,
     '---',
     GENERATED_MARKER,
+    ...(options.projectKey
+      ? [`Project override: \`${options.projectKey}\`. Muse loads this project definition before the global user agent.`]
+      : []),
     '',
     `# @${member.name} - ${member.display_name} (${member.role})`,
     '',
@@ -295,22 +309,21 @@ function writeIfChanged(dest, content, label) {
   log(`  ${existing === null ? 'generated' : 'updated'}  ${dest}`);
 }
 
-function removeIfGenerated(dest, label) {
+function removeIfGenerated(dest, label, quiet = false) {
   if (!fs.existsSync(dest)) {
-    log(`  absent     ${dest}`);
+    if (!quiet) log(`  absent     ${dest}`);
     return;
   }
   const content = fs.readFileSync(dest, 'utf8');
   if (!content.includes(GENERATED_MARKER)) {
-    log(`  kept       ${dest} (not generated by muse-squad)`);
+    if (!quiet) log(`  kept       ${dest} (not generated by muse-squad)`);
     return;
   }
   fs.unlinkSync(dest);
-  log(`  removed    ${dest}`);
+  log(`  removed    ${label}: ${dest}`);
 }
 
-function removeGeneratedAgents(configDir) {
-  const agentsDir = path.join(configDir, 'agents');
+function removeGeneratedAgents(agentsDir, keepNames = null) {
   if (!fs.existsSync(agentsDir)) return;
   for (const entry of fs.readdirSync(agentsDir)) {
     if (!entry.endsWith('.md')) continue;
@@ -323,6 +336,7 @@ function removeGeneratedAgents(configDir) {
       continue;
     }
     if (!content.includes(GENERATED_MARKER)) continue;
+    if (keepNames && keepNames.has(path.basename(entry, '.md'))) continue;
     try {
       fs.unlinkSync(dest);
       log(`  removed    ${dest}`);
@@ -332,17 +346,25 @@ function removeGeneratedAgents(configDir) {
   }
 }
 
-function uninstall(configDir, teamFile) {
+function removeEmptyDir(dir) {
+  try {
+    if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
+  } catch (error) {
+    warn(`cannot remove empty directory ${dir}: ${error.message}`);
+  }
+}
+
+function uninstall(configDir, teamFile, projectRoot) {
   // Scan by marker instead of trusting squad-team.json: a deleted or edited
   // roster must not leave stale generated wrappers behind on uninstall.
   void teamFile;
-  removeGeneratedAgents(configDir);
+  removeGeneratedAgents(path.join(configDir, 'agents'));
   removeIfGenerated(path.join(configDir, 'squad', 'team.md'), 'team.md');
-  const squadDir = path.join(configDir, 'squad');
-  try {
-    if (fs.existsSync(squadDir) && fs.readdirSync(squadDir).length === 0) fs.rmdirSync(squadDir);
-  } catch (error) {
-    warn(`cannot remove empty squad directory ${squadDir}: ${error.message}`);
+  removeEmptyDir(path.join(configDir, 'squad'));
+  if (projectRoot) {
+    removeGeneratedAgents(path.join(projectRoot, '.agents', 'agents'));
+    removeIfGenerated(path.join(projectRoot, '.agents', 'squad', 'team.md'), 'project team.md', true);
+    removeEmptyDir(path.join(projectRoot, '.agents', 'squad'));
   }
 }
 
@@ -359,29 +381,83 @@ function main() {
     path.join(configDir, 'squad-team.json'));
   const endpointsFile = expandHome(opts.endpoints_file || process.env.MODELS_CONFIG_FILE ||
     path.join(configDir, 'endpoints.json'));
-  const projectName = opts.project_name || path.basename(process.cwd());
+  const projectRoot = expandHome(opts.project_dir || process.cwd());
+  const projectName = opts.project_name || path.basename(projectRoot);
 
   if (opts.uninstall) {
-    uninstall(configDir, teamFile);
+    uninstall(configDir, teamFile, projectRoot);
     return;
   }
 
   const team = readJson(teamFile, 'squad-team.json', true);
-  const resolved = applyProjectOverrides(team, projectName, process.cwd());
-  validateMembers(resolved.members);
+  validateMembers(team.members);
   const aliases = endpointAliases(readJson(endpointsFile, 'endpoints.json', false));
+  const globalNames = new Set(team.members.map((member) => member.name));
 
-  log(`sync-team: ${resolved.members.length} members, project ${projectName}`);
+  // Global artifacts always come from the base roster. Project overrides are
+  // materialized separately so one repo cannot leak a model choice into every
+  // other repo.
+  log(`sync-team: ${team.members.length} members, global`);
   writeIfChanged(
     path.join(configDir, 'squad', 'team.md'),
-    buildRoster(resolved, resolved.members, aliases, teamFile)
+    buildRoster(team, team.members, aliases, teamFile)
   );
-  for (const member of resolved.members) {
+  for (const member of team.members) {
     writeIfChanged(
       path.join(configDir, 'agents', `${member.name}.md`),
-      buildWrapper(member, resolved, aliases)
+      buildWrapper(member, team, aliases)
     );
   }
+  removeGeneratedAgents(path.join(configDir, 'agents'), globalNames);
+
+  const projectAgentsDir = path.join(projectRoot, '.agents', 'agents');
+  const projectRoster = path.join(projectRoot, '.agents', 'squad', 'team.md');
+  const found = findProjectOverride(team, projectName, projectRoot);
+  if (!found) {
+    removeGeneratedAgents(projectAgentsDir);
+    removeIfGenerated(projectRoster, 'project team.md', true);
+    return;
+  }
+
+  const projectTeam = applyProjectOverride(team, found.override);
+  validateMembers(projectTeam.members);
+  const patches = found.override.members && typeof found.override.members === 'object'
+    ? found.override.members
+    : {};
+  for (const key of Object.keys(patches)) {
+    if (!globalNames.has(key)) warn(`project override ${found.key} patches unknown member ${key}`);
+  }
+  const patchedNames = new Set(
+    projectTeam.members
+      .filter((member) => patches[member.name] && typeof patches[member.name] === 'object')
+      .map((member) => member.name)
+  );
+
+  log(`sync-team: project override ${found.key} -> ${projectRoot}`);
+  writeIfChanged(
+    projectRoster,
+    buildRoster(projectTeam, projectTeam.members, aliases, teamFile, { projectKey: found.key })
+  );
+  for (const member of projectTeam.members) {
+    if (!patchedNames.has(member.name)) continue;
+    writeIfChanged(
+      path.join(projectAgentsDir, `${member.name}.md`),
+      buildWrapper(member, projectTeam, aliases, { projectKey: found.key })
+    );
+  }
+  removeGeneratedAgents(projectAgentsDir, patchedNames);
 }
 
-main();
+if (require.main === module) main();
+
+module.exports = {
+  GENERATED_MARKER,
+  RUNNER_MODEL,
+  endpointAliases,
+  buildRoster,
+  buildWrapper,
+  expandHome,
+  findProjectOverride,
+  applyProjectOverride,
+  readJson
+};
