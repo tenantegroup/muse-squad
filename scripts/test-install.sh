@@ -80,7 +80,7 @@ MUSE_CONFIG_DIR="$TMP/bash-config" bash "$ROOT/install"
 
 echo "== bash installer: verify payload =="
 for rel in "${EXPECTED[@]}"; do
-  cmp "$ROOT/payload/$rel" "$TMP/bash-config/$rel"
+  diff -q --strip-trailing-cr "$ROOT/payload/$rel" "$TMP/bash-config/$rel"
   echo "  ok  $rel"
 done
 
@@ -98,17 +98,50 @@ done
 echo "  ok"
 
 echo "== bash installer: verify endpoints config =="
-cmp "$ROOT/payload/mcp/endpoints.default.json" "$TMP/bash-config/endpoints.json"
+diff -q --strip-trailing-cr "$ROOT/payload/mcp/endpoints.default.json" "$TMP/bash-config/endpoints.json"
 verify_endpoints "$TMP/bash-config/endpoints.json"
 node -e '
   const fs = require("fs");
   const mode = fs.statSync(process.argv[1]).mode & 0o777;
-  if (mode !== 0o600) throw new Error(`expected 0600, got ${mode.toString(8)}`);
+  if (process.platform !== "win32" && mode !== 0o600) throw new Error(`expected 0600, got ${mode.toString(8)}`);
 ' "$TMP/bash-config/endpoints.json"
 echo "  ok"
 
 echo "== bash installer: verify settings registration =="
 verify_entry "$TMP/bash-config/settings.json" "$TMP/bash-config/endpoints.json"
+echo "  ok"
+
+echo "== bash installer: update mode =="
+update_dir="$TMP/update-config"
+update_log="$TMP/update.log"
+update_bin="$TMP/fake-bin"
+mkdir -p "$update_dir" "$update_bin"
+printf 'remote v9.9.9\n' > "$update_dir/REMOTE_MARKER"
+cat > "$update_bin/curl" <<'CURL'
+#!/usr/bin/env bash
+set -euo pipefail
+out=""
+while (( $# > 0 )); do
+  case "$1" in
+    -o) out="$2"; shift 2 ;;
+    *) shift ;;
+  esac
+done
+cat > "$out" <<'REMOTE'
+#!/usr/bin/env bash
+set -euo pipefail
+echo "ran-remote $*" >> "__UPDATE_LOG__"
+echo "remote v9.9.9" > "__UPDATE_DIR__/REMOTE_MARKER"
+REMOTE
+chmod +x "$out"
+CURL
+# fill placeholders in fake curl (so remote script knows where to write)
+sed "s|__UPDATE_LOG__|$update_log|g; s|__UPDATE_DIR__|$update_dir|g" "$update_bin/curl" > "$update_bin/curl.tmp" && mv "$update_bin/curl.tmp" "$update_bin/curl"
+chmod +x "$update_bin/curl"
+PATH="$update_bin:$PATH" MUSE_CONFIG_DIR="$update_dir" bash "$ROOT/install" --update --no-backup
+[[ -f "$update_dir/REMOTE_MARKER" ]] || fail "update did not use remote installer"
+grep -q -- "--dir $update_dir" "$update_log" || fail "update did not forward --dir"
+grep -q -- "--no-backup" "$update_log" || fail "update did not forward --no-backup"
 echo "  ok"
 
 echo "== bash installer: merge with existing settings =="
@@ -224,10 +257,10 @@ if command -v pwsh >/dev/null 2>&1; then
 
   echo "== PowerShell installer: verify =="
   for rel in "${EXPECTED[@]}"; do
-    cmp "$ROOT/payload/$rel" "$TMP/ps-config/$rel"
+    diff -q --strip-trailing-cr "$ROOT/payload/$rel" "$TMP/ps-config/$rel"
     echo "  ok  $rel"
   done
-  cmp "$ROOT/payload/mcp/endpoints.default.json" "$TMP/ps-config/endpoints.json"
+  diff -q --strip-trailing-cr "$ROOT/payload/mcp/endpoints.default.json" "$TMP/ps-config/endpoints.json"
   verify_entry "$TMP/ps-config/settings.json" "$(cd "$TMP/ps-config" && pwd)/endpoints.json"
   ps_backup="$(latest_backup "$TMP/ps-config")"
   [[ -n "$ps_backup" ]] || fail "PowerShell install did not create a backup"

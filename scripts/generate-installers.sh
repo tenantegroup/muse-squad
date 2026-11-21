@@ -51,6 +51,7 @@ CONFIG_DIR="${MUSE_CONFIG_DIR:-${HOME}/.config/muse}"
 MODE="install"
 SKIP_MCP=0
 BACKUP_CHOICE="auto"
+REPO_RAW_BASE="https://raw.githubusercontent.com/tenantegroup/muse-squad/main"
 
 usage() {
   cat <<'USAGE'
@@ -58,10 +59,11 @@ muse-squad installer
 
 Usage:
   curl -fsSL https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install | bash
-  bash install [--dir PATH] [--uninstall] [--no-mcp] [--help]
+  bash install [--dir PATH] [--update] [--uninstall] [--no-mcp] [--help]
 
 Options:
   --dir PATH       Install into PATH instead of $HOME/.config/muse
+  --update         Download and run the latest installer from GitHub, then install
   --uninstall      Remove managed files and unregister custom-coder
   --no-mcp         Skip custom-coder MCP registration
   --backup         Force a backup prompt/backup
@@ -85,6 +87,7 @@ while (( $# > 0 )); do
     --dir)
       (( $# >= 2 )) || fail "--dir requires a value"
       CONFIG_DIR="$2"; shift 2 ;;
+    --update) MODE="update"; shift ;;
     --uninstall) MODE="uninstall"; shift ;;
     --no-mcp) SKIP_MCP=1; shift ;;
     --backup) BACKUP_CHOICE="yes"; shift ;;
@@ -142,8 +145,10 @@ install_file() {
   mkdir -p "$(dirname "$dest")" || fail "cannot create directory for $dest"
   tmp="$(mktemp "${TMPDIR:-/tmp}/muse-squad.XXXXXX")" || fail "mktemp failed"
   cat > "$tmp"
-  if [[ -f "$dest" ]] && cmp -s "$tmp" "$dest"; then
-    rm -f "$tmp"; log "  unchanged  $dest"; return 0
+  if [[ -f "$dest" ]]; then
+    if cmp -s "$tmp" "$dest" || diff -q --strip-trailing-cr "$tmp" "$dest" >/dev/null 2>&1; then
+      rm -f "$tmp"; log "  unchanged  $dest"; return 0
+    fi
   fi
   if [[ -f "$dest" ]]; then
     bak="${dest}.bak.$(date +%Y%m%d%H%M%S)"
@@ -204,8 +209,41 @@ register_mcp() {
   node "$registrar" "${args[@]}"
 }
 
+self_update() {
+  local url="$REPO_RAW_BASE/install" tmp rc
+  tmp="$(mktemp "${TMPDIR:-/tmp}/muse-squad-update.XXXXXX")" || fail "mktemp failed"
+  log "  fetching   $url"
+  if command -v curl >/dev/null 2>&1; then
+    curl -fsSL "$url" -o "$tmp" || fail "cannot download latest installer"
+  elif command -v wget >/dev/null 2>&1; then
+    wget -qO "$tmp" "$url" || fail "cannot download latest installer"
+  else
+    rm -f "$tmp"
+    fail "--update requires curl or wget"
+  fi
+  chmod +x "$tmp" || true
+  local -a args=(--dir "$CONFIG_DIR")
+  (( SKIP_MCP )) && args+=(--no-mcp)
+  [[ "$BACKUP_CHOICE" == "yes" ]] && args+=(--backup)
+  [[ "$BACKUP_CHOICE" == "no" ]] && args+=(--no-backup)
+  log "  running    latest installer"
+  bash "$tmp" "${args[@]}"
+  rc=$?
+  rm -f "$tmp"
+  exit $rc
+}
+
 log "muse-squad v$VERSION - $MODE"
 log "config dir: $CONFIG_DIR"
+
+if [[ "$MODE" == "update" ]]; then
+  self_update
+fi
+
+FIRST_INSTALL=0
+if [[ ! -f "$CONFIG_DIR/endpoints.json" ]]; then
+  FIRST_INSTALL=1
+fi
 
 backup_config
 
@@ -242,6 +280,14 @@ MID
 
     cat <<'FOOT'
 register_mcp install
+if [[ "$MODE" == "install" && "$FIRST_INSTALL" == "1" ]]; then
+  log ""
+  log "Next steps:"
+  log "  1. Configure: edit $CONFIG_DIR/endpoints.json (base_url, model, api_key). Missing/unreachable endpoints still work in native-only mode with warnings."
+  log "  2. Use in Muse Code: /squad-plan to create .muse/PLAN.md, then /squad-execute."
+  log "  3. Customize: add agents to $CONFIG_DIR/agents/*.md and skills to $CONFIG_DIR/skills/<name>/SKILL.md."
+  log "  4. Update later: re-run this installer with --update."
+fi
 log "done."
 FOOT
   } > "$out"
@@ -267,10 +313,12 @@ $mode = 'install'
 $help = $false
 $skipMcp = $false
 $backupChoice = 'auto'
+$repoRawBase = 'https://raw.githubusercontent.com/tenantegroup/muse-squad/main'
 if ($null -eq $args) { $args = @() }
 
 for ($i = 0; $i -lt $args.Count; $i++) {
   switch -CaseSensitive ($args[$i]) {
+    '--update' { $mode = 'update' }
     '--uninstall' { $mode = 'uninstall' }
     '--no-mcp' { $skipMcp = $true }
     '--backup' { $backupChoice = 'yes' }
@@ -300,10 +348,11 @@ muse-squad installer
 
 Usage:
   irm https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install.ps1 | iex
-  powershell -File install.ps1 [--dir PATH] [--uninstall] [--no-mcp]
+  powershell -File install.ps1 [--dir PATH] [--update] [--uninstall] [--no-mcp]
 
 Options:
   --dir PATH       Install into PATH instead of ~/.config/muse
+  --update         Download and run the latest installer from GitHub, then install
   --uninstall      Remove managed files and unregister custom-coder
   --no-mcp         Skip custom-coder MCP registration
   --backup         Force a backup prompt/backup
@@ -451,8 +500,49 @@ function Register-Mcp([string]$action) {
   }
 }
 
+function Invoke-SelfUpdate {
+  $url = "$repoRawBase/install.ps1"
+  $tmp = Join-Path ([IO.Path]::GetTempPath()) ("muse-squad-update-" + [Guid]::NewGuid().ToString('N') + '.ps1')
+  Write-Host "  fetching   $url"
+  try {
+    if (Get-Command Invoke-WebRequest -ErrorAction SilentlyContinue) {
+      Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+    } else {
+      Invoke-RestMethod -Uri $url -OutFile $tmp
+    }
+  } catch {
+    if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    throw "cannot download latest installer: $($_.Exception.Message)"
+  }
+  $updateArgs = @('--dir', $configDir)
+  if ($skipMcp -or $env:MUSE_SQUAD_SKIP_MCP -eq '1') { $updateArgs += '--no-mcp' }
+  if ($backupChoice -eq 'yes') { $updateArgs += '--backup' }
+  if ($backupChoice -eq 'no') { $updateArgs += '--no-backup' }
+  Write-Host '  running    latest installer'
+  try {
+    $shell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } elseif (Get-Command powershell -ErrorAction SilentlyContinue) { 'powershell' } else { $null }
+    if ($shell) {
+      & $shell -NoProfile -File $tmp @updateArgs
+      $rc = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
+      if ($rc -ne 0) { throw "latest installer failed with exit code $rc" }
+    } else {
+      & $tmp @updateArgs
+    }
+  } finally {
+    if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+  }
+}
+
 Write-Host "muse-squad v$Version - $mode"
 Write-Host "config dir: $configDir"
+
+if ($mode -eq 'update') {
+  Invoke-SelfUpdate
+  Write-Host 'done.'
+  return
+}
+
+$firstInstall = -not (Test-Path -LiteralPath (Join-Path $configDir 'endpoints.json'))
 
 Backup-Config
 
@@ -487,6 +577,14 @@ MID
 
     cat <<'FOOT'
 Register-Mcp 'install'
+if ($mode -eq 'install' -and $firstInstall) {
+  Write-Host ''
+  Write-Host 'Next steps:'
+  Write-Host "  1. Configure: edit $(Join-Path $configDir 'endpoints.json') (base_url, model, api_key). Missing/unreachable endpoints still work in native-only mode with warnings."
+  Write-Host '  2. Use in Muse Code: /squad-plan to create .muse/PLAN.md, then /squad-execute.'
+  Write-Host "  3. Customize: add agents in $(Join-Path $configDir 'agents') (*.md) and skills in $(Join-Path $configDir 'skills\<name>\SKILL.md')."
+  Write-Host '  4. Update later: re-run this installer with --update.'
+}
 Write-Host 'done.'
 FOOT
   } > "$out"

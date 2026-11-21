@@ -25,19 +25,20 @@ Examples:
 
 Use this format as the default for every spawn. If a one-off subagent truly has no meaningful role or model, keep the bracketed prefix with a plain tag such as `[helper | ember]` rather than leaving the title unlabeled.
 
-Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` section — that section is the durable handoff record when resuming a long or interrupted session. Group independent tasks into parallel waves and delegate each bounded task to `worker` subagents using isolated Git worktrees (`--subagent-worktree-isolation` behavior).
+Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` section - that section is the durable handoff record when resuming a long or interrupted session. Group independent tasks into parallel waves and delegate each bounded task to `worker` subagents using isolated Git worktrees (`--subagent-worktree-isolation` behavior).
 
-Use the `custom-coder` MCP tool (`generate_code`) with `endpoint: "local-coder"` for heavy code generation: pass a bounded prompt plus the relevant file context, then apply and verify the returned diff locally.
+## Endpoint Health and Execution Mode (read first)
 
-## Context Size (custom-coder)
+At the start, call `custom-coder:list_endpoints` (or read `~/.config/muse/endpoints.json`) to learn `muse_models` limits and whether custom-coder is available.
 
-Before each `generate_code` call, use `custom-coder:list_endpoints` to check the target endpoint's `max_input_chars` and `extra_body` context hints (such as `options.num_ctx`). Keep `file_context` (and any `repo_context`) to the smallest excerpts that explain the change — no whole-file dumps, logs, or unrelated tests. If the reply starts with the input-truncated warning, shorten the context and re-ask; do not apply a diff generated from cut-off context.
+- If custom-coder is unavailable, misconfigured, or not working properly (for example `available: false`, `ok: false`/`warning`, missing/unreadable config, or unreachable), **warn the user clearly** with the reported issue and continue in **native-only mode**: do not block execution. Have workers implement changes directly with native Muse tools/editing instead of calling `custom-coder:generate_code`, and skip `custom-coder` critiques. If a custom-coder call fails later at runtime, treat that the same way (warn and continue natively). Use sensible default concurrency if limits are unknown (for example at most 2 concurrent native workers of the same model) and batch into waves.
+- If custom-coder is available, use `custom-coder:generate_code` (endpoint `local-coder` when present) for heavy code generation when helpful: pass a bounded prompt plus relevant file context, then apply and verify the returned diff locally. Never spawn more simultaneous native subagents of a given model than `muse_models` allows (for example at most 4 `muse-ember-1.0` or 2 `muse-spark-1.3` workers). Batch waves to respect limits.
 
-## Concurrency Budget (read first)
+Multiple parallel workers may safely call `custom-coder` MCP tools concurrently when available: `bridge.js` queues requests FIFO and serializes them per endpoint's `max_concurrency` (local endpoints default to `1` to avoid GPU/RAM OOM). A queued call waits for a slot rather than failing over; fallback only happens after retries fail or the queue wait exceeds `queue_timeout_ms`. Do not implement separate locking in the workers.
 
-At the start of execution, read `~/.config/muse/endpoints.json` (or call `custom-coder:list_endpoints`) and note the `muse_models` native-model limits and each endpoint's `max_concurrency`. Batch each wave so no model ever exceeds its `muse_models` limit simultaneously — e.g. at most 4 concurrent `muse-ember-1.0` workers or 2 `muse-spark-1.3` workers. If more tasks are ready, hold them for the next wave; never exceed the budget.
+## Context Size (custom-coder, when available)
 
-Multiple parallel workers may safely call `custom-coder` MCP tools concurrently: `bridge.js` queues requests FIFO and serializes them per endpoint's `max_concurrency` (local endpoints default to `1` to avoid GPU/RAM OOM). A queued call waits for a slot rather than failing over; fallback only happens after retries fail or the queue wait exceeds `queue_timeout_ms`. Do not implement separate locking in the workers.
+Before each `generate_code` call, check the target endpoint's `max_input_chars` and `extra_body` context hints (such as `options.num_ctx`). Keep `file_context` (and any `repo_context`) to the smallest excerpts that explain the change - no whole-file dumps, logs, or unrelated tests. If the reply starts with the input-truncated warning, shorten the context and re-ask; do not apply a diff generated from cut-off context.
 
 ## Patch Discipline (Diffs, Not Full Rewrites)
 

@@ -214,6 +214,9 @@ function run(port, tempDir, configFile) {
 
     const status = await tool(3, 'coder_status', {});
     const statusText = status.result.content[0].text;
+    assert(status.result.isError !== true, 'coder_status is not an error when configured');
+    assert(statusText.includes('"ok": true'), 'coder_status reports ok');
+    assert(statusText.includes('"available": true'), 'coder_status reports available');
     assert(statusText.includes('"defaultEndpoint": "local-coder"'), 'default_endpoint is honored');
     assert(statusText.includes('grill-reviewer'), 'coder_status lists aliases');
     assert(statusText.includes('"maxRetries": 2'), 'coder_status reports max_retries');
@@ -224,6 +227,7 @@ function run(port, tempDir, configFile) {
     assert(!statusText.includes('grill-key'), 'coder_status redacts keys');
 
     const listing = JSON.parse((await tool(4, 'list_endpoints', {})).result.content[0].text);
+    assert(listing.ok === true && listing.available === true, 'list_endpoints reports availability');
     assert(listing.endpoints['local-coder'].max_concurrency === 1, 'list_endpoints reports max_concurrency');
     assert(listing.muse_models['muse-spark-1.3'] === 2, 'list_endpoints reports muse_models');
     assert(listing.queue_timeout_ms === 300000, 'list_endpoints reports queue_timeout_ms');
@@ -447,6 +451,65 @@ function run(port, tempDir, configFile) {
     const redactedText = (await tool(29, 'list_endpoints', {})).result.content[0].text;
     assert(!redactedText.includes('do-not-leak'), 'secret inside extra_body is redacted');
     assert(redactedText.includes('<redacted>'), 'redaction is visible');
+
+    // --- Missing/unreadable config: warn but do not hard-fail status tools ---
+    writeConfig(configFile, baseUrl, { default: 'local-coder' }); // restore baseline
+    const brokenConfig = path.join(tempDir, 'endpoints.broken.json');
+    fs.writeFileSync(brokenConfig, '{not-json');
+    const childBroken = spawn(process.execPath, [BRIDGE], {
+      env: { ...process.env, MODELS_CONFIG_FILE: brokenConfig },
+      stdio: ['pipe', 'pipe', 'inherit']
+    });
+    let bbuf = ''; const bpend = new Map();
+    childBroken.stdout.setEncoding('utf8');
+    childBroken.stdout.on('data', (chunk) => {
+      bbuf += chunk; let nl;
+      while ((nl = bbuf.indexOf('\n')) !== -1) {
+        const line = bbuf.slice(0, nl).trim(); bbuf = bbuf.slice(nl + 1);
+        if (!line) continue;
+        const msg = JSON.parse(line); const res = bpend.get(msg.id);
+        if (res) { bpend.delete(msg.id); res(msg); }
+      }
+    });
+    function breq(message){ return new Promise((resolve)=>{ bpend.set(message.id, resolve); childBroken.stdin.write(JSON.stringify(message)+'\n'); }); }
+    function btool(id,name,args){ return breq({ jsonrpc:'2.0', id, method:'tools/call', params:{ name, arguments: args } }); }
+    await breq({ jsonrpc:'2.0', id:100, method:'initialize', params:{ protocolVersion:'2025-06-18', capabilities:{}, clientInfo:{ name:'test', version:'1' } } });
+    const badStatus = await btool(101, 'coder_status', {});
+    assert(badStatus.result.isError !== true, 'coder_status warns instead of failing on bad config');
+    const badStatusPayload = JSON.parse(badStatus.result.content[0].text);
+    assert(badStatusPayload.available === false, 'coder_status reports unavailable on bad config');
+    assert(/not configured|not working|invalid JSON|endpoint config/i.test((badStatusPayload.warning || '') + (badStatusPayload.error || '')), 'coder_status warning explains issue');
+    const badList = await btool(102, 'list_endpoints', {});
+    assert(badList.result.isError !== true, 'list_endpoints warns instead of failing on bad config');
+    const badListPayload = JSON.parse(badList.result.content[0].text);
+    assert(badListPayload.available === false, 'list_endpoints reports unavailable on bad config');
+    const badGen = await btool(103, 'generate_code', { prompt: 'x' });
+    assert(badGen.result.isError === true, 'generate_code errors clearly when endpoints unavailable');
+    assert(/not configured|not working|endpoint/i.test(badGen.result.content[0].text), 'generate_code explains missing endpoints');
+    const badCrit = await btool(104, 'critique_plan', { plan_markdown: '# p' });
+    assert(badCrit.result.isError === true, 'critique_plan errors clearly when endpoints unavailable');
+
+    const missingConfig = path.join(tempDir, 'endpoints.absent.json');
+    const childMissing = spawn(process.execPath, [BRIDGE], {
+      env: { ...process.env, MODELS_CONFIG_FILE: missingConfig },
+      stdio: ['pipe', 'pipe', 'inherit']
+    });
+    let mbuf=''; const mpend = new Map();
+    childMissing.stdout.setEncoding('utf8');
+    childMissing.stdout.on('data', (chunk)=>{ mbuf+=chunk; let nl; while((nl=mbuf.indexOf('\n'))!==-1){ const line=mbuf.slice(0,nl).trim(); mbuf=mbuf.slice(nl+1); if(!line) continue; const msg=JSON.parse(line); const res=mpend.get(msg.id); if(res){ mpend.delete(msg.id); res(msg);} } });
+    function mreq(message){ return new Promise((resolve)=>{ mpend.set(message.id, resolve); childMissing.stdin.write(JSON.stringify(message)+'\n'); }); }
+    function mtool(id,name,args){ return mreq({ jsonrpc:'2.0', id, method:'tools/call', params:{ name, arguments: args } }); }
+    await mreq({ jsonrpc:'2.0', id:200, method:'initialize', params:{ protocolVersion:'2025-06-18', capabilities:{}, clientInfo:{ name:'test', version:'1' } } });
+    const missList = await mtool(201, 'list_endpoints', {});
+    assert(missList.result.isError !== true, 'list_endpoints warns when config missing');
+    const missPayload = JSON.parse(missList.result.content[0].text);
+    assert(missPayload.available === false, 'missing config reported unavailable');
+    assert(/not found|endpoint config/i.test((missPayload.warning || '') + (missPayload.error || '')), 'missing config warning is clear');
+    childBroken.stdin.end(); childMissing.stdin.end();
+    await Promise.all([
+      new Promise((r)=>childBroken.on('close', r)),
+      new Promise((r)=>childMissing.on('close', r)),
+    ]);
 
     finish();
   })().catch((error) => {

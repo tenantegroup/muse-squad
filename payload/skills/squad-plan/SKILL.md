@@ -26,18 +26,21 @@ Examples:
 
 Use this format as the default for every spawn. If a one-off subagent truly has no meaningful role or model, keep the bracketed prefix with a plain tag such as `[helper | ember]` rather than leaving the title unlabeled.
 
-## Concurrency Budget (read first)
+## Concurrency Budget and Endpoint Health (read first)
 
-Before spawning anything, read `~/.config/muse/endpoints.json` (or call `custom-coder:list_endpoints`) and note the `muse_models` limits and each endpoint's `max_concurrency`. The orchestrator must never spawn more simultaneous native subagents of a given model than that model's `muse_models` limit — for example at most 4 `muse-ember-1.0` or 2 `muse-spark-1.3` subagents at once. Batch any larger exploration into successive waves. Parallel workers may safely call `custom-coder` MCP tools at the same time: the router queues requests FIFO and serializes them per endpoint's `max_concurrency`.
+At the start, call `custom-coder:list_endpoints` (or read `~/.config/muse/endpoints.json`) to learn `muse_models` limits, endpoint `max_concurrency`, and whether custom-coder is available.
 
-## Context Size (custom-coder)
+- If the result indicates custom-coder is unavailable, misconfigured, or not working properly (for example `available: false`, `ok: false`/`warning`, missing/unreadable config, or the tool cannot be reached), **warn the user clearly** with the reported issue and continue in **native-only mode**: do not block planning. Use native Muse subagents/models for exploration and critique and skip `custom-coder` tool calls until endpoints are fixed. If a custom-coder call fails later at runtime, treat that the same way (warn and continue natively). Use sensible default concurrency if limits are unknown (for example at most 2 concurrent native subagents of the same model) and batch into waves.
+- If custom-coder is available, never spawn more simultaneous native subagents of a given model than that model's `muse_models` limit (for example at most 4 `muse-ember-1.0` or 2 `muse-spark-1.3` at once). Batch any larger exploration into successive waves. Parallel workers may safely call `custom-coder` MCP tools at the same time: the router queues requests FIFO and serializes them per endpoint's `max_concurrency`.
 
-When calling `custom-coder`, keep `repo_context`, `file_context`, and `plan_markdown` short and relevant to the decision at hand. Use `custom-coder:list_endpoints` to check the target endpoint's `max_input_chars` and `extra_body` context hints (such as `options.num_ctx`) before sending. Send only the needed files or excerpts — never dump whole unrelated files. If a reply starts with the input-truncated warning, the model saw less context than you intended: shorten the context and re-ask instead of trusting the critique.
+## Context Size (custom-coder, when available)
+
+When calling `custom-coder`, keep `repo_context`, `file_context`, and `plan_markdown` short and relevant to the decision at hand. Use `custom-coder:list_endpoints` to check the target endpoint's `max_input_chars` and `extra_body` context hints (such as `options.num_ctx`) before sending. Send only the needed files or excerpts - never dump whole unrelated files. If a reply starts with the input-truncated warning, the model saw less context than you intended: shorten the context and re-ask instead of trusting the critique.
 
 1. Spawn parallel read-only subagents (`explore` / `general-purpose`) to map the relevant files, dependencies, and existing patterns.
 2. Ask the user clarifying questions ONLY if an architectural fork cannot be resolved from the codebase.
 3. Draft a decision-complete implementation plan in `.muse/PLAN.md` with exact file paths, dependency order, and verification commands. If the file already has a `## Execution Log & Decisions` section, preserve it verbatim at the bottom — it is the durable handoff record from any prior execution session; do not overwrite it unless the user explicitly asks to reset the plan.
-4. Dual-Brain Plan Grill:
+4. Plan Grill (degrades gracefully):
    1. Spawn our native `plan-reviewer` subagent (read-only) to audit `.muse/PLAN.md` against the actual files in the repository.
-   2. Simultaneously call the `custom-coder:critique_plan` MCP tool with `endpoint: "grill-reviewer"` so your self-hosted model performs an independent adversarial review.
-   3. Synthesize both critiques, resolve any valid issues in `.muse/PLAN.md`, and present a summary of what was caught before asking the user for `/squad-execute` sign-off.
+   2. If custom-coder is available, simultaneously call `custom-coder:critique_plan` (endpoint `grill-reviewer` when present) for an independent adversarial review. If custom-coder is unavailable or the call fails, skip it, warn the user that the self-hosted critique was not run, and proceed with the native review only.
+   3. Synthesize available critiques, resolve any valid issues in `.muse/PLAN.md`, and present a summary of what was caught (and any endpoint warning) before asking the user for `/squad-execute` sign-off.

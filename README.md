@@ -50,6 +50,7 @@ These URLs point straight at the files in this public repo. The installers are s
 | Option | Meaning |
 | --- | --- |
 | `--dir PATH` | Install somewhere else instead of `~/.config/muse`. |
+| `--update` | Download and run the latest installer from GitHub, then install (keeps `endpoints.json` and your other settings). |
 | `--uninstall` | Remove only the files this installer added. Your other stuff stays. |
 | `--no-mcp` | Skip adding the `custom-coder` MCP server. |
 | `--backup` | Force the backup prompt, even if backup was disabled by environment. |
@@ -98,10 +99,10 @@ In Muse Code, type:
 
 It will:
 
-1. Read `endpoints.json` to see how many subagents each model may run at once.
+1. Read endpoint health/concurrency from `custom-coder` when available. If endpoints are missing or not working, it warns and continues in native-only mode (planning still works).
 2. Send out read-only explorers to map the code.
 3. Write the plan to `.muse/PLAN.md` with exact files, order, and test commands.
-4. Ask two different models to critique the plan, then fix the good points they raise.
+4. Ask the native plan reviewer to critique the plan, and ask `custom-coder` for an extra critique when available; then fix the good points they raise.
 
 It will not change product code. If `.muse/PLAN.md` already has an `## Execution Log & Decisions` section, it leaves that alone.
 
@@ -113,9 +114,9 @@ It will not change product code. If `.muse/PLAN.md` already has an `## Execution
 
 It will:
 
-1. Check the concurrency limits again.
+1. Check endpoint health and concurrency limits again. If `custom-coder` is unavailable or misconfigured, it warns and continues in native-only mode.
 2. Split the plan into waves. It never starts more subagents of one model than the limit allows.
-3. Ask the local model for **small diffs**, never whole-file rewrites. A model with real `Edit` tools applies the diffs.
+3. When `custom-coder` is available, ask the local model for **small diffs**, never whole-file rewrites; otherwise workers implement changes natively. A model with real `Edit` tools applies the diffs/edits.
 4. Run quick checks after each patch.
 5. Run the full typecheck/test commands from the plan. If they fail, it fixes things and tries again.
 6. Add a short entry to `## Execution Log & Decisions` in `.muse/PLAN.md` after every wave.
@@ -214,6 +215,8 @@ If you already have an `endpoints.json`, the installer leaves it alone. Add the 
 
 **About Muse subagents:** the router cannot see native Muse subagents, so `/squad-plan` and `/squad-execute` read `muse_models` and split work into waves themselves.
 
+**If endpoints are missing or not working:** muse-squad should still be usable. `/squad-plan` and `/squad-execute` check endpoint health up front, warn you, and fall back to native Muse models/subagents (no custom-coder generation/critique) instead of blocking. Fix `endpoints.json` and make sure the configured OpenAI-compatible server is reachable to re-enable `custom-coder` tools.
+
 > API keys sit in `endpoints.json` as plain text. Use local or limited keys, not a production key.
 
 Uninstalling removes the managed files and unregisters `custom-coder`, but **keeps `endpoints.json`** because it is your config now.
@@ -228,6 +231,8 @@ Uninstalling removes the managed files and unregisters `custom-coder`, but **kee
 | `critique_plan` | Get a grumpy second opinion on the plan. `/squad-plan` uses `grill-reviewer`. |
 | `coder_status` | See one endpoint's settings, current queue length, and limits. Keys are hidden. |
 | `list_endpoints` | See each endpoint's `max_concurrency`, `max_tokens`, `max_input_chars`, and `extra_body` keys (secrets hidden), plus `muse_models` and queue settings. The skills read this at startup. |
+
+If endpoints are not configured or unreadable, `coder_status`/`list_endpoints` return a warning payload (`available:false`) instead of failing so callers can fall back to native Muse models. `generate_code`/`critique_plan` will report a clear error until endpoints are fixed. |
 
 `generate_code` and `critique_plan` also accept an optional `max_tokens` override. `generate_code` accepts `task_spec` instead of `prompt`, and `file_context` instead of `context`.
 

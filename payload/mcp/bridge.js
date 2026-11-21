@@ -84,7 +84,7 @@ const TOOLS = [
   },
   {
     name: 'coder_status',
-    description: 'List configured endpoint aliases, default, fallback order, retry/queue limits, and live queue state. Keys are redacted.',
+    description: 'List configured endpoint aliases, default, fallback order, retry/queue limits, and live queue state. Keys are redacted. If endpoints are not configured or unreadable, returns a warning payload (available:false) instead of failing so callers can fall back to native Muse models.',
     inputSchema: {
       type: 'object',
       properties: { endpoint: ENDPOINT_PARAM },
@@ -93,7 +93,7 @@ const TOOLS = [
   },
   {
     name: 'list_endpoints',
-    description: 'Report every endpoint alias with its model, max_concurrency, max_tokens, max_input_chars, and extra_body keys, plus the muse_models native-subagent limits and queue settings. Keys are redacted.',
+    description: 'Report every endpoint alias with its model, max_concurrency, max_tokens, max_input_chars, and extra_body keys, plus the muse_models native-subagent limits and queue settings. Keys are redacted. If endpoints are not configured or unreadable, returns a warning payload (available:false) instead of failing so callers can fall back to native Muse models.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -101,6 +101,12 @@ const TOOLS = [
     }
   }
 ];
+
+const CONFIG_GUIDANCE = [
+  `Expected config file: ${CONFIG_FILE}`,
+  'Create or fix endpoints.json with at least one endpoint (base_url, api_key, model).',
+  'Without working custom-coder endpoints, muse-squad skills can still run using native Muse models; custom-coder generation/critique tools will be unavailable until endpoints are configured.'
+].join(' ');
 
 function log(message) {
   process.stderr.write(`[${SERVER_NAME}] ${message}\n`);
@@ -118,30 +124,61 @@ function fail(id, code, message) {
   send({ jsonrpc: '2.0', id, error: { code, message } });
 }
 
+function configError(message) {
+  return new Error(`${message}\n${CONFIG_GUIDANCE}`);
+}
+
+function tryLoadConfig() {
+  try {
+    return { ok: true, config: loadConfig() };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message,
+      warning: `custom-coder endpoints are not configured or not working properly: ${error.message}. ${CONFIG_GUIDANCE}`
+    };
+  }
+}
+
+function unavailableResult(reason) {
+  const payload = {
+    ok: false,
+    available: false,
+    configFile: CONFIG_FILE,
+    warning: reason.warning || `custom-coder endpoints are not configured or not working properly: ${reason.error}. ${CONFIG_GUIDANCE}`,
+    error: reason.error,
+    guidance: CONFIG_GUIDANCE
+  };
+  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], isError: false };
+}
+
 function loadConfig() {
   let raw;
   try {
     raw = fs.readFileSync(CONFIG_FILE, 'utf8');
   } catch (error) {
-    throw new Error(`cannot read endpoint config ${CONFIG_FILE}: ${error.message}`);
+    if (error && error.code === 'ENOENT') {
+      throw configError(`endpoint config not found at ${CONFIG_FILE}`);
+    }
+    throw configError(`cannot read endpoint config ${CONFIG_FILE}: ${error.message}`);
   }
 
   let config;
   try {
     config = JSON.parse(raw);
   } catch (error) {
-    throw new Error(`invalid JSON in ${CONFIG_FILE}: ${error.message}`);
+    throw configError(`invalid JSON in ${CONFIG_FILE}: ${error.message}`);
   }
   if (!config || typeof config !== 'object' || Array.isArray(config)) {
-    throw new Error(`${CONFIG_FILE}: top-level JSON value must be an object`);
+    throw configError(`${CONFIG_FILE}: top-level JSON value must be an object`);
   }
 
   const endpoints = config.endpoints;
   if (!endpoints || typeof endpoints !== 'object' || Array.isArray(endpoints)) {
-    throw new Error(`${CONFIG_FILE}: "endpoints" must be an object`);
+    throw configError(`${CONFIG_FILE}: "endpoints" must be an object`);
   }
   const names = Object.keys(endpoints);
-  if (names.length === 0) throw new Error(`${CONFIG_FILE}: "endpoints" must not be empty`);
+  if (names.length === 0) throw configError(`${CONFIG_FILE}: "endpoints" must not be empty`);
 
   for (const name of names) {
     const endpoint = endpoints[name];
@@ -508,7 +545,14 @@ async function queryWithFallback(primaryName, requestTemplate, config) {
 
 async function callTool(name, args) {
   const params = args || {};
-  const config = loadConfig();
+  const loaded = tryLoadConfig();
+  if (!loaded.ok) {
+    if (name === 'coder_status' || name === 'list_endpoints') {
+      return unavailableResult(loaded);
+    }
+    throw new Error(loaded.warning);
+  }
+  const config = loaded.config;
 
   if (name === 'coder_status' || name === 'list_endpoints') {
     const selected = name === 'coder_status' ? requireEndpoint(config, params.endpoint) : null;
@@ -534,6 +578,8 @@ async function callTool(name, args) {
       };
     };
     const shared = {
+      ok: true,
+      available: true,
       configFile: CONFIG_FILE,
       defaultEndpoint: config.defaultName,
       fallbackOrder: config.fallbackOrder,

@@ -10,10 +10,12 @@ $mode = 'install'
 $help = $false
 $skipMcp = $false
 $backupChoice = 'auto'
+$repoRawBase = 'https://raw.githubusercontent.com/tenantegroup/muse-squad/main'
 if ($null -eq $args) { $args = @() }
 
 for ($i = 0; $i -lt $args.Count; $i++) {
   switch -CaseSensitive ($args[$i]) {
+    '--update' { $mode = 'update' }
     '--uninstall' { $mode = 'uninstall' }
     '--no-mcp' { $skipMcp = $true }
     '--backup' { $backupChoice = 'yes' }
@@ -43,10 +45,11 @@ muse-squad installer
 
 Usage:
   irm https://raw.githubusercontent.com/tenantegroup/muse-squad/main/install.ps1 | iex
-  powershell -File install.ps1 [--dir PATH] [--uninstall] [--no-mcp]
+  powershell -File install.ps1 [--dir PATH] [--update] [--uninstall] [--no-mcp]
 
 Options:
   --dir PATH       Install into PATH instead of ~/.config/muse
+  --update         Download and run the latest installer from GitHub, then install
   --uninstall      Remove managed files and unregister custom-coder
   --no-mcp         Skip custom-coder MCP registration
   --backup         Force a backup prompt/backup
@@ -194,8 +197,49 @@ function Register-Mcp([string]$action) {
   }
 }
 
+function Invoke-SelfUpdate {
+  $url = "$repoRawBase/install.ps1"
+  $tmp = Join-Path ([IO.Path]::GetTempPath()) ("muse-squad-update-" + [Guid]::NewGuid().ToString('N') + '.ps1')
+  Write-Host "  fetching   $url"
+  try {
+    if (Get-Command Invoke-WebRequest -ErrorAction SilentlyContinue) {
+      Invoke-WebRequest -Uri $url -OutFile $tmp -UseBasicParsing
+    } else {
+      Invoke-RestMethod -Uri $url -OutFile $tmp
+    }
+  } catch {
+    if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+    throw "cannot download latest installer: $($_.Exception.Message)"
+  }
+  $updateArgs = @('--dir', $configDir)
+  if ($skipMcp -or $env:MUSE_SQUAD_SKIP_MCP -eq '1') { $updateArgs += '--no-mcp' }
+  if ($backupChoice -eq 'yes') { $updateArgs += '--backup' }
+  if ($backupChoice -eq 'no') { $updateArgs += '--no-backup' }
+  Write-Host '  running    latest installer'
+  try {
+    $shell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } elseif (Get-Command powershell -ErrorAction SilentlyContinue) { 'powershell' } else { $null }
+    if ($shell) {
+      & $shell -NoProfile -File $tmp @updateArgs
+      $rc = if ($null -eq $LASTEXITCODE) { 0 } else { $LASTEXITCODE }
+      if ($rc -ne 0) { throw "latest installer failed with exit code $rc" }
+    } else {
+      & $tmp @updateArgs
+    }
+  } finally {
+    if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
+  }
+}
+
 Write-Host "muse-squad v$Version - $mode"
 Write-Host "config dir: $configDir"
+
+if ($mode -eq 'update') {
+  Invoke-SelfUpdate
+  Write-Host 'done.'
+  return
+}
+
+$firstInstall = -not (Test-Path -LiteralPath (Join-Path $configDir 'endpoints.json'))
 
 Backup-Config
 
@@ -236,11 +280,11 @@ Complete the assigned step from `.muse/PLAN.md`. Only touch files listed in your
 
 ## Patch Discipline
 
-Apply `custom-coder:generate_code` output only as a targeted unified diff or single function/block using native `Edit` tools — never overwrite an entire file from local-model output. Reject full-file rewrites, truncation markers, and unapplyable diffs; re-prompt for a scoped diff instead.
+If `custom-coder` is available, you may use `custom-coder:generate_code` and apply its output only as a targeted unified diff or single function/block using native `Edit` tools - never overwrite an entire file from local-model output. Reject full-file rewrites, truncation markers, and unapplyable diffs; re-prompt for a scoped diff instead. If `custom-coder` is unavailable or misconfigured, implement the assigned change directly with your own tools/editing capabilities and continue; report the endpoint warning in your summary.
 
 ## Instant Diagnostics
 
-Immediately after applying code from `custom-coder:generate_code` — and before returning your summary — run the fastest available single-file or incremental check on the files you changed:
+Immediately after applying code changes - and before returning your summary - run the fastest available single-file or incremental check on the files you changed:
 
 - Use any LSP diagnostics the harness exposes for the changed files.
 - TypeScript/JavaScript: `npx tsc --noEmit` (or the project's incremental typecheck).
@@ -252,7 +296,7 @@ Prefer checks scoped to the changed files. Do not install new tools or run full 
 
 ## Shared MCP Queue
 
-Other workers may call `custom-coder` tools at the same time. The router queues those calls FIFO and serializes them per endpoint's `max_concurrency`, so just make your call and wait — do not add your own locks or retry loops, and do not switch endpoints to dodge a queue. If a call reports a queue timeout, return that in your summary and let the orchestrator re-batch the wave.
+Other workers may call `custom-coder` tools at the same time. The router queues those calls FIFO and serializes them per endpoint's `max_concurrency`, so just make your call and wait - do not add your own locks or retry loops, and do not switch endpoints to dodge a queue. If a call reports a queue timeout, config/endpoint error, or that custom-coder is unavailable, note it clearly in your summary and continue with native implementation when possible; let the orchestrator re-batch or reconfigure if needed.
 '@
 Install-File 'agents/worker.md' @'
 ---
@@ -265,11 +309,11 @@ Complete the assigned step from `.muse/PLAN.md`. Only touch files listed in your
 
 ## Patch Discipline
 
-Apply `custom-coder:generate_code` output only as a targeted unified diff or single function/block using native `Edit` tools — never overwrite an entire file from local-model output. Reject full-file rewrites, truncation markers, and unapplyable diffs; re-prompt for a scoped diff instead.
+If `custom-coder` is available, you may use `custom-coder:generate_code` and apply its output only as a targeted unified diff or single function/block using native `Edit` tools - never overwrite an entire file from local-model output. Reject full-file rewrites, truncation markers, and unapplyable diffs; re-prompt for a scoped diff instead. If `custom-coder` is unavailable or misconfigured, implement the assigned change directly with your own tools/editing capabilities and continue; report the endpoint warning in your summary.
 
 ## Instant Diagnostics
 
-Immediately after applying code from `custom-coder:generate_code` — and before returning your summary — run the fastest available single-file or incremental check on the files you changed:
+Immediately after applying code changes - and before returning your summary - run the fastest available single-file or incremental check on the files you changed:
 
 - Use any LSP diagnostics the harness exposes for the changed files.
 - TypeScript/JavaScript: `npx tsc --noEmit` (or the project's incremental typecheck).
@@ -281,7 +325,7 @@ Prefer checks scoped to the changed files. Do not install new tools or run full 
 
 ## Shared MCP Queue
 
-Other workers may call `custom-coder` tools at the same time. The router queues those calls FIFO and serializes them per endpoint's `max_concurrency`, so just make your call and wait — do not add your own locks or retry loops, and do not switch endpoints to dodge a queue. If a call reports a queue timeout, return that in your summary and let the orchestrator re-batch the wave.
+Other workers may call `custom-coder` tools at the same time. The router queues those calls FIFO and serializes them per endpoint's `max_concurrency`, so just make your call and wait - do not add your own locks or retry loops, and do not switch endpoints to dodge a queue. If a call reports a queue timeout, config/endpoint error, or that custom-coder is unavailable, note it clearly in your summary and continue with native implementation when possible; let the orchestrator re-batch or reconfigure if needed.
 '@
 Install-File 'skills/squad-plan/SKILL.md' @'
 ---
@@ -312,21 +356,24 @@ Examples:
 
 Use this format as the default for every spawn. If a one-off subagent truly has no meaningful role or model, keep the bracketed prefix with a plain tag such as `[helper | ember]` rather than leaving the title unlabeled.
 
-## Concurrency Budget (read first)
+## Concurrency Budget and Endpoint Health (read first)
 
-Before spawning anything, read `~/.config/muse/endpoints.json` (or call `custom-coder:list_endpoints`) and note the `muse_models` limits and each endpoint's `max_concurrency`. The orchestrator must never spawn more simultaneous native subagents of a given model than that model's `muse_models` limit — for example at most 4 `muse-ember-1.0` or 2 `muse-spark-1.3` subagents at once. Batch any larger exploration into successive waves. Parallel workers may safely call `custom-coder` MCP tools at the same time: the router queues requests FIFO and serializes them per endpoint's `max_concurrency`.
+At the start, call `custom-coder:list_endpoints` (or read `~/.config/muse/endpoints.json`) to learn `muse_models` limits, endpoint `max_concurrency`, and whether custom-coder is available.
 
-## Context Size (custom-coder)
+- If the result indicates custom-coder is unavailable, misconfigured, or not working properly (for example `available: false`, `ok: false`/`warning`, missing/unreadable config, or the tool cannot be reached), **warn the user clearly** with the reported issue and continue in **native-only mode**: do not block planning. Use native Muse subagents/models for exploration and critique and skip `custom-coder` tool calls until endpoints are fixed. If a custom-coder call fails later at runtime, treat that the same way (warn and continue natively). Use sensible default concurrency if limits are unknown (for example at most 2 concurrent native subagents of the same model) and batch into waves.
+- If custom-coder is available, never spawn more simultaneous native subagents of a given model than that model's `muse_models` limit (for example at most 4 `muse-ember-1.0` or 2 `muse-spark-1.3` at once). Batch any larger exploration into successive waves. Parallel workers may safely call `custom-coder` MCP tools at the same time: the router queues requests FIFO and serializes them per endpoint's `max_concurrency`.
 
-When calling `custom-coder`, keep `repo_context`, `file_context`, and `plan_markdown` short and relevant to the decision at hand. Use `custom-coder:list_endpoints` to check the target endpoint's `max_input_chars` and `extra_body` context hints (such as `options.num_ctx`) before sending. Send only the needed files or excerpts — never dump whole unrelated files. If a reply starts with the input-truncated warning, the model saw less context than you intended: shorten the context and re-ask instead of trusting the critique.
+## Context Size (custom-coder, when available)
+
+When calling `custom-coder`, keep `repo_context`, `file_context`, and `plan_markdown` short and relevant to the decision at hand. Use `custom-coder:list_endpoints` to check the target endpoint's `max_input_chars` and `extra_body` context hints (such as `options.num_ctx`) before sending. Send only the needed files or excerpts - never dump whole unrelated files. If a reply starts with the input-truncated warning, the model saw less context than you intended: shorten the context and re-ask instead of trusting the critique.
 
 1. Spawn parallel read-only subagents (`explore` / `general-purpose`) to map the relevant files, dependencies, and existing patterns.
 2. Ask the user clarifying questions ONLY if an architectural fork cannot be resolved from the codebase.
 3. Draft a decision-complete implementation plan in `.muse/PLAN.md` with exact file paths, dependency order, and verification commands. If the file already has a `## Execution Log & Decisions` section, preserve it verbatim at the bottom — it is the durable handoff record from any prior execution session; do not overwrite it unless the user explicitly asks to reset the plan.
-4. Dual-Brain Plan Grill:
+4. Plan Grill (degrades gracefully):
    1. Spawn our native `plan-reviewer` subagent (read-only) to audit `.muse/PLAN.md` against the actual files in the repository.
-   2. Simultaneously call the `custom-coder:critique_plan` MCP tool with `endpoint: "grill-reviewer"` so your self-hosted model performs an independent adversarial review.
-   3. Synthesize both critiques, resolve any valid issues in `.muse/PLAN.md`, and present a summary of what was caught before asking the user for `/squad-execute` sign-off.
+   2. If custom-coder is available, simultaneously call `custom-coder:critique_plan` (endpoint `grill-reviewer` when present) for an independent adversarial review. If custom-coder is unavailable or the call fails, skip it, warn the user that the self-hosted critique was not run, and proceed with the native review only.
+   3. Synthesize available critiques, resolve any valid issues in `.muse/PLAN.md`, and present a summary of what was caught (and any endpoint warning) before asking the user for `/squad-execute` sign-off.
 '@
 Install-File 'skills/squad-execute/SKILL.md' @'
 ---
@@ -356,19 +403,20 @@ Examples:
 
 Use this format as the default for every spawn. If a one-off subagent truly has no meaningful role or model, keep the bracketed prefix with a plain tag such as `[helper | ember]` rather than leaving the title unlabeled.
 
-Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` section — that section is the durable handoff record when resuming a long or interrupted session. Group independent tasks into parallel waves and delegate each bounded task to `worker` subagents using isolated Git worktrees (`--subagent-worktree-isolation` behavior).
+Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` section - that section is the durable handoff record when resuming a long or interrupted session. Group independent tasks into parallel waves and delegate each bounded task to `worker` subagents using isolated Git worktrees (`--subagent-worktree-isolation` behavior).
 
-Use the `custom-coder` MCP tool (`generate_code`) with `endpoint: "local-coder"` for heavy code generation: pass a bounded prompt plus the relevant file context, then apply and verify the returned diff locally.
+## Endpoint Health and Execution Mode (read first)
 
-## Context Size (custom-coder)
+At the start, call `custom-coder:list_endpoints` (or read `~/.config/muse/endpoints.json`) to learn `muse_models` limits and whether custom-coder is available.
 
-Before each `generate_code` call, use `custom-coder:list_endpoints` to check the target endpoint's `max_input_chars` and `extra_body` context hints (such as `options.num_ctx`). Keep `file_context` (and any `repo_context`) to the smallest excerpts that explain the change — no whole-file dumps, logs, or unrelated tests. If the reply starts with the input-truncated warning, shorten the context and re-ask; do not apply a diff generated from cut-off context.
+- If custom-coder is unavailable, misconfigured, or not working properly (for example `available: false`, `ok: false`/`warning`, missing/unreadable config, or unreachable), **warn the user clearly** with the reported issue and continue in **native-only mode**: do not block execution. Have workers implement changes directly with native Muse tools/editing instead of calling `custom-coder:generate_code`, and skip `custom-coder` critiques. If a custom-coder call fails later at runtime, treat that the same way (warn and continue natively). Use sensible default concurrency if limits are unknown (for example at most 2 concurrent native workers of the same model) and batch into waves.
+- If custom-coder is available, use `custom-coder:generate_code` (endpoint `local-coder` when present) for heavy code generation when helpful: pass a bounded prompt plus relevant file context, then apply and verify the returned diff locally. Never spawn more simultaneous native subagents of a given model than `muse_models` allows (for example at most 4 `muse-ember-1.0` or 2 `muse-spark-1.3` workers). Batch waves to respect limits.
 
-## Concurrency Budget (read first)
+Multiple parallel workers may safely call `custom-coder` MCP tools concurrently when available: `bridge.js` queues requests FIFO and serializes them per endpoint's `max_concurrency` (local endpoints default to `1` to avoid GPU/RAM OOM). A queued call waits for a slot rather than failing over; fallback only happens after retries fail or the queue wait exceeds `queue_timeout_ms`. Do not implement separate locking in the workers.
 
-At the start of execution, read `~/.config/muse/endpoints.json` (or call `custom-coder:list_endpoints`) and note the `muse_models` native-model limits and each endpoint's `max_concurrency`. Batch each wave so no model ever exceeds its `muse_models` limit simultaneously — e.g. at most 4 concurrent `muse-ember-1.0` workers or 2 `muse-spark-1.3` workers. If more tasks are ready, hold them for the next wave; never exceed the budget.
+## Context Size (custom-coder, when available)
 
-Multiple parallel workers may safely call `custom-coder` MCP tools concurrently: `bridge.js` queues requests FIFO and serializes them per endpoint's `max_concurrency` (local endpoints default to `1` to avoid GPU/RAM OOM). A queued call waits for a slot rather than failing over; fallback only happens after retries fail or the queue wait exceeds `queue_timeout_ms`. Do not implement separate locking in the workers.
+Before each `generate_code` call, check the target endpoint's `max_input_chars` and `extra_body` context hints (such as `options.num_ctx`). Keep `file_context` (and any `repo_context`) to the smallest excerpts that explain the change - no whole-file dumps, logs, or unrelated tests. If the reply starts with the input-truncated warning, shorten the context and re-ask; do not apply a diff generated from cut-off context.
 
 ## Patch Discipline (Diffs, Not Full Rewrites)
 
@@ -493,7 +541,7 @@ const TOOLS = [
   },
   {
     name: 'coder_status',
-    description: 'List configured endpoint aliases, default, fallback order, retry/queue limits, and live queue state. Keys are redacted.',
+    description: 'List configured endpoint aliases, default, fallback order, retry/queue limits, and live queue state. Keys are redacted. If endpoints are not configured or unreadable, returns a warning payload (available:false) instead of failing so callers can fall back to native Muse models.',
     inputSchema: {
       type: 'object',
       properties: { endpoint: ENDPOINT_PARAM },
@@ -502,7 +550,7 @@ const TOOLS = [
   },
   {
     name: 'list_endpoints',
-    description: 'Report every endpoint alias with its model, max_concurrency, max_tokens, max_input_chars, and extra_body keys, plus the muse_models native-subagent limits and queue settings. Keys are redacted.',
+    description: 'Report every endpoint alias with its model, max_concurrency, max_tokens, max_input_chars, and extra_body keys, plus the muse_models native-subagent limits and queue settings. Keys are redacted. If endpoints are not configured or unreadable, returns a warning payload (available:false) instead of failing so callers can fall back to native Muse models.',
     inputSchema: {
       type: 'object',
       properties: {},
@@ -510,6 +558,12 @@ const TOOLS = [
     }
   }
 ];
+
+const CONFIG_GUIDANCE = [
+  `Expected config file: ${CONFIG_FILE}`,
+  'Create or fix endpoints.json with at least one endpoint (base_url, api_key, model).',
+  'Without working custom-coder endpoints, muse-squad skills can still run using native Muse models; custom-coder generation/critique tools will be unavailable until endpoints are configured.'
+].join(' ');
 
 function log(message) {
   process.stderr.write(`[${SERVER_NAME}] ${message}\n`);
@@ -527,30 +581,61 @@ function fail(id, code, message) {
   send({ jsonrpc: '2.0', id, error: { code, message } });
 }
 
+function configError(message) {
+  return new Error(`${message}\n${CONFIG_GUIDANCE}`);
+}
+
+function tryLoadConfig() {
+  try {
+    return { ok: true, config: loadConfig() };
+  } catch (error) {
+    return {
+      ok: false,
+      error: error.message,
+      warning: `custom-coder endpoints are not configured or not working properly: ${error.message}. ${CONFIG_GUIDANCE}`
+    };
+  }
+}
+
+function unavailableResult(reason) {
+  const payload = {
+    ok: false,
+    available: false,
+    configFile: CONFIG_FILE,
+    warning: reason.warning || `custom-coder endpoints are not configured or not working properly: ${reason.error}. ${CONFIG_GUIDANCE}`,
+    error: reason.error,
+    guidance: CONFIG_GUIDANCE
+  };
+  return { content: [{ type: 'text', text: JSON.stringify(payload, null, 2) }], isError: false };
+}
+
 function loadConfig() {
   let raw;
   try {
     raw = fs.readFileSync(CONFIG_FILE, 'utf8');
   } catch (error) {
-    throw new Error(`cannot read endpoint config ${CONFIG_FILE}: ${error.message}`);
+    if (error && error.code === 'ENOENT') {
+      throw configError(`endpoint config not found at ${CONFIG_FILE}`);
+    }
+    throw configError(`cannot read endpoint config ${CONFIG_FILE}: ${error.message}`);
   }
 
   let config;
   try {
     config = JSON.parse(raw);
   } catch (error) {
-    throw new Error(`invalid JSON in ${CONFIG_FILE}: ${error.message}`);
+    throw configError(`invalid JSON in ${CONFIG_FILE}: ${error.message}`);
   }
   if (!config || typeof config !== 'object' || Array.isArray(config)) {
-    throw new Error(`${CONFIG_FILE}: top-level JSON value must be an object`);
+    throw configError(`${CONFIG_FILE}: top-level JSON value must be an object`);
   }
 
   const endpoints = config.endpoints;
   if (!endpoints || typeof endpoints !== 'object' || Array.isArray(endpoints)) {
-    throw new Error(`${CONFIG_FILE}: "endpoints" must be an object`);
+    throw configError(`${CONFIG_FILE}: "endpoints" must be an object`);
   }
   const names = Object.keys(endpoints);
-  if (names.length === 0) throw new Error(`${CONFIG_FILE}: "endpoints" must not be empty`);
+  if (names.length === 0) throw configError(`${CONFIG_FILE}: "endpoints" must not be empty`);
 
   for (const name of names) {
     const endpoint = endpoints[name];
@@ -917,7 +1002,14 @@ async function queryWithFallback(primaryName, requestTemplate, config) {
 
 async function callTool(name, args) {
   const params = args || {};
-  const config = loadConfig();
+  const loaded = tryLoadConfig();
+  if (!loaded.ok) {
+    if (name === 'coder_status' || name === 'list_endpoints') {
+      return unavailableResult(loaded);
+    }
+    throw new Error(loaded.warning);
+  }
+  const config = loaded.config;
 
   if (name === 'coder_status' || name === 'list_endpoints') {
     const selected = name === 'coder_status' ? requireEndpoint(config, params.endpoint) : null;
@@ -943,6 +1035,8 @@ async function callTool(name, args) {
       };
     };
     const shared = {
+      ok: true,
+      available: true,
       configFile: CONFIG_FILE,
       defaultEndpoint: config.defaultName,
       fallbackOrder: config.fallbackOrder,
@@ -1228,4 +1322,12 @@ Install-Endpoints-Config @'
 }
 '@
 Register-Mcp 'install'
+if ($mode -eq 'install' -and $firstInstall) {
+  Write-Host ''
+  Write-Host 'Next steps:'
+  Write-Host "  1. Configure: edit $(Join-Path $configDir 'endpoints.json') (base_url, model, api_key). Missing/unreachable endpoints still work in native-only mode with warnings."
+  Write-Host '  2. Use in Muse Code: /squad-plan to create .muse/PLAN.md, then /squad-execute.'
+  Write-Host "  3. Customize: add agents in $(Join-Path $configDir 'agents') (*.md) and skills in $(Join-Path $configDir 'skills\<name>\SKILL.md')."
+  Write-Host '  4. Update later: re-run this installer with --update.'
+}
 Write-Host 'done.'
