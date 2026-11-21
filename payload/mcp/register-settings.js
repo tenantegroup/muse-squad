@@ -54,29 +54,47 @@ function writeSettings(settings) {
 
 function main() {
   const settings = loadSettings();
-  if (!settings.mcp_servers || typeof settings.mcp_servers !== 'object' || Array.isArray(settings.mcp_servers)) {
-    settings.mcp_servers = {};
-  }
   if (settings.schema_version === undefined) settings.schema_version = 1;
 
+  const hasServers = settings.mcpServers && typeof settings.mcpServers === 'object' && !Array.isArray(settings.mcpServers);
+  if (!hasServers) settings.mcpServers = {};
+
+  // Clean up legacy snake_case key left by older installers.
+  const legacy = settings.mcp_servers && typeof settings.mcp_servers === 'object' && !Array.isArray(settings.mcp_servers)
+    ? settings.mcp_servers
+    : null;
+
   if (unregister) {
-    if (!Object.prototype.hasOwnProperty.call(settings.mcp_servers, 'custom-coder')) {
+    const removedCurrent = Object.prototype.hasOwnProperty.call(settings.mcpServers, 'custom-coder');
+    const removedLegacy = !!(legacy && Object.prototype.hasOwnProperty.call(legacy, 'custom-coder'));
+    if (!removedCurrent && !removedLegacy) {
       console.log('  unchanged  custom-coder not registered');
       return;
     }
-    delete settings.mcp_servers['custom-coder'];
+    if (removedCurrent) delete settings.mcpServers['custom-coder'];
+    if (removedLegacy) delete legacy['custom-coder'];
   } else {
     if (!bridgePath || !configFile) {
       console.error('register-settings.js: --bridge and --config-file are required');
       process.exit(2);
     }
-    settings.mcp_servers['custom-coder'] = {
+    settings.mcpServers['custom-coder'] = {
+      transport: 'stdio',
       command: 'node',
       args: [bridgePath],
       env: {
         MODELS_CONFIG_FILE: configFile
-      }
+      },
+      mode: 'optional'
     };
+    if (legacy && Object.prototype.hasOwnProperty.call(legacy, 'custom-coder')) {
+      delete legacy['custom-coder'];
+    }
+  }
+
+  // Remove empty legacy container to avoid confusing duplicate config.
+  if (legacy && Object.keys(legacy).length === 0) {
+    delete settings.mcp_servers;
   }
 
   const desired = `${JSON.stringify(settings, null, 2)}\n`;

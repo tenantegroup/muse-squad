@@ -22,8 +22,9 @@ verify_entry() {
   SETTINGS="$1" EXPECT_CONFIG="$2" node -e '
     const fs = require("fs");
     const s = JSON.parse(fs.readFileSync(process.env.SETTINGS, "utf8"));
-    const c = s.mcp_servers && s.mcp_servers["custom-coder"];
+    const c = s.mcpServers && s.mcpServers["custom-coder"];
     if (!c) throw new Error("missing custom-coder");
+    if (c.transport !== "stdio") throw new Error("bad transport");
     if (c.command !== "node") throw new Error("bad command");
     if (!Array.isArray(c.args) || !c.args[0].replace(/\\/g, "/").endsWith("mcp/bridge.js")) {
       throw new Error("bad args");
@@ -31,8 +32,12 @@ verify_entry() {
     if (!c.env || c.env.MODELS_CONFIG_FILE !== process.env.EXPECT_CONFIG) {
       throw new Error("bad MODELS_CONFIG_FILE");
     }
+    if (c.mode !== "optional") throw new Error("bad mode");
     for (const key of ["OPENAI_BASE_URL", "OPENAI_API_KEY", "MODEL_NAME", "DEFAULT_ENDPOINT"]) {
       if (key in c.env) throw new Error(`unexpected legacy env: ${key}`);
+    }
+    if (s.mcp_servers && s.mcp_servers["custom-coder"]) {
+      throw new Error("legacy mcp_servers.custom-coder still present");
     }
   '
 }
@@ -151,8 +156,8 @@ cat > "$TMP/merge-config/settings.json" <<'JSON'
 {
   "schema_version": 1,
   "theme": "dark",
-  "mcp_servers": {
-    "other": { "command": "other-cmd", "args": [] }
+  "mcpServers": {
+    "other": { "transport": "stdio", "command": "other-cmd", "args": [], "mode": "optional" }
   }
 }
 JSON
@@ -172,7 +177,7 @@ SETTINGS="$TMP/merge-config/settings.json" node -e '
   const fs = require("fs");
   const s = JSON.parse(fs.readFileSync(process.env.SETTINGS, "utf8"));
   if (s.theme !== "dark") throw new Error("lost theme");
-  if (!s.mcp_servers.other) throw new Error("lost other MCP server");
+  if (!s.mcpServers.other) throw new Error("lost other MCP server");
 '
 echo "  ok"
 
@@ -231,7 +236,7 @@ done
 SETTINGS="$TMP/bash-config/settings.json" node -e '
   const fs = require("fs");
   const s = JSON.parse(fs.readFileSync(process.env.SETTINGS, "utf8"));
-  if (s.mcp_servers["custom-coder"]) throw new Error("custom-coder not unregistered");
+  if (s.mcpServers && s.mcpServers["custom-coder"]) throw new Error("custom-coder not unregistered");
 '
 [[ -f "$TMP/bash-config/endpoints.json" ]] || { echo "FAIL: endpoints.json was removed" >&2; exit 1; }
 echo "  ok"
@@ -241,8 +246,8 @@ MUSE_CONFIG_DIR="$TMP/merge-config" bash "$ROOT/install" --uninstall >/dev/null
 SETTINGS="$TMP/merge-config/settings.json" node -e '
   const fs = require("fs");
   const s = JSON.parse(fs.readFileSync(process.env.SETTINGS, "utf8"));
-  if (s.mcp_servers["custom-coder"]) throw new Error("custom-coder not unregistered");
-  if (s.theme !== "dark" || !s.mcp_servers.other) throw new Error("lost unrelated settings");
+  if (s.mcpServers && s.mcpServers["custom-coder"]) throw new Error("custom-coder not unregistered");
+  if (s.theme !== "dark" || !s.mcpServers.other) throw new Error("lost unrelated settings");
 '
 echo "  ok"
 

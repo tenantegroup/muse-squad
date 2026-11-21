@@ -1,8 +1,6 @@
 ---
 name: general-purpose
-description: Executes a single bounded implementation task from a written plan, with fast per-file diagnostics. Overrides the built-in general-purpose agent with the cheap local model.
-model: local-llama/Ornith-1.5-35B-A3B-MLX-4bit
-effort: medium
+description: Executes a single bounded implementation task from a written plan, with fast per-file diagnostics.
 ---
 Complete the assigned step from `.muse/PLAN.md`. Only touch files listed in your brief, run the specified tests, and return a concise summary of changes.
 

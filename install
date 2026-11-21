@@ -224,8 +224,6 @@ install_file agents/plan-reviewer.md <<'MSQ_PAYLOAD_001'
 ---
 name: plan-reviewer
 description: Stress-tests technical plans for edge cases, missing files, and architectural flaws. Read-only.
-model: muse-spark-1.3-contributor
-effort: high
 disallowedTools: ["Edit", "Write", "Bash"]
 ---
 Review the proposed plan in `.muse/PLAN.md`. Identify gaps, ambiguous requirements, race conditions, or missing verification steps. Do not modify code.
@@ -233,9 +231,7 @@ MSQ_PAYLOAD_001
 install_file agents/general-purpose.md <<'MSQ_PAYLOAD_002'
 ---
 name: general-purpose
-description: Executes a single bounded implementation task from a written plan, with fast per-file diagnostics. Overrides the built-in general-purpose agent with the cheap local model.
-model: local-llama/Ornith-1.5-35B-A3B-MLX-4bit
-effort: medium
+description: Executes a single bounded implementation task from a written plan, with fast per-file diagnostics.
 ---
 Complete the assigned step from `.muse/PLAN.md`. Only touch files listed in your brief, run the specified tests, and return a concise summary of changes.
 
@@ -263,8 +259,6 @@ install_file agents/worker.md <<'MSQ_PAYLOAD_003'
 ---
 name: worker
 description: Executes a single bounded implementation task from a written plan, with fast per-file diagnostics.
-model: local-llama/Ornith-1.5-35B-A3B-MLX-4bit
-effort: medium
 ---
 Complete the assigned step from `.muse/PLAN.md`. Only touch files listed in your brief, run the specified tests, and return a concise summary of changes.
 
@@ -328,12 +322,12 @@ At the start, call `custom-coder:list_endpoints` (or read `~/.config/muse/endpoi
 
 When calling `custom-coder`, keep `repo_context`, `file_context`, and `plan_markdown` short and relevant to the decision at hand. Use `custom-coder:list_endpoints` to check the target endpoint's `max_input_chars` and `extra_body` context hints (such as `options.num_ctx`) before sending. Send only the needed files or excerpts - never dump whole unrelated files. If a reply starts with the input-truncated warning, the model saw less context than you intended: shorten the context and re-ask instead of trusting the critique.
 
-1. Spawn parallel read-only subagents (`explore` / `general-purpose`) to map the relevant files, dependencies, and existing patterns.
+1. Map the relevant files, dependencies, and existing patterns. Prefer spawning parallel read-only subagents (for example `explore` or `general-purpose`, if available in this runtime) for faster coverage; if subagent spawning fails, is rejected, or is unavailable, do the equivalent read-only mapping inline instead of stopping.
 2. Ask the user clarifying questions ONLY if an architectural fork cannot be resolved from the codebase.
 3. Draft a decision-complete implementation plan in `.muse/PLAN.md` with exact file paths, dependency order, and verification commands. If the file already has a `## Execution Log & Decisions` section, preserve it verbatim at the bottom — it is the durable handoff record from any prior execution session; do not overwrite it unless the user explicitly asks to reset the plan.
 4. Plan Grill (degrades gracefully):
-   1. Spawn our native `plan-reviewer` subagent (read-only) to audit `.muse/PLAN.md` against the actual files in the repository.
-   2. If custom-coder is available, simultaneously call `custom-coder:critique_plan` (endpoint `grill-reviewer` when present) for an independent adversarial review. If custom-coder is unavailable or the call fails, skip it, warn the user that the self-hosted critique was not run, and proceed with the native review only.
+   1. Audit `.muse/PLAN.md` against the actual files in the repository. Prefer spawning a read-only `plan-reviewer` subagent if available; if that spawn fails, perform the same critique inline.
+   2. If custom-coder is available, call `custom-coder:critique_plan` (endpoint `grill-reviewer` when present) for an independent adversarial review (in parallel with the native review when practical). If custom-coder is unavailable or the call fails, skip it, warn the user that the self-hosted critique was not run, and proceed with the native/inline review only.
    3. Synthesize available critiques, resolve any valid issues in `.muse/PLAN.md`, and present a summary of what was caught (and any endpoint warning) before asking the user for `/squad-execute` sign-off.
 MSQ_PAYLOAD_004
 install_file skills/squad-execute/SKILL.md <<'MSQ_PAYLOAD_005'
@@ -1197,29 +1191,47 @@ function writeSettings(settings) {
 
 function main() {
   const settings = loadSettings();
-  if (!settings.mcp_servers || typeof settings.mcp_servers !== 'object' || Array.isArray(settings.mcp_servers)) {
-    settings.mcp_servers = {};
-  }
   if (settings.schema_version === undefined) settings.schema_version = 1;
 
+  const hasServers = settings.mcpServers && typeof settings.mcpServers === 'object' && !Array.isArray(settings.mcpServers);
+  if (!hasServers) settings.mcpServers = {};
+
+  // Clean up legacy snake_case key left by older installers.
+  const legacy = settings.mcp_servers && typeof settings.mcp_servers === 'object' && !Array.isArray(settings.mcp_servers)
+    ? settings.mcp_servers
+    : null;
+
   if (unregister) {
-    if (!Object.prototype.hasOwnProperty.call(settings.mcp_servers, 'custom-coder')) {
+    const removedCurrent = Object.prototype.hasOwnProperty.call(settings.mcpServers, 'custom-coder');
+    const removedLegacy = !!(legacy && Object.prototype.hasOwnProperty.call(legacy, 'custom-coder'));
+    if (!removedCurrent && !removedLegacy) {
       console.log('  unchanged  custom-coder not registered');
       return;
     }
-    delete settings.mcp_servers['custom-coder'];
+    if (removedCurrent) delete settings.mcpServers['custom-coder'];
+    if (removedLegacy) delete legacy['custom-coder'];
   } else {
     if (!bridgePath || !configFile) {
       console.error('register-settings.js: --bridge and --config-file are required');
       process.exit(2);
     }
-    settings.mcp_servers['custom-coder'] = {
+    settings.mcpServers['custom-coder'] = {
+      transport: 'stdio',
       command: 'node',
       args: [bridgePath],
       env: {
         MODELS_CONFIG_FILE: configFile
-      }
+      },
+      mode: 'optional'
     };
+    if (legacy && Object.prototype.hasOwnProperty.call(legacy, 'custom-coder')) {
+      delete legacy['custom-coder'];
+    }
+  }
+
+  // Remove empty legacy container to avoid confusing duplicate config.
+  if (legacy && Object.keys(legacy).length === 0) {
+    delete settings.mcp_servers;
   }
 
   const desired = `${JSON.stringify(settings, null, 2)}\n`;
