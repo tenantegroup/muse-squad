@@ -407,7 +407,11 @@ async function postChatOnce(endpoint, payload, timeoutMs) {
       invalid.retryable = false;
       throw invalid;
     }
-    return content;
+    return {
+      content,
+      upstreamModel: typeof data.model === 'string' ? data.model : undefined,
+      usage: data && typeof data.usage === 'object' && data.usage ? data.usage : undefined
+    };
   } finally {
     clearTimeout(timer);
   }
@@ -526,12 +530,15 @@ async function queryWithFallback(primaryName, requestTemplate, config) {
       // Build per endpoint: each fallback may have its own context limit,
       // temperature, max_tokens, and extra_body.
       const { payload, warning } = buildPayload({ ...endpoint, name }, requestTemplate);
-      const text = await chatWithRetries({ ...endpoint, name }, payload, config);
+      const result = await chatWithRetries({ ...endpoint, name }, payload, config);
       return {
-        text: `${warning}${text}`,
+        text: `${warning}${result.content}`,
         meta: {
           primary: primaryName,
           servedBy: name,
+          servedModel: endpoint.model,
+          ...(result.upstreamModel ? { upstreamModel: result.upstreamModel } : {}),
+          ...(result.usage ? { usage: result.usage } : {}),
           fallbackUsed: name !== primaryName,
           attempts
         }

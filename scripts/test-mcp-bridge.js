@@ -235,6 +235,7 @@ function run(port, tempDir, configFile) {
     const generated = await tool(5, 'generate_code', { prompt: 'add foo' });
     assert(generated.result.content[0].text === CANNED, 'generate_code returns clean diff');
     assert(generated.result.meta.servedBy === 'local-coder', 'meta reports serving endpoint');
+    assert(generated.result.meta.servedModel === 'local-model', 'meta reports configured model');
     assert(generated.result.meta.fallbackUsed === false, 'meta reports no fallback');
     assert(lastRequest.temperature === 0.2, 'per-endpoint temperature is applied');
     assert(lastRequest.model === 'local-model', 'local model is used');
