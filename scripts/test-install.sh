@@ -56,7 +56,7 @@ verify_endpoints() {
     if (c.queue_timeout_ms !== 300000) throw new Error("bad queue_timeout_ms");
     if (c.max_retries !== 2) throw new Error("bad max_retries");
     if (!c.muse_models || c.muse_models["muse-ember-1.0"] !== 4 ||
-        c.muse_models["muse-spark-1.3"] !== 2) {
+        c.muse_models["muse-spark-1.3-contributor"] !== 2) {
       throw new Error("bad muse_models");
     }
     for (const name of ["local-coder", "grill-reviewer"]) {

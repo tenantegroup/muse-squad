@@ -107,7 +107,7 @@ function writeConfig(configFile, baseUrl, overrides = {}) {
   fs.writeFileSync(configFile, JSON.stringify({
     default_endpoint: 'local-coder',
     fallback_order: ['local-coder', 'grill-reviewer'],
-    muse_models: { 'muse-ember-1.0': 4, 'muse-spark-1.3': 2 },
+    muse_models: { 'muse-ember-1.0': 4, 'muse-spark-1.3-contributor': 2 },
     timeout_ms: 10000,
     queue_timeout_ms: 300000,
     max_retries: 2,
@@ -229,7 +229,7 @@ function run(port, tempDir, configFile) {
     const listing = JSON.parse((await tool(4, 'list_endpoints', {})).result.content[0].text);
     assert(listing.ok === true && listing.available === true, 'list_endpoints reports availability');
     assert(listing.endpoints['local-coder'].max_concurrency === 1, 'list_endpoints reports max_concurrency');
-    assert(listing.muse_models['muse-spark-1.3'] === 2, 'list_endpoints reports muse_models');
+    assert(listing.muse_models['muse-spark-1.3-contributor'] === 2, 'list_endpoints reports muse_models');
     assert(listing.queue_timeout_ms === 300000, 'list_endpoints reports queue_timeout_ms');
 
     const generated = await tool(5, 'generate_code', { prompt: 'add foo' });

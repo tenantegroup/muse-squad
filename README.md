@@ -160,7 +160,7 @@ The bridge reads `endpoints.json` on **every tool call**. Edit the file and the 
   "schema_version": 1,
   "default": "local-coder",
   "fallback_order": ["local-coder", "grill-reviewer"],
-  "muse_models": { "muse-ember-1.0": 4, "muse-spark-1.3": 2 },
+  "muse_models": { "muse-ember-1.0": 4, "muse-spark-1.3-contributor": 2 },
   "timeout_ms": 600000,
   "queue_timeout_ms": 300000,
   "max_retries": 2,
@@ -208,6 +208,8 @@ If you already have an `endpoints.json`, the installer leaves it alone. Add the 
 | `max_input_chars` | Safety cap on the combined system + user prompt length. Keeps oversized contexts out of a small local KV-cache. |
 | `extra_body` | Extra JSON sent straight to `/chat/completions`, e.g. `top_p`, `min_p`, `reasoning_effort`, or `options.num_ctx`. Core fields (`model`, `messages`, `stream`, and a defined `temperature`) cannot be overwritten by it. |
 | `on_context_exceeded` | What to do when `max_input_chars` is exceeded: `"truncate"` (default) cuts the input and prepends a warning, or `"fallback"` skips this endpoint and tries the next one in `fallback_order`. |
+
+Native subagents normally inherit the model you have selected in the main Muse CLI. `muse_models` keys must match those exact model IDs (for example `muse-spark-1.3-contributor`), or the limit will not apply to that model.
 
 **About context limits:** `/squad-plan` and `/squad-execute` call `list_endpoints` first and keep `file_context` / `repo_context` small enough for the target endpoint. If you see a `> *[Warning: Input truncated ...]*` line, the model did not see the full input — shorten the context and try again. Normal fallback replies stay clean so diffs still apply; the `meta` field says who answered.
 

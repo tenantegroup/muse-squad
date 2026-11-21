@@ -4,7 +4,7 @@
   "fallback_order": ["local-coder", "grill-reviewer"],
   "muse_models": {
     "muse-ember-1.0": 4,
-    "muse-spark-1.3": 2
+    "muse-spark-1.3-contributor": 2
   },
   "timeout_ms": 600000,
   "queue_timeout_ms": 300000,
