@@ -24,6 +24,8 @@ MANAGED_PATHS=(
   "mcp/config.js"
   "mcp/doctor.js"
   "mcp/register-settings.js"
+  "mcp/roles.js"
+  "mcp/team-wizard.js"
   "mcp/sync-team.js"
 )
 
@@ -144,6 +146,7 @@ done
 # controlling terminal instead. MUSE_SQUAD_TTY exists for automation/tests.
 MUSE_SQUAD_TTY="${MUSE_SQUAD_TTY:-/dev/tty}"
 MUSE_SQUAD_TTY_LINE=1
+export MUSE_SQUAD_TTY MUSE_SQUAD_TTY_LINE
 
 tty_readable() {
   ( : < "$MUSE_SQUAD_TTY" ) 2>/dev/null
@@ -486,241 +489,16 @@ install_config() {
   log "  created    $dest"
 }
 
-available_providers() {
-  local config="$CONFIG_DIR/muse-squad.toml" parser="$CONFIG_DIR/mcp/config.js" output
-  if command -v node >/dev/null 2>&1 && [[ -f "$config" && -f "$parser" ]]; then
-    output="$(node "$parser" --file "$config" --list-providers 2>/dev/null)" || output=""
-    if [[ -n "$output" ]]; then
-      printf '%s\n' "$output"
-      return 0
-    fi
-  fi
-  # The squad section may be invalid from an earlier interrupted wizard. The
-  # provider tables are independent, so read their headings directly as a
-  # fallback and let the rewritten config be validated before it is installed.
-  [[ -f "$config" ]] || return 0
-  sed -n 's/^\[providers\.\([^]]*\)\][[:space:]]*$/\1/p' "$config" 2>/dev/null
-}
-
-existing_charter() {
-  local config="$1" name="$2" parser="$CONFIG_DIR/mcp/config.js"
-  if command -v node >/dev/null 2>&1 && [[ -f "$config" && -f "$parser" ]]; then
-    node -e '
-      const config = require(process.argv[1]).loadConfig({ config_file: process.argv[2] });
-      const member = config.squad.members[process.argv[3]];
-      if (member) process.stdout.write(member.charter.replace(/\s+/g, " ").trim());
-    ' "$parser" "$config" "$name" 2>/dev/null || true
-  fi
-}
-
 wizard_interactive() {
   [[ "$MODE" == "install" ]] || return 1
   (( USE_DEFAULTS )) && return 1
   interactive_input
 }
 
-trim_value() {
-  local value="$1"
-  value="${value#"${value%%[![:space:]]*}"}"
-  value="${value%"${value##*[![:space:]]}"}"
-  printf '%s' "$value"
-}
-
-normalize_member_name() {
-  local value="$1" slug
-  slug="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9' '-' | sed 's/^-*//; s/-*$//')"
-  [[ -n "$slug" ]] || slug="member"
-  printf '%s' "$slug"
-}
-
-prompt_default() {
-  local __var="$1" prompt="$2" default="$3" answer
-  printf '%s [%s]: ' "$prompt" "$default" >&2
-  read_default answer "$default"
-  printf -v "$__var" '%s' "$answer"
-}
-
-resolve_provider_selection() {
-  local answer="$1" default="$2" index
-  [[ -z "$answer" ]] && { printf '%s' "$default"; return 0; }
-  if [[ "$answer" =~ ^[0-9]+$ ]]; then
-    index=$((answer - 1))
-    if (( index >= 0 && index < ${#WIZARD_PROVIDERS[@]} )); then
-      printf '%s' "${WIZARD_PROVIDERS[$index]}"
-      return 0
-    fi
-    printf '  invalid provider number: %s\n' "$answer" >&2
-    return 1
-  fi
-  printf '%s' "$answer"
-}
-
-resolve_provider_list() {
-  local answer="$1" default="$2" resolved part out=""
-  [[ -z "$answer" ]] && { printf '%s' "$default"; return 0; }
-  local -a parts=()
-  IFS=',' read -r -a parts <<< "$answer"
-  for part in "${parts[@]}"; do
-    part="$(trim_value "$part")"
-    [[ -n "$part" ]] || continue
-    if ! resolved="$(resolve_provider_selection "$part" "")"; then
-      return 1
-    fi
-    [[ -n "$out" ]] && out+=","
-    out+="$resolved"
-  done
-  printf '%s' "$out"
-}
-
-provider_is_known() {
-  local candidate="$1" known
-  for known in "${WIZARD_PROVIDERS[@]-}"; do
-    [[ "$known" == "$candidate" ]] && return 0
-  done
-  return 1
-}
-
-validate_provider_list() {
-  local list="$1" part
-  [[ -z "$list" ]] && return 0
-  local -a parts=()
-  IFS=',' read -r -a parts <<< "$list"
-  for part in "${parts[@]}"; do
-    provider_is_known "$part" || return 1
-  done
-  return 0
-}
-
-member_name_is_usable() {
-  local name="$1"
-  [[ "$name" =~ ^[a-z0-9][a-z0-9-]*$ ]] || return 1
-  # A numeric-only name is a valid slug but is almost always a mistaken
-  # provider-menu answer. Reject it here so the wizard can ask again.
-  [[ "$name" =~ ^[0-9]+$ ]] && return 1
-  return 0
-}
-
-value_in_list() {
-  local needle="$1" item
-  shift
-  for item in "$@"; do
-    [[ "$item" == "$needle" ]] && return 0
-  done
-  return 1
-}
-
-validate_fallback_list() {
-  local primary="$1" list="$2" part
-  [[ -z "$list" ]] && return 0
-  if ! validate_provider_list "$list"; then
-    printf '  unknown provider in fallback list: %s\n' "$list" >&2
-    return 1
-  fi
-  local -a parts=() seen=()
-  IFS=',' read -r -a parts <<< "$list"
-  for part in "${parts[@]}"; do
-    [[ -n "$part" ]] || continue
-    if [[ "$part" == "$primary" ]]; then
-      printf '  fallback must not repeat the primary provider: %s\n' "$part" >&2
-      return 1
-    fi
-    if (( ${#seen[@]} > 0 )) && value_in_list "$part" "${seen[@]}"; then
-      printf '  fallback must not contain duplicate providers: %s\n' "$part" >&2
-      return 1
-    fi
-    seen+=("$part")
-  done
-  return 0
-}
-
-is_name_used() {
-  local candidate="$1" used
-  for used in "${USED_NAMES[@]-}"; do
-    [[ "$used" == "$candidate" ]] && return 0
-  done
-  return 1
-}
-
-render_team_config() {
-  local config_file="$1" members_file="$2" node_file
-  node_file="$(mktemp "${TMPDIR:-/tmp}/muse-squad-render.XXXXXX")" || fail "mktemp failed"
-  cat > "$node_file" <<'NODE'
-const fs = require('fs');
-const path = require('path');
-
-const configFile = process.argv[2];
-const membersFile = process.argv[3];
-
-function quote(value) {
-  return JSON.stringify(String(value));
-}
-
-function quoteBlock(value) {
-  const text = String(value).trim();
-  if (text.includes('"""')) return quote(text);
-  return `"""\n${text}\n"""`;
-}
-
-const raw = fs.readFileSync(configFile, 'utf8');
-const marker = raw.match(/^\[squad\][ \t]*$/m);
-if (!marker) throw new Error('muse-squad.toml has no [squad] table');
-const prefix = raw.slice(0, marker.index).replace(/\r?\n+$/, '\n');
-
-function squadValue(key, fallback) {
-  const match = prefix.match(new RegExp(`^${key}[ \\t]*=[ \\t]*("(?:[^"\\\\]|\\\\.)*")[ \\t]*$`, 'm'));
-  return match ? JSON.parse(match[1]) : fallback;
-}
-
-const members = fs.readFileSync(membersFile, 'utf8').split(/\r?\n/)
-  .filter((line) => line.length > 0)
-  .map((line) => {
-    const fields = line.split('\t');
-    if (fields.length !== 4) throw new Error(`bad member line: ${line}`);
-    const [name, primary, fallback, charter] = fields;
-    return {
-      name,
-      primary,
-      fallback: fallback ? fallback.split(',') : [],
-      charter
-    };
-  });
-
-const lines = [
-  '[squad]',
-  `name = ${quote(squadValue('name', 'Muse Squad'))}`,
-  `memory_dir = ${quote(squadValue('memory_dir', '.muse/squad'))}`,
-  ''
-];
-for (const member of members) {
-  lines.push(
-    `[squad.${member.name}]`,
-    `primary = ${quote(member.primary)}`,
-    `fallback = [${member.fallback.map(quote).join(', ')}]`,
-    `charter = ${quoteBlock(member.charter)}`,
-    ''
-  );
-}
-process.stdout.write(`${prefix}${lines.join('\n')}`);
-NODE
-  if ! node "$node_file" "$config_file" "$members_file"; then
-    rm -f "$node_file"
-    fail "team config generation failed"
-  fi
-  rm -f "$node_file"
-}
-
-validate_rendered_config() {
-  local file="$1" parser="$CONFIG_DIR/mcp/config.js"
-  command -v node >/dev/null 2>&1 || return 0
-  [[ -f "$parser" ]] || return 0
-  node "$parser" --file "$file" --list-providers >/dev/null 2>&1
-}
-
 configure_team() {
-  local dest="$CONFIG_DIR/muse-squad.toml" action="created" seeded=0
+  local dest="$CONFIG_DIR/muse-squad.toml" seeded=0
   if (( FIRST_INSTALL )); then
-    # Seed first so the provider menu can be built from the default TOML, then
-    # let an interactive wizard replace it.
+    # Seed first so the shared role wizard has providers to assign.
     if [[ ! -f "$dest" ]]; then
       install_default_config
       seeded=1
@@ -729,7 +507,6 @@ configure_team() {
       return 0
     fi
   else
-    action="updated"
     if (( ! RECONFIGURE_TEAM )); then
       log "  unchanged  $dest"
       return 0
@@ -760,154 +537,36 @@ configure_team() {
       fail "expected Y or n for team customization prompt" ;;
   esac
 
-  local provider
-  WIZARD_PROVIDERS=()
-  while IFS= read -r provider; do
-    [[ -n "$provider" ]] || continue
-    if ! provider_is_known "$provider"; then
-      WIZARD_PROVIDERS+=("$provider")
-    fi
-  done < <(available_providers)
-  (( ${#WIZARD_PROVIDERS[@]} > 0 )) || fail "no providers are defined in $dest"
-
-  WIZARD_PROVIDER_MENU=""
-  local i
-  for i in "${!WIZARD_PROVIDERS[@]}"; do
-    [[ -n "$WIZARD_PROVIDER_MENU" ]] && WIZARD_PROVIDER_MENU+=", "
-    WIZARD_PROVIDER_MENU+="$((i + 1)): ${WIZARD_PROVIDERS[$i]}"
-  done
-
-  local -a default_names=(team-lead frontend backend tester secretary)
-  local -a default_primary=(Muse-Spark Home-Ornith Home-Ornith Home-Ornith Muse-Ember)
-  local -a default_fallback=("DeepSeek-Flash" "Muse-Ember" "DeepSeek-Flash" "Muse-Ember" "Home-Ornith")
-  local -a names=() primaries=() fallbacks=() charters=()
-  USED_NAMES=()
-  local name primary fallback charter answer
-  local raw_name raw_primary raw_fallback charter_default
-
-  for i in 0 1 2 3 4; do
-    while :; do
-      prompt_default name "Member $((i + 1)) name" "${default_names[$i]}"
-      name="$(normalize_member_name "$name")"
-      if ! member_name_is_usable "$name"; then
-        printf '  member name must include at least one letter\n' >&2
-        continue
-      fi
-      if is_name_used "$name"; then
-        printf '  name already in use: %s\n' "$name" >&2
-        continue
-      fi
-      break
-    done
-
-    while :; do
-      prompt_default raw_primary "Primary provider for $name ($WIZARD_PROVIDER_MENU)" "${default_primary[$i]}"
-      if primary="$(resolve_provider_selection "$raw_primary" "${default_primary[$i]}")"; then
-        if provider_is_known "$primary"; then
-          break
-        fi
-        printf '  unknown provider: %s\n' "$primary" >&2
-      fi
-    done
-
-    while :; do
-      prompt_default raw_fallback "Fallback providers for $name (comma-separated, empty for none)" "${default_fallback[$i]}"
-      if fallback="$(resolve_provider_list "$raw_fallback" "${default_fallback[$i]}")" && \
-         validate_fallback_list "$primary" "$fallback"; then
-        break
-      fi
-    done
-
-    charter_default="$(existing_charter "$dest" "$name")"
-    [[ -n "$charter_default" ]] || charter_default="Domain expertise: $name tasks. Voice: concise and evidence-first. Guardrails: stay scoped to assigned files, preserve existing conventions, and verify changes before reporting done."
-    while :; do
-      prompt_default charter "Charter for $name" "$charter_default"
-      charter="$(printf '%s' "$charter" | tr '\t' ' ' | tr '\n' ' ' | tr -s ' ')"
-      [[ -n "$charter" ]] && break
-      printf '  charter cannot be empty\n' >&2
-    done
-
-    names+=("$name")
-    primaries+=("$primary")
-    fallbacks+=("$fallback")
-    charters+=("$charter")
-    USED_NAMES+=("$name")
-  done
-
-  while :; do
-    printf 'Add another team member? [y/N]: ' >&2
-    read_default answer ""
-    case "$answer" in
-      [Yy]|[Yy][Ee][Ss]) ;;
-      *) break ;;
-    esac
-
-    while :; do
-      printf 'Extra member name: ' >&2
-      read_default raw_name ""
-      [[ -n "$raw_name" ]] || { printf '  name cannot be empty\n' >&2; continue; }
-      name="$(normalize_member_name "$raw_name")"
-      if ! member_name_is_usable "$name"; then
-        printf '  member name must include at least one letter\n' >&2
-        continue
-      fi
-      if is_name_used "$name"; then
-        printf '  name already in use: %s\n' "$name" >&2
-        continue
-      fi
-      break
-    done
-
-    while :; do
-      prompt_default raw_primary "Primary provider for $name ($WIZARD_PROVIDER_MENU)" 'Muse-Ember'
-      if primary="$(resolve_provider_selection "$raw_primary" 'Muse-Ember')"; then
-        if provider_is_known "$primary"; then
-          break
-        fi
-        printf '  unknown provider: %s\n' "$primary" >&2
-      fi
-    done
-
-    while :; do
-      prompt_default raw_fallback "Fallback providers for $name (comma-separated, empty for none)" 'Home-Ornith'
-      if fallback="$(resolve_provider_list "$raw_fallback" 'Home-Ornith')" && \
-         validate_fallback_list "$primary" "$fallback"; then
-        break
-      fi
-    done
-
-    charter_default='Domain expertise: bounded implementation tasks. Voice: concise and evidence-first. Guardrails: stay scoped to assigned files, preserve existing conventions, and verify changes before reporting done.'
-    while :; do
-      prompt_default charter "Charter for $name" "$charter_default"
-      charter="$(printf '%s' "$charter" | tr '\t' ' ' | tr '\n' ' ' | tr -s ' ')"
-      [[ -n "$charter" ]] && break
-      printf '  charter cannot be empty\n' >&2
-    done
-
-    names+=("$name")
-    primaries+=("$primary")
-    fallbacks+=("$fallback")
-    charters+=("$charter")
-    USED_NAMES+=("$name")
-  done
-
-  local members_file config_tmp
+  local wizard="$CONFIG_DIR/mcp/team-wizard.js" members_file config_tmp
   members_file="$(mktemp "${TMPDIR:-/tmp}/muse-squad-members.XXXXXX")" || fail "mktemp failed"
   config_tmp="$(mktemp "${TMPDIR:-/tmp}/muse-squad-config.XXXXXX")" || fail "mktemp failed"
-  : > "$members_file"
-  for i in "${!names[@]}"; do
-    printf '%s\t%s\t%s\t%s\n' \
-      "${names[$i]}" "${primaries[$i]}" "${fallbacks[$i]}" "${charters[$i]}" >> "$members_file"
-  done
-  render_team_config "$dest" "$members_file" > "$config_tmp" || fail "cannot render $dest"
-  if ! validate_rendered_config "$config_tmp"; then
+
+  # If prompts come from a terminal device, let the Node wizard keep reading
+  # from that same source. For a regular-file TTY override, pass the next line
+  # so the wizard does not replay answers already consumed by the installer.
+  if tty_readable; then
+    export MUSE_SQUAD_WIZARD_INPUT="$MUSE_SQUAD_TTY"
+    export MUSE_SQUAD_WIZARD_LINE="$MUSE_SQUAD_TTY_LINE"
+  else
+    unset MUSE_SQUAD_WIZARD_INPUT MUSE_SQUAD_WIZARD_LINE
+  fi
+
+  if ! node "$wizard" --config "$dest" --members-file "$members_file"; then
+    rm -f "$members_file" "$config_tmp"
+    fail "team configuration failed"
+  fi
+  if ! node "$wizard" --render "$dest" --members-file "$members_file" > "$config_tmp"; then
+    rm -f "$members_file" "$config_tmp"
+    fail "team config generation failed"
+  fi
+  if ! node "$CONFIG_DIR/mcp/config.js" --file "$config_tmp" --json >/dev/null 2>&1; then
     rm -f "$members_file" "$config_tmp"
     fail "team config failed validation; no changes were written"
   fi
-  mkdir -p "$(dirname "$dest")" || fail "cannot create directory for $dest"
   mv "$config_tmp" "$dest" || fail "cannot install $dest"
+  chmod 600 "$dest" 2>/dev/null || true
   rm -f "$members_file"
-  log "  $action    $dest"
+  log "  updated    $dest"
 }
 
 run_sync_team() {
@@ -1184,6 +843,7 @@ if ([string]::IsNullOrWhiteSpace($script:ConsoleInputPath)) {
   else { $script:ConsoleInputPath = '/dev/tty' }
 }
 $script:ConsoleInputReader = $null
+$script:ConsoleInputLine = 1
 
 function Get-Console-Input-Reader {
   if ($null -ne $script:ConsoleInputReader) { return $script:ConsoleInputReader }
@@ -1211,7 +871,9 @@ function Read-Interactive([string]$prompt) {
     $reader = Get-Console-Input-Reader
     if ($null -ne $reader) {
       Write-Host "$prompt`: " -NoNewline
-      return $reader.ReadLine()
+      $line = $reader.ReadLine()
+      $script:ConsoleInputLine++
+      return $line
     }
   }
   return Read-Host $prompt
@@ -1552,237 +1214,11 @@ function Test-Interactive-Input {
   return (Test-Console-Input)
 }
 
-function Get-Available-Providers {
-  $providers = New-Object 'System.Collections.Generic.List[string]'
-  $configFile = Get-Dest 'muse-squad.toml'
-  $parser = Get-Dest 'mcp/config.js'
-  if ((Get-Command node -ErrorAction SilentlyContinue) -and
-      (Test-Path -LiteralPath $configFile) -and (Test-Path -LiteralPath $parser)) {
-    $output = & node $parser --file $configFile --list-providers 2>$null
-    if ($LASTEXITCODE -eq 0 -and $output) {
-      foreach ($line in $output) {
-        $name = ([string]$line).Trim()
-        if ($name -and -not $providers.Contains($name)) { $providers.Add($name) }
-      }
-      return $providers.ToArray()
-    }
-  }
-  # Fall back to raw provider headings if the squad section is invalid.
-  if (Test-Path -LiteralPath $configFile) {
-    foreach ($line in (Get-Content -LiteralPath $configFile)) {
-      if ($line -match '^\[providers\.([^\]]+)\]\s*$') {
-        $name = $Matches[1].Trim()
-        if ($name -and -not $providers.Contains($name)) { $providers.Add($name) }
-      }
-    }
-  }
-  return $providers.ToArray()
-}
-
-function Get-Provider-Menu([string[]]$providers) {
-  $items = @()
-  for ($i = 0; $i -lt $providers.Count; $i++) {
-    $items += "$($i + 1): $($providers[$i])"
-  }
-  return ($items -join ', ')
-}
-
-function Get-Existing-Charter([string]$name) {
-  $configFile = Get-Dest 'muse-squad.toml'
-  $parser = Get-Dest 'mcp/config.js'
-  if ((Get-Command node -ErrorAction SilentlyContinue) -and
-      (Test-Path -LiteralPath $configFile) -and (Test-Path -LiteralPath $parser)) {
-    $script = @'
-const config = require(process.argv[1]).loadConfig({ config_file: process.argv[2] });
-const member = config.squad.members[process.argv[3]];
-if (member) process.stdout.write(member.charter.replace(/\s+/g, ' ').trim());
-'@
-    $output = & node -e $script $parser $configFile $name 2>$null
-    if ($output) { return (([string]($output -join ' ')).Trim()) }
-  }
-  return ''
-}
-
-function Read-Defaulted([string]$prompt, [string]$default) {
-  $answer = Read-Interactive "$prompt [$default]"
-  if ([string]::IsNullOrWhiteSpace($answer)) { return $default }
-  return $answer
-}
-
-function Read-Required([string]$prompt, [string]$fallback) {
-  $answer = Read-Interactive $prompt
-  if ([string]::IsNullOrWhiteSpace($answer)) { return $fallback }
-  return $answer
-}
-
-function ConvertTo-Member-Name([string]$value) {
-  $slug = $value.ToLowerInvariant() -replace '[^a-z0-9]+', '-'
-  $slug = $slug.Trim('-')
-  if ([string]::IsNullOrEmpty($slug)) { $slug = 'member' }
-  return $slug
-}
-
-function Resolve-Provider([string]$answer, [string]$default) {
-  if ([string]::IsNullOrWhiteSpace($answer)) { return $default }
-  if ($answer -match '^\d+$') {
-    $index = [int]$answer - 1
-    if ($index -ge 0 -and $index -lt $script:WizardProviders.Count) {
-      return $script:WizardProviders[$index]
-    }
-    Write-Host "  invalid provider number: $answer"
-    return $null
-  }
-  return $answer
-}
-
-function Resolve-Provider-List([string]$answer, [string]$default) {
-  if ([string]::IsNullOrWhiteSpace($answer)) { return $default }
-  $resolved = @()
-  foreach ($part in ($answer -split ',')) {
-    $part = ([string]$part).Trim()
-    if (-not $part) { continue }
-    $value = Resolve-Provider $part ''
-    if ([string]::IsNullOrEmpty($value)) { return $null }
-    $resolved += $value
-  }
-  return ($resolved -join ',')
-}
-
-function Test-Provider-Known([string]$candidate) {
-  return ($script:WizardProviders -contains $candidate)
-}
-
-function Test-Provider-List([string]$list) {
-  if ([string]::IsNullOrWhiteSpace($list)) { return $true }
-  foreach ($part in ($list -split ',')) {
-    if (-not (Test-Provider-Known ([string]$part).Trim())) { return $false }
-  }
-  return $true
-}
-
-function Test-Member-Name([string]$name) {
-  if ($name -notmatch '^[a-z0-9][a-z0-9-]*$') { return $false }
-  if ($name -match '^\d+$') { return $false }
-  return $true
-}
-
-function Test-Fallback-List([string]$primary, [string]$list) {
-  if ([string]::IsNullOrWhiteSpace($list)) { return $true }
-  $parts = @($list -split ',' | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
-  $seen = New-Object 'System.Collections.Generic.HashSet[string]'
-  foreach ($part in $parts) {
-    if (-not (Test-Provider-Known $part)) {
-      Write-Host "  unknown provider in fallback list: $list"
-      return $false
-    }
-    if ($part -eq $primary) {
-      Write-Host "  fallback must not repeat the primary provider: $part"
-      return $false
-    }
-    if (-not $seen.Add($part)) {
-      Write-Host "  fallback must not contain duplicate providers: $part"
-      return $false
-    }
-  }
-  return $true
-}
-
-function Write-Team-Config([string]$membersFile, [string]$action) {
-  $dest = Get-Dest 'muse-squad.toml'
-  $parent = Split-Path -Parent $dest
-  if (-not (Test-Path -LiteralPath $parent)) {
-    New-Item -ItemType Directory -Path $parent -Force | Out-Null
-  }
-  $nodeScript = @'
-const fs = require('fs');
-
-const configFile = process.argv[2];
-const membersFile = process.argv[3];
-
-function quote(value) {
-  return JSON.stringify(String(value));
-}
-
-function quoteBlock(value) {
-  const text = String(value).trim();
-  if (text.includes('"""')) return quote(text);
-  return `"""\n${text}\n"""`;
-}
-
-const raw = fs.readFileSync(configFile, 'utf8');
-const marker = raw.match(/^\[squad\][ \t]*$/m);
-if (!marker) throw new Error('muse-squad.toml has no [squad] table');
-const prefix = raw.slice(0, marker.index).replace(/\r?\n+$/, '\n');
-
-function squadValue(key, fallback) {
-  const match = prefix.match(new RegExp(`^${key}[ \\t]*=[ \\t]*("(?:[^"\\\\]|\\\\.)*")[ \\t]*$`, 'm'));
-  return match ? JSON.parse(match[1]) : fallback;
-}
-
-const members = fs.readFileSync(membersFile, 'utf8').split(/\r?\n/)
-  .filter((line) => line.length > 0)
-  .map((line) => {
-    const fields = line.split('\t');
-    if (fields.length !== 4) throw new Error(`bad member line: ${line}`);
-    const [name, primary, fallback, charter] = fields;
-    return {
-      name,
-      primary,
-      fallback: fallback ? fallback.split(',') : [],
-      charter
-    };
-  });
-
-const lines = [
-  '[squad]',
-  `name = ${quote(squadValue('name', 'Muse Squad'))}`,
-  `memory_dir = ${quote(squadValue('memory_dir', '.muse/squad'))}`,
-  ''
-];
-for (const member of members) {
-  lines.push(
-    `[squad.${member.name}]`,
-    `primary = ${quote(member.primary)}`,
-    `fallback = [${member.fallback.map(quote).join(', ')}]`,
-    `charter = ${quoteBlock(member.charter)}`,
-    ''
-  );
-}
-process.stdout.write(`${prefix}${lines.join('\n')}`);
-'@
-  # `node -e` has no script path in argv, so argv[1] is the first user argument.
-  # The placeholder keeps the renderer's argv[2]/argv[3] indexing intact.
-  $rendered = & node -e $nodeScript - $dest $membersFile
-  if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) {
-    throw "team config generation failed with exit code $LASTEXITCODE"
-  }
-  $normalized = (($rendered -join "`n") -replace "(?:\r?\n)+\z", "`n")
-  $configTmp = Join-Path ([IO.Path]::GetTempPath()) ('muse-squad-config-' + [Guid]::NewGuid().ToString('N') + '.toml')
-  try {
-    [IO.File]::WriteAllText($configTmp, $normalized, [System.Text.UTF8Encoding]::new($false))
-    $parser = Get-Dest 'mcp/config.js'
-    if (Test-Path -LiteralPath $parser) {
-      & node $parser --file $configTmp --list-providers 2>$null | Out-Null
-      if ($LASTEXITCODE -ne 0) {
-        throw 'team config failed validation; no changes were written'
-      }
-    }
-    Move-Item -LiteralPath $configTmp -Destination $dest -Force
-  } finally {
-    if (Test-Path -LiteralPath $configTmp) {
-      Remove-Item -LiteralPath $configTmp -Force -ErrorAction SilentlyContinue
-    }
-  }
-  Write-Host "  $action  $dest"
-}
-
 function Configure-Team {
   $dest = Get-Dest 'muse-squad.toml'
-  $action = 'created'
   $seeded = $false
   if ($firstInstall) {
-    # Seed first so the provider menu can be built from the default TOML, then
-    # let an interactive wizard replace it.
+    # Seed first so the shared role wizard has providers to assign.
     if (-not (Test-Path -LiteralPath $dest)) {
       Install-Config (Get-Config-Defaults)
       $seeded = $true
@@ -1792,7 +1228,6 @@ function Configure-Team {
       return
     }
   } else {
-    $action = 'updated'
     if (-not $reconfigureTeam) {
       Write-Host "  unchanged  $dest"
       return
@@ -1821,127 +1256,56 @@ function Configure-Team {
     throw 'Expected Y or n for team customization prompt'
   }
 
-  $script:WizardProviders = Get-Available-Providers
-  if ($script:WizardProviders.Count -eq 0) {
-    throw "no providers are defined in $dest"
-  }
-  $menu = Get-Provider-Menu $script:WizardProviders
+  $wizard = Get-Dest 'mcp/team-wizard.js'
+  $membersFile = Join-Path ([IO.Path]::GetTempPath()) ('muse-squad-members-' + [Guid]::NewGuid().ToString('N') + '.jsonl')
+  $configTmp = Join-Path ([IO.Path]::GetTempPath()) ('muse-squad-config-' + [Guid]::NewGuid().ToString('N') + '.toml')
 
-  $defaultNames = @('team-lead', 'frontend', 'backend', 'tester', 'secretary')
-  $defaultPrimary = @('Muse-Spark', 'Home-Ornith', 'Home-Ornith', 'Home-Ornith', 'Muse-Ember')
-  $defaultFallback = @('DeepSeek-Flash', 'Muse-Ember', 'DeepSeek-Flash', 'Muse-Ember', 'Home-Ornith')
-  $members = @()
-  $used = New-Object 'System.Collections.Generic.HashSet[string]'
-
-  for ($i = 0; $i -lt 5; $i++) {
-    while ($true) {
-      $rawName = Read-Defaulted "Member $($i + 1) name" $defaultNames[$i]
-      $name = ConvertTo-Member-Name $rawName
-      if (-not (Test-Member-Name $name)) {
-        Write-Host '  member name must include at least one letter'
-        continue
-      }
-      if ($used.Contains($name)) {
-        Write-Host "  name already in use: $name"
-        continue
-      }
-      [void]$used.Add($name)
-      break
-    }
-
-    while ($true) {
-      $rawPrimary = Read-Defaulted "Primary provider for $name ($menu)" $defaultPrimary[$i]
-      $primary = Resolve-Provider $rawPrimary $defaultPrimary[$i]
-      if ([string]::IsNullOrEmpty($primary)) { continue }
-      if (-not (Test-Provider-Known $primary)) {
-        Write-Host "  unknown provider: $primary"
-        continue
-      }
-      break
-    }
-
-    while ($true) {
-      $rawFallback = Read-Defaulted "Fallback providers for $name (comma-separated, empty for none)" $defaultFallback[$i]
-      $fallback = Resolve-Provider-List $rawFallback $defaultFallback[$i]
-      if ([string]::IsNullOrEmpty($fallback)) { continue }
-      if (-not (Test-Fallback-List $primary $fallback)) { continue }
-      break
-    }
-
-    $charterDefault = Get-Existing-Charter $name
-    if ([string]::IsNullOrWhiteSpace($charterDefault)) {
-      $charterDefault = "Domain expertise: $name tasks. Voice: concise and evidence-first. " +
-        'Guardrails: stay scoped to assigned files, preserve existing conventions, and verify changes before reporting done.'
-    }
-    while ($true) {
-      $charter = ((Read-Defaulted "Charter for $name" $charterDefault).Trim() -replace '\s+', ' ')
-      if (-not [string]::IsNullOrWhiteSpace($charter)) { break }
-      Write-Host '  charter cannot be empty'
-    }
-    $members += [pscustomobject]@{ name = $name; primary = $primary; fallback = $fallback; charter = $charter }
+  # When the installer is piped in, Prompt answers come from the console reader.
+  # Pass that source and the next line to the Node wizard so it continues rather
+  # than replaying answers already consumed by the installer.
+  if ([Console]::IsInputRedirected -and $null -ne $script:ConsoleInputReader) {
+    $env:MUSE_SQUAD_WIZARD_INPUT = $script:ConsoleInputPath
+    $env:MUSE_SQUAD_WIZARD_LINE = [string]$script:ConsoleInputLine
+  } else {
+    Remove-Item Env:\MUSE_SQUAD_WIZARD_INPUT -ErrorAction SilentlyContinue
+    Remove-Item Env:\MUSE_SQUAD_WIZARD_LINE -ErrorAction SilentlyContinue
   }
 
-  while ($true) {
-    $answer = Read-Interactive 'Add another team member? [y/N]'
-    if ($answer -notmatch '^[Yy]([Ee][Ss])?$') { break }
-
-    while ($true) {
-      $rawName = Read-Required 'Extra member name' ''
-      if ([string]::IsNullOrWhiteSpace($rawName)) {
-        Write-Host '  name cannot be empty'
-        continue
-      }
-      $name = ConvertTo-Member-Name $rawName
-      if (-not (Test-Member-Name $name)) {
-        Write-Host '  member name must include at least one letter'
-        continue
-      }
-      if ($used.Contains($name)) {
-        Write-Host "  name already in use: $name"
-        continue
-      }
-      [void]$used.Add($name)
-      break
-    }
-
-    while ($true) {
-      $rawPrimary = Read-Defaulted "Primary provider for $name ($menu)" 'Muse-Ember'
-      $primary = Resolve-Provider $rawPrimary 'Muse-Ember'
-      if ([string]::IsNullOrEmpty($primary)) { continue }
-      if (-not (Test-Provider-Known $primary)) {
-        Write-Host "  unknown provider: $primary"
-        continue
-      }
-      break
-    }
-
-    while ($true) {
-      $rawFallback = Read-Defaulted "Fallback providers for $name (comma-separated, empty for none)" 'Home-Ornith'
-      $fallback = Resolve-Provider-List $rawFallback 'Home-Ornith'
-      if ([string]::IsNullOrEmpty($fallback)) { continue }
-      if (-not (Test-Fallback-List $primary $fallback)) { continue }
-      break
-    }
-
-    $charterDefault = 'Domain expertise: bounded implementation tasks. Voice: concise and evidence-first. Guardrails: stay scoped to assigned files, preserve existing conventions, and verify changes before reporting done.'
-    while ($true) {
-      $charter = ((Read-Defaulted 'Charter' $charterDefault).Trim() -replace '\s+', ' ')
-      if (-not [string]::IsNullOrWhiteSpace($charter)) { break }
-      Write-Host '  charter cannot be empty'
-    }
-    $members += [pscustomobject]@{ name = $name; primary = $primary; fallback = $fallback; charter = $charter }
-  }
-
-  $membersFile = Join-Path ([IO.Path]::GetTempPath()) ('muse-squad-members-' + [Guid]::NewGuid().ToString('N') + '.tsv')
   try {
-    $lines = foreach ($member in $members) {
-      "$($member.name)`t$($member.primary)`t$($member.fallback)`t$($member.charter)"
+    & node $wizard --config $dest --members-file $membersFile
+    if ($LASTEXITCODE -ne 0) {
+      throw 'team configuration failed'
     }
-    [IO.File]::WriteAllText($membersFile, (($lines -join "`n") + "`n"), [System.Text.UTF8Encoding]::new($false))
-    Write-Team-Config $membersFile $action
+
+    $nodeScript = @'
+const path = require('path');
+const configFile = process.argv[2];
+const membersFile = process.argv[3];
+const wizard = require(path.join(path.dirname(configFile), 'mcp', 'team-wizard.js'));
+process.stdout.write(wizard.renderFromMembersFile(configFile, membersFile));
+'@
+    # `node -e` has no script path in argv, so argv[1] is the first user argument.
+    # The placeholder keeps the renderer's argv[2]/argv[3] indexing intact.
+    $rendered = & node -e $nodeScript - $dest $membersFile
+    if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) {
+      throw "team config generation failed with exit code $LASTEXITCODE"
+    }
+    $normalized = (($rendered -join "`n") -replace "(?:\r?\n)+\z", "`n")
+    [IO.File]::WriteAllText($configTmp, $normalized, [System.Text.UTF8Encoding]::new($false))
+    & node $wizard --render $dest --members-file $membersFile | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+      throw 'team config failed validation; no changes were written'
+    }
+    Move-Item -LiteralPath $configTmp -Destination $dest -Force
+    Write-Host "  updated    $dest"
   } finally {
+    Remove-Item Env:\MUSE_SQUAD_WIZARD_INPUT -ErrorAction SilentlyContinue
+    Remove-Item Env:\MUSE_SQUAD_WIZARD_LINE -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $membersFile) {
       Remove-Item -LiteralPath $membersFile -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $configTmp) {
+      Remove-Item -LiteralPath $configTmp -Force -ErrorAction SilentlyContinue
     }
   }
 }

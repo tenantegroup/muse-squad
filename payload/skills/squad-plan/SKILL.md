@@ -8,7 +8,7 @@ You are in SQUAD-PLAN mode. Do NOT edit product code yet.
 
 At startup, read `~/.config/muse/muse-squad.toml` (`schema = 1`) and the generated roster at `~/.config/muse/squad/team.md`. Use only the members defined under `[squad.<name>]`; every step goes to a named member. Match each step to that member's `charter`. If no charter fits, ask the user which member should own the step instead of inventing a helper.
 
-If `.muse/squad/` does not exist in this repository yet, create `.muse/squad/decisions.md` and `.muse/squad/history/` before starting. Every named member reads `.muse/squad/decisions.md` and `.muse/squad/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished. Ask the `@secretary` member to append durable decisions to `.muse/squad/decisions.md` before sign-off.
+If `.muse/squad/` does not exist in this repository yet, create `.muse/squad/decisions.md` and `.muse/squad/history/` before starting. Every named member reads `.muse/squad/decisions.md` and `.muse/squad/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished. Ask the documentation charter member (default `@docs`) to append durable decisions to `.muse/squad/decisions.md` before sign-off.
 
 ## TUI labels and reporting
 
@@ -24,11 +24,11 @@ When spawning any subagent, set its short task label exactly to:
 Examples:
 
 ```text
-[team-lead | Muse-Spark] Review architecture
+[lead | Muse-Spark] Review architecture
 [frontend | Home-Ornith] Sketch login form changes
 [backend | DeepSeek-Flash] Map retry queue changes
 [tester | Home-Ornith] List verification commands
-[secretary | Muse-Ember] Record plan decisions
+[docs | Muse-Ember] Record plan decisions
 ```
 
 Always include a "Subagents / Providers" roster in user-facing summaries and before asking for sign-off. For each entry list the member name, provider, action, and outcome. For `muse-squad` tool calls, report the member, the provider shown in tool meta, and the outcome; if meta is unavailable, say so explicitly.
@@ -64,5 +64,5 @@ When calling `muse-squad`, keep `repo_context`, `file_context`, and `plan_markdo
 1. Map the relevant files, dependencies, and existing patterns using named members only.
 2. Ask the user clarifying questions only if an architectural fork cannot be resolved from the codebase.
 3. Draft a decision-complete implementation plan in `.muse/PLAN.md` with exact file paths, dependency order, and verification commands. If the file already has a `## Execution Log & Decisions` section, preserve it verbatim at the bottom.
-4. Plan grill: ask the architecture charter member (default `@team-lead`) to audit `.muse/PLAN.md` against the actual files, then request an independent critique through `muse-squad:critique_plan` with `member="<name>"` for that same member. Synthesize valid issues into `.muse/PLAN.md` and ask `@secretary` to append durable choices to `.muse/squad/decisions.md`.
+4. Plan grill: ask the architecture charter member (default `@lead`) to audit `.muse/PLAN.md` against the actual files, then request an independent critique through `muse-squad:critique_plan` with `member="<name>"` for that same member. Synthesize valid issues into `.muse/PLAN.md` and ask the documentation charter member (default `@docs`) to append durable choices to `.muse/squad/decisions.md`.
 5. Present a summary of what was caught, including the Subagents / Providers roster, before asking the user for `/squad-execute` sign-off.

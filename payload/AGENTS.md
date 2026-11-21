@@ -7,7 +7,7 @@ This block is managed by muse-squad. Put durable changes in the muse-squad repo 
 `~/.config/muse/muse-squad.toml` is the single source of truth (`schema = 1`). It holds the AI providers and the squad in one TOML file. There is no second config file and no migration step; edit the TOML directly or use `/squad-team`.
 
 - Providers live under `[providers.<Name>]`. `type = "native"` providers are built into Muse; `type = "http"` providers point at an OpenAI-compatible server. Every provider has `enabled = true` by default; set `enabled = false` to disable one without removing it from member chains.
-- Members live under `[squad.<name>]` and define only `primary`, an ordered `fallback` array, and a `charter`. At least one member is required.
+- Members live under `[squad.<name>]` and define only `primary`, an ordered `fallback` array, and a `charter`. At least one member is required. Default names are role IDs from the pinned `mcp/roles.js` catalog (`@lead`, `@backend`, `@reviewer`, ...); renamed members keep their TOML name, and installers never rewrite existing charters.
 - The generated roster is `~/.config/muse/squad/team.md`; generated member wrappers are `~/.config/muse/agents/<name>.md`. Do not hand-edit generated files.
 
 ### Delegate through named members only
@@ -33,7 +33,7 @@ The MCP server is `muse-squad`. It exposes:
 
 ### Global guardrails
 
-- Label every spawned subagent exactly as `[<name> | <provider-name>] <action>` — for example `[team-lead | Muse-Spark] Review architecture`. Use the member's lowercase name and the provider name exactly as written in the TOML. Keep the action under ~50 characters, start with a verb, and add no extra parenthetical text.
+- Label every spawned subagent exactly as `[<name> | <provider-name>] <action>` — for example `[lead | Muse-Spark] Review architecture`. Use the member's lowercase name and the provider name exactly as written in the TOML. Keep the action under ~50 characters, start with a verb, and add no extra parenthetical text.
 - Respect each provider's `max_concurrency` for parallel work; queue extra work into a later wave.
 - Apply generated code surgically: a targeted unified diff or a single function/block with native edit tools. Reject full-file rewrites, truncation markers, and unapplyable diffs.
 - Run the fastest incremental check on changed files immediately after each patch. Full builds and full test suites belong to the final verification step.
