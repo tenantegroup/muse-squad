@@ -69,7 +69,7 @@ These URLs point straight at the files in this public repo. The installers are s
 
 Prompts work even when the installer is piped in (`curl ... | bash` or `irm ... | iex`). The script never reads user answers from stdin in that case, because stdin carries the installer itself. It reads from the controlling terminal instead: `/dev/tty` on macOS/Linux and `CONIN$` on Windows. If there is no controlling terminal—CI, cron, a detached SSH session without `-t`, or a service manager—prompts are skipped and the safe defaults are used.
 
-On a first install, the interactive flow asks `Customize Squad team members & models now? [Y/n]` and then walks through the default roster. Press Enter to accept the defaults at any prompt. Re-run with `--reconfigure-team` to edit an existing squad; use `--defaults` to skip the wizard entirely.
+On a first install, the interactive flow asks `Customize Squad team members & models now? [Y/n]` and then walks through the default roster. Press Enter to accept the defaults at any prompt. Invalid answers are reported immediately and re-asked, so a bad member name or a fallback that repeats the primary provider never gets written to `muse-squad.toml`. Re-run with `--reconfigure-team` to edit an existing squad; use `--defaults` to skip the wizard entirely.
 
 You can still use an environment variable with a piped install:
 

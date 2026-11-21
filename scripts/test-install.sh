@@ -221,6 +221,69 @@ for name in oracle frontend backend tester secretary scout; do
   [[ -f "$INTERACTIVE_DIR/agents/$name.md" ]] || fail "missing custom agent @$name"
 done
 
+echo "== bash installer: wizard retries invalid input =="
+RETRY_DIR="$TMP/retry-config"
+MUSE_CONFIG_DIR="$RETRY_DIR" bash "$ROOT/install" --no-backup >/dev/null
+RETRY_INPUT=(y 3 team-lead 1 1 3 "Retry charter.")
+for _ in 1 2 3 4; do
+  RETRY_INPUT+=("" "" "" "")
+done
+RETRY_INPUT+=(n)
+retry_status=0
+retry_output="$(
+  MUSE_CONFIG_DIR="$RETRY_DIR" MUSE_SQUAD_FORCE_INTERACTIVE=1 \
+    bash "$ROOT/install" --reconfigure-team --no-backup < <(printf '%s\n' "${RETRY_INPUT[@]}") 2>&1
+)" || retry_status=$?
+printf '%s\n' "$retry_output"
+[[ "$retry_status" -eq 0 ]] || \
+  fail "wizard retry installer exited with status $retry_status"
+grep -qF 'member name must include at least one letter' <<<"$retry_output" || \
+  fail "wizard did not reject a numeric member name"
+grep -qF 'fallback must not repeat the primary provider: Home-Ornith' <<<"$retry_output" || \
+  fail "wizard did not reject a repeated fallback provider"
+grep -qF 'Charter for team-lead' <<<"$retry_output" || \
+  fail "wizard did not return to the corrected member"
+
+RETRY_CONFIG="$RETRY_DIR/muse-squad.toml" node -e '
+  const config = require(process.env.RETRY_CONFIG.replace(/muse-squad\.toml$/, "mcp/config.js"))
+    .loadConfig({ config_file: process.env.RETRY_CONFIG });
+  const member = config.squad.members["team-lead"];
+  if (!member) throw new Error("corrected member was not written");
+  if (member.primary !== "Home-Ornith") throw new Error("corrected primary was not applied");
+  if (JSON.stringify(member.fallback) !== JSON.stringify(["Muse-Spark"])) {
+    throw new Error(`corrected fallback was not applied: ${JSON.stringify(member.fallback)}`);
+  }
+  if (member.charter.trim() !== "Retry charter.") throw new Error("corrected charter was not applied");
+  if (config.squad.members["3"]) throw new Error("numeric member name was written");
+'
+[[ ! -e "$RETRY_DIR/agents/3.md" ]] || \
+  fail "wizard generated a wrapper for the rejected numeric member"
+
+echo "== bash installer: wizard repairs an invalid squad config =="
+BROKEN_DIR="$TMP/broken-config"
+MUSE_CONFIG_DIR="$BROKEN_DIR" bash "$ROOT/install" --no-backup >/dev/null
+perl -0pi -e 's/(\[squad\.team-lead\].*?fallback = \[)"DeepSeek-Flash"\]/${1}"Muse-Spark"]/s' \
+  "$BROKEN_DIR/muse-squad.toml"
+if node "$BROKEN_DIR/mcp/config.js" --file "$BROKEN_DIR/muse-squad.toml" \
+    --list-providers >/dev/null 2>&1; then
+  fail "test setup did not produce an invalid config"
+fi
+BROKEN_INPUT=(y)
+for _ in 1 2 3 4 5; do
+  BROKEN_INPUT+=("" "" "" "")
+done
+BROKEN_INPUT+=(n)
+broken_status=0
+broken_output="$(
+  MUSE_CONFIG_DIR="$BROKEN_DIR" MUSE_SQUAD_FORCE_INTERACTIVE=1 \
+    bash "$ROOT/install" --reconfigure-team --no-backup < <(printf '%s\n' "${BROKEN_INPUT[@]}") 2>&1
+)" || broken_status=$?
+printf '%s\n' "$broken_output"
+[[ "$broken_status" -eq 0 ]] || \
+  fail "wizard could not repair an invalid config (status $broken_status)"
+node "$BROKEN_DIR/mcp/config.js" --file "$BROKEN_DIR/muse-squad.toml" \
+  --list-providers >/dev/null 2>&1 || fail "wizard left the config invalid"
+
 echo "== bash installer: prompts with piped stdin =="
 PIPED_DIR="$TMP/piped-config"
 TTY_FILE="$TMP/piped-tty"
@@ -328,6 +391,10 @@ for phrase in \
   "Install-Config (Get-Config-Defaults)" \
   "function Test-Console-Input" \
   "function Read-Interactive" \
+  "function Test-Member-Name" \
+  "function Test-Fallback-List" \
+  "fallback must not repeat the primary provider" \
+  "team config failed validation; no changes were written" \
   "MUSE_SQUAD_TTY" \
   "Get-Dest 'muse-squad.toml'" \
   "--uninstall         Remove managed files and unregister muse-squad"; do

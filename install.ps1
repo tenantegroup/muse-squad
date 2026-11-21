@@ -476,9 +476,21 @@ function Get-Available-Providers {
   if ((Get-Command node -ErrorAction SilentlyContinue) -and
       (Test-Path -LiteralPath $configFile) -and (Test-Path -LiteralPath $parser)) {
     $output = & node $parser --file $configFile --list-providers 2>$null
-    foreach ($line in $output) {
-      $name = ([string]$line).Trim()
-      if ($name -and -not $providers.Contains($name)) { $providers.Add($name) }
+    if ($LASTEXITCODE -eq 0 -and $output) {
+      foreach ($line in $output) {
+        $name = ([string]$line).Trim()
+        if ($name -and -not $providers.Contains($name)) { $providers.Add($name) }
+      }
+      return $providers.ToArray()
+    }
+  }
+  # Fall back to raw provider headings if the squad section is invalid.
+  if (Test-Path -LiteralPath $configFile) {
+    foreach ($line in (Get-Content -LiteralPath $configFile)) {
+      if ($line -match '^\[providers\.([^\]]+)\]\s*$') {
+        $name = $Matches[1].Trim()
+        if ($name -and -not $providers.Contains($name)) { $providers.Add($name) }
+      }
     }
   }
   return $providers.ToArray()
@@ -534,7 +546,8 @@ function Resolve-Provider([string]$answer, [string]$default) {
     if ($index -ge 0 -and $index -lt $script:WizardProviders.Count) {
       return $script:WizardProviders[$index]
     }
-    throw "Invalid provider number: $answer"
+    Write-Host "  invalid provider number: $answer"
+    return $null
   }
   return $answer
 }
@@ -545,7 +558,9 @@ function Resolve-Provider-List([string]$answer, [string]$default) {
   foreach ($part in ($answer -split ',')) {
     $part = ([string]$part).Trim()
     if (-not $part) { continue }
-    $resolved += (Resolve-Provider $part '')
+    $value = Resolve-Provider $part ''
+    if ([string]::IsNullOrEmpty($value)) { return $null }
+    $resolved += $value
   }
   return ($resolved -join ',')
 }
@@ -562,6 +577,33 @@ function Test-Provider-List([string]$list) {
   return $true
 }
 
+function Test-Member-Name([string]$name) {
+  if ($name -notmatch '^[a-z0-9][a-z0-9-]*$') { return $false }
+  if ($name -match '^\d+$') { return $false }
+  return $true
+}
+
+function Test-Fallback-List([string]$primary, [string]$list) {
+  if ([string]::IsNullOrWhiteSpace($list)) { return $true }
+  $parts = @($list -split ',' | ForEach-Object { ([string]$_).Trim() } | Where-Object { $_ })
+  $seen = New-Object 'System.Collections.Generic.HashSet[string]'
+  foreach ($part in $parts) {
+    if (-not (Test-Provider-Known $part)) {
+      Write-Host "  unknown provider in fallback list: $list"
+      return $false
+    }
+    if ($part -eq $primary) {
+      Write-Host "  fallback must not repeat the primary provider: $part"
+      return $false
+    }
+    if (-not $seen.Add($part)) {
+      Write-Host "  fallback must not contain duplicate providers: $part"
+      return $false
+    }
+  }
+  return $true
+}
+
 function Write-Team-Config([string]$membersFile, [string]$action) {
   $dest = Get-Dest 'muse-squad.toml'
   $parent = Split-Path -Parent $dest
@@ -570,11 +612,9 @@ function Write-Team-Config([string]$membersFile, [string]$action) {
   }
   $nodeScript = @'
 const fs = require('fs');
-const path = require('path');
 
 const configFile = process.argv[2];
 const membersFile = process.argv[3];
-const outputFile = process.argv[4];
 
 function quote(value) {
   return JSON.stringify(String(value));
@@ -590,8 +630,11 @@ const raw = fs.readFileSync(configFile, 'utf8');
 const marker = raw.match(/^\[squad\][ \t]*$/m);
 if (!marker) throw new Error('muse-squad.toml has no [squad] table');
 const prefix = raw.slice(0, marker.index).replace(/\r?\n+$/, '\n');
-const config = require(path.join(path.dirname(configFile), 'mcp', 'config.js'))
-  .loadConfig({ config_file: configFile });
+
+function squadValue(key, fallback) {
+  const match = prefix.match(new RegExp(`^${key}[ \\t]*=[ \\t]*("(?:[^"\\\\]|\\\\.)*")[ \\t]*$`, 'm'));
+  return match ? JSON.parse(match[1]) : fallback;
+}
 
 const members = fs.readFileSync(membersFile, 'utf8').split(/\r?\n/)
   .filter((line) => line.length > 0)
@@ -609,8 +652,8 @@ const members = fs.readFileSync(membersFile, 'utf8').split(/\r?\n/)
 
 const lines = [
   '[squad]',
-  `name = ${quote(config.squad.name)}`,
-  `memory_dir = ${quote(config.squad.memory_dir)}`,
+  `name = ${quote(squadValue('name', 'Muse Squad'))}`,
+  `memory_dir = ${quote(squadValue('memory_dir', '.muse/squad'))}`,
   ''
 ];
 for (const member of members) {
@@ -622,14 +665,29 @@ for (const member of members) {
     ''
   );
 }
-fs.writeFileSync(outputFile, `${prefix}${lines.join('\n')}`);
+process.stdout.write(`${prefix}${lines.join('\n')}`);
 '@
   $rendered = & node -e $nodeScript $dest $membersFile
   if ($null -eq $LASTEXITCODE -or $LASTEXITCODE -ne 0) {
     throw "team config generation failed with exit code $LASTEXITCODE"
   }
   $normalized = (($rendered -join "`n") -replace "(?:\r?\n)+\z", "`n")
-  [IO.File]::WriteAllText($dest, $normalized, [System.Text.UTF8Encoding]::new($false))
+  $configTmp = Join-Path ([IO.Path]::GetTempPath()) ('muse-squad-config-' + [Guid]::NewGuid().ToString('N') + '.toml')
+  try {
+    [IO.File]::WriteAllText($configTmp, $normalized, [System.Text.UTF8Encoding]::new($false))
+    $parser = Get-Dest 'mcp/config.js'
+    if (Test-Path -LiteralPath $parser) {
+      & node $parser --file $configTmp --list-providers 2>$null | Out-Null
+      if ($LASTEXITCODE -ne 0) {
+        throw 'team config failed validation; no changes were written'
+      }
+    }
+    Move-Item -LiteralPath $configTmp -Destination $dest -Force
+  } finally {
+    if (Test-Path -LiteralPath $configTmp) {
+      Remove-Item -LiteralPath $configTmp -Force -ErrorAction SilentlyContinue
+    }
+  }
   Write-Host "  $action  $dest"
 }
 
@@ -694,6 +752,10 @@ function Configure-Team {
     while ($true) {
       $rawName = Read-Defaulted "Member $($i + 1) name" $defaultNames[$i]
       $name = ConvertTo-Member-Name $rawName
+      if (-not (Test-Member-Name $name)) {
+        Write-Host '  member name must include at least one letter'
+        continue
+      }
       if ($used.Contains($name)) {
         Write-Host "  name already in use: $name"
         continue
@@ -701,19 +763,36 @@ function Configure-Team {
       [void]$used.Add($name)
       break
     }
-    $primary = Resolve-Provider `
-      (Read-Defaulted "Primary provider for $name ($menu)" $defaultPrimary[$i]) $defaultPrimary[$i]
-    if (-not (Test-Provider-Known $primary)) { throw "unknown provider: $primary" }
-    $fallback = Resolve-Provider-List `
-      (Read-Defaulted "Fallback providers for $name (comma-separated, empty for none)" $defaultFallback[$i]) `
-      $defaultFallback[$i]
-    if (-not (Test-Provider-List $fallback)) { throw "unknown provider in fallback list: $fallback" }
-    $charter = Get-Existing-Charter $name
-    if ([string]::IsNullOrWhiteSpace($charter)) {
-      $charter = "Domain expertise: $name tasks. Voice: concise and evidence-first. " +
+
+    while ($true) {
+      $rawPrimary = Read-Defaulted "Primary provider for $name ($menu)" $defaultPrimary[$i]
+      $primary = Resolve-Provider $rawPrimary $defaultPrimary[$i]
+      if ([string]::IsNullOrEmpty($primary)) { continue }
+      if (-not (Test-Provider-Known $primary)) {
+        Write-Host "  unknown provider: $primary"
+        continue
+      }
+      break
+    }
+
+    while ($true) {
+      $rawFallback = Read-Defaulted "Fallback providers for $name (comma-separated, empty for none)" $defaultFallback[$i]
+      $fallback = Resolve-Provider-List $rawFallback $defaultFallback[$i]
+      if ([string]::IsNullOrEmpty($fallback)) { continue }
+      if (-not (Test-Fallback-List $primary $fallback)) { continue }
+      break
+    }
+
+    $charterDefault = Get-Existing-Charter $name
+    if ([string]::IsNullOrWhiteSpace($charterDefault)) {
+      $charterDefault = "Domain expertise: $name tasks. Voice: concise and evidence-first. " +
         'Guardrails: stay scoped to assigned files, preserve existing conventions, and verify changes before reporting done.'
     }
-    $charter = ((Read-Defaulted "Charter for $name" $charter).Trim() -replace '\s+', ' ')
+    while ($true) {
+      $charter = ((Read-Defaulted "Charter for $name" $charterDefault).Trim() -replace '\s+', ' ')
+      if (-not [string]::IsNullOrWhiteSpace($charter)) { break }
+      Write-Host '  charter cannot be empty'
+    }
     $members += [pscustomobject]@{ name = $name; primary = $primary; fallback = $fallback; charter = $charter }
   }
 
@@ -728,6 +807,10 @@ function Configure-Team {
         continue
       }
       $name = ConvertTo-Member-Name $rawName
+      if (-not (Test-Member-Name $name)) {
+        Write-Host '  member name must include at least one letter'
+        continue
+      }
       if ($used.Contains($name)) {
         Write-Host "  name already in use: $name"
         continue
@@ -735,14 +818,32 @@ function Configure-Team {
       [void]$used.Add($name)
       break
     }
-    $primary = Resolve-Provider `
-      (Read-Defaulted "Primary provider for $name ($menu)" 'Muse-Ember') 'Muse-Ember'
-    if (-not (Test-Provider-Known $primary)) { throw "unknown provider: $primary" }
-    $fallback = Resolve-Provider-List `
-      (Read-Defaulted "Fallback providers for $name (comma-separated, empty for none)" 'Home-Ornith') 'Home-Ornith'
-    if (-not (Test-Provider-List $fallback)) { throw "unknown provider in fallback list: $fallback" }
-    $charter = Read-Defaulted 'Charter' 'Domain expertise: bounded implementation tasks. Voice: concise and evidence-first. Guardrails: stay scoped to assigned files, preserve existing conventions, and verify changes before reporting done.'
-    $charter = ($charter.Trim() -replace '\s+', ' ')
+
+    while ($true) {
+      $rawPrimary = Read-Defaulted "Primary provider for $name ($menu)" 'Muse-Ember'
+      $primary = Resolve-Provider $rawPrimary 'Muse-Ember'
+      if ([string]::IsNullOrEmpty($primary)) { continue }
+      if (-not (Test-Provider-Known $primary)) {
+        Write-Host "  unknown provider: $primary"
+        continue
+      }
+      break
+    }
+
+    while ($true) {
+      $rawFallback = Read-Defaulted "Fallback providers for $name (comma-separated, empty for none)" 'Home-Ornith'
+      $fallback = Resolve-Provider-List $rawFallback 'Home-Ornith'
+      if ([string]::IsNullOrEmpty($fallback)) { continue }
+      if (-not (Test-Fallback-List $primary $fallback)) { continue }
+      break
+    }
+
+    $charterDefault = 'Domain expertise: bounded implementation tasks. Voice: concise and evidence-first. Guardrails: stay scoped to assigned files, preserve existing conventions, and verify changes before reporting done.'
+    while ($true) {
+      $charter = ((Read-Defaulted 'Charter' $charterDefault).Trim() -replace '\s+', ' ')
+      if (-not [string]::IsNullOrWhiteSpace($charter)) { break }
+      Write-Host '  charter cannot be empty'
+    }
     $members += [pscustomobject]@{ name = $name; primary = $primary; fallback = $fallback; charter = $charter }
   }
 
