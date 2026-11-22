@@ -5,7 +5,9 @@ description: Executes the approved .muse/PLAN.md with named squad members and a 
 
 ## Named members and project memory (read first)
 
-At startup, read `~/.config/muse/muse-squad.toml` and the generated roster at `~/.config/muse/squad/team.md`. Use only the members defined under `[squad.<name>]`. All implementation and review goes through named members; there are no unnamed helpers. Match each task to a member's `charter`, and ask the user which member owns a step if no charter fits.
+At startup, call `muse-squad:member_status` with no arguments to load the roster and every member's `charter`, and call `muse-squad:list_providers` for provider settings. Use only the members returned there. All implementation and review goes through named members; there are no unnamed helpers. Match each task to a member's `charter`, and ask the user which member owns a step if no charter fits.
+
+The Muse config lives in `~/.config/muse` outside the workspace. Do not use file tools to `Read` `muse-squad.toml` or `squad/team.md`; the sandbox rejects absolute paths outside the project. Use `/squad-team` when the config needs changes.
 
 If `.muse/squad/` does not exist yet, create `.muse/squad/decisions.md` and `.muse/squad/history/`. Every member reads both files before starting and appends concise lasting learnings when finished. Use isolated Git worktrees for bounded implementation tasks where available.
 
@@ -34,7 +36,7 @@ Always include a "Subagents / Providers" roster in wave, progress, and completio
 
 ## Provider limits, health, and member-scoped routing (read first)
 
-At the start, call `muse-squad:list_providers` (or read `muse-squad.toml`) to learn each provider's `enabled`, `type`, `max_concurrency`, and `max_input_chars`. Use `muse-squad:member_status("<name>")` to inspect a member's chain before assigning work. Native providers are built into Muse and cannot be called by the MCP router; the router skips them and tries that member's HTTP providers in chain order. Providers with `enabled = false` are skipped entirely, including as a configured primary.
+At the start, use `muse-squad:list_providers` to learn each provider's `enabled`, `type`, `max_concurrency`, and `max_input_chars`. Use `muse-squad:member_status("<name>")` to inspect a member's chain before assigning work. Native providers are built into Muse and cannot be called by the MCP router; the router skips them and tries that member's HTTP providers in chain order. Providers with `enabled = false` are skipped entirely, including as a configured primary.
 
 `muse-squad:generate_code` and `muse-squad:critique_plan` are member-scoped:
 

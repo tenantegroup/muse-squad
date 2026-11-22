@@ -751,13 +751,13 @@ You are in SQUAD-TEAM mode. Change the squad configuration and its generated out
 ## Read first
 
 1. Resolve the Muse config directory: use `MUSE_CONFIG_DIR` when set, otherwise `~/.config/muse` (`%USERPROFILE%\.config\muse` on Windows).
-2. Read `muse-squad.toml` from that directory and the generated `squad/team.md`.
+2. Call `muse-squad:member_status` with no arguments for the roster and charters, and `muse-squad:list_providers` for provider settings. Do not use file tools to `Read` files in the Muse config directory; the sandbox rejects absolute paths outside the workspace.
 3. Show the current roster briefly as `@<name> | primary | fallback chain` before asking what to change.
 4. Treat `mcp/roles.js` as a read-only catalog. Do not edit it or any other file under `mcp/`.
 
 ## What you may edit
 
-Edit only `muse-squad.toml`. Do not hand-edit `squad/team.md`, `agents/<name>.md`, `AGENTS.md` / `MUSE.md`, anything under `mcp/`, or the installer-managed `.muse-squad-state.json` beside the TOML. This is the only squad config file; there are no per-repo settings and no helper agents to edit.
+Edit only `muse-squad.toml`. Do not hand-edit `squad/team.md`, `agents/<name>.md`, `AGENTS.md` / `MUSE.md`, anything under `mcp/`, or the installer-managed `.muse-squad-state.json` beside the TOML. This is the only squad config file; there are no per-repo settings and no helper agents to edit. Apply the edit with a shell command using the resolved absolute path; file editing tools are workspace-scoped.
 
 The file uses `schema = 1` and these tables:
 
@@ -836,7 +836,7 @@ Stale `agents/<name>.md` wrappers that carry the generated marker are removed au
 
 ## Finish
 
-Re-read `squad/team.md`. Report the final `@<name> | primary | fallback` table, the regenerated file paths, and for each catalog change the role ID, final member name, and whether the charter was newly generated, rewritten by rename, or preserved. Never report the change as done until the materializer exited successfully.
+Call `muse-squad:member_status` again to confirm the final roster and charters. Report the final `@<name> | primary | fallback` table, the regenerated file paths, and for each catalog change the role ID, final member name, and whether the charter was newly generated, rewritten by rename, or preserved. Never report the change as done until the materializer exited successfully.
 MSQ_PAYLOAD_001
 install_file skills/squad-doctor/SKILL.md <<'MSQ_PAYLOAD_002'
 ---
@@ -887,7 +887,9 @@ You are in SQUAD-PLAN mode. Do NOT edit product code yet.
 
 ## Named members and project memory (read first)
 
-At startup, read `~/.config/muse/muse-squad.toml` (`schema = 1`) and the generated roster at `~/.config/muse/squad/team.md`. Use only the members defined under `[squad.<name>]`; every step goes to a named member. Match each step to that member's `charter`. If no charter fits, ask the user which member should own the step instead of inventing a helper.
+At startup, call `muse-squad:member_status` with no arguments to load the roster and every member's `charter`, and call `muse-squad:list_providers` for provider settings. Use only the members returned there; every step goes to a named member. Match each step to that member's `charter`. If no charter fits, ask the user which member should own the step instead of inventing a helper.
+
+The Muse config lives in `~/.config/muse` outside the workspace. Do not use file tools to `Read` `muse-squad.toml` or `squad/team.md`; the sandbox rejects absolute paths outside the project. Use `/squad-team` when the config needs changes.
 
 If `.muse/squad/` does not exist in this repository yet, create `.muse/squad/decisions.md` and `.muse/squad/history/` before starting. Every named member reads `.muse/squad/decisions.md` and `.muse/squad/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished. Ask the documentation charter member (default `@docs`) to append durable decisions to `.muse/squad/decisions.md` before sign-off.
 
@@ -916,7 +918,7 @@ Always include a "Subagents / Providers" roster in user-facing summaries and bef
 
 ## Provider limits and health (read first)
 
-At the start, call `muse-squad:list_providers` (or read `muse-squad.toml`) to learn each provider's `enabled`, `max_concurrency`, `max_input_chars`, and `type`. Native providers are built into Muse and cannot be called by the MCP router; the router skips them and tries that member's HTTP providers in chain order. Providers with `enabled = false` are skipped entirely, including as a configured primary.
+At the start, use `muse-squad:list_providers` to learn each provider's `enabled`, `max_concurrency`, `max_input_chars`, and `type`. Native providers are built into Muse and cannot be called by the MCP router; the router skips them and tries that member's HTTP providers in chain order. Providers with `enabled = false` are skipped entirely, including as a configured primary.
 
 - Never spawn more simultaneous native subagents of one native provider than its `max_concurrency`; batch extra exploration into later waves.
 - Parallel calls to `muse-squad` are safe: the router queues requests and serializes them per HTTP provider's `max_concurrency`.
@@ -956,7 +958,9 @@ description: Executes the approved .muse/PLAN.md with named squad members and a 
 
 ## Named members and project memory (read first)
 
-At startup, read `~/.config/muse/muse-squad.toml` and the generated roster at `~/.config/muse/squad/team.md`. Use only the members defined under `[squad.<name>]`. All implementation and review goes through named members; there are no unnamed helpers. Match each task to a member's `charter`, and ask the user which member owns a step if no charter fits.
+At startup, call `muse-squad:member_status` with no arguments to load the roster and every member's `charter`, and call `muse-squad:list_providers` for provider settings. Use only the members returned there. All implementation and review goes through named members; there are no unnamed helpers. Match each task to a member's `charter`, and ask the user which member owns a step if no charter fits.
+
+The Muse config lives in `~/.config/muse` outside the workspace. Do not use file tools to `Read` `muse-squad.toml` or `squad/team.md`; the sandbox rejects absolute paths outside the project. Use `/squad-team` when the config needs changes.
 
 If `.muse/squad/` does not exist yet, create `.muse/squad/decisions.md` and `.muse/squad/history/`. Every member reads both files before starting and appends concise lasting learnings when finished. Use isolated Git worktrees for bounded implementation tasks where available.
 
@@ -985,7 +989,7 @@ Always include a "Subagents / Providers" roster in wave, progress, and completio
 
 ## Provider limits, health, and member-scoped routing (read first)
 
-At the start, call `muse-squad:list_providers` (or read `muse-squad.toml`) to learn each provider's `enabled`, `type`, `max_concurrency`, and `max_input_chars`. Use `muse-squad:member_status("<name>")` to inspect a member's chain before assigning work. Native providers are built into Muse and cannot be called by the MCP router; the router skips them and tries that member's HTTP providers in chain order. Providers with `enabled = false` are skipped entirely, including as a configured primary.
+At the start, use `muse-squad:list_providers` to learn each provider's `enabled`, `type`, `max_concurrency`, and `max_input_chars`. Use `muse-squad:member_status("<name>")` to inspect a member's chain before assigning work. Native providers are built into Muse and cannot be called by the MCP router; the router skips them and tries that member's HTTP providers in chain order. Providers with `enabled = false` are skipped entirely, including as a configured primary.
 
 `muse-squad:generate_code` and `muse-squad:critique_plan` are member-scoped:
 
@@ -5472,6 +5476,8 @@ This block is managed by muse-squad. Put durable changes in the muse-squad repo 
 
 `~/.config/muse/muse-squad.toml` is the single source of truth (`schema = 1`). It holds the AI providers and the squad in one TOML file. The installer keeps its own version state in `.muse-squad-state.json` beside it and never adds settings here; edit the TOML directly or use `/squad-team`.
 
+The Muse config directory is outside the workspace, so file tools cannot `Read` these paths from a project session. Inspect the squad with `muse-squad:member_status` and `muse-squad:list_providers`; use `/squad-team` for config changes.
+
 - Providers live under `[providers.<Name>]`. `type = "native"` providers are built into Muse; `type = "http"` providers point at an OpenAI-compatible server. Every provider has `enabled = true` by default; set `enabled = false` to disable one without removing it from member chains.
 - Members live under `[squad.<name>]` and define only `primary`, an ordered `fallback` array, and a `charter`. At least one member is required. Default names are role IDs from the pinned `mcp/roles.js` catalog (`@lead`, `@backend`, `@reviewer`, ...); renamed members keep their TOML name, and installers never rewrite existing charters.
 - The generated roster is `~/.config/muse/squad/team.md`; generated member wrappers are `~/.config/muse/agents/<name>.md`. Do not hand-edit generated files.
@@ -5480,7 +5486,7 @@ This block is managed by muse-squad. Put durable changes in the muse-squad repo 
 
 All implementation, exploration, and review work goes to a named squad member invoked with `@<name>`. There are no unnamed helpers to fall back to. Keep the main session focused on decisions and integration.
 
-Match work to the `charter` text in the config, never to a guessed specialty. If no member's charter clearly fits, ask the user which member should own the step instead of inventing a helper.
+Match work to the `charter` text returned by `muse-squad:member_status`, never to a guessed specialty. If no member's charter clearly fits, ask the user which member should own the step instead of inventing a helper.
 
 ### Muse MCP routing
 

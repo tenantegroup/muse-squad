@@ -7,13 +7,13 @@ You are in SQUAD-TEAM mode. Change the squad configuration and its generated out
 ## Read first
 
 1. Resolve the Muse config directory: use `MUSE_CONFIG_DIR` when set, otherwise `~/.config/muse` (`%USERPROFILE%\.config\muse` on Windows).
-2. Read `muse-squad.toml` from that directory and the generated `squad/team.md`.
+2. Call `muse-squad:member_status` with no arguments for the roster and charters, and `muse-squad:list_providers` for provider settings. Do not use file tools to `Read` files in the Muse config directory; the sandbox rejects absolute paths outside the workspace.
 3. Show the current roster briefly as `@<name> | primary | fallback chain` before asking what to change.
 4. Treat `mcp/roles.js` as a read-only catalog. Do not edit it or any other file under `mcp/`.
 
 ## What you may edit
 
-Edit only `muse-squad.toml`. Do not hand-edit `squad/team.md`, `agents/<name>.md`, `AGENTS.md` / `MUSE.md`, anything under `mcp/`, or the installer-managed `.muse-squad-state.json` beside the TOML. This is the only squad config file; there are no per-repo settings and no helper agents to edit.
+Edit only `muse-squad.toml`. Do not hand-edit `squad/team.md`, `agents/<name>.md`, `AGENTS.md` / `MUSE.md`, anything under `mcp/`, or the installer-managed `.muse-squad-state.json` beside the TOML. This is the only squad config file; there are no per-repo settings and no helper agents to edit. Apply the edit with a shell command using the resolved absolute path; file editing tools are workspace-scoped.
 
 The file uses `schema = 1` and these tables:
 
@@ -92,4 +92,4 @@ Stale `agents/<name>.md` wrappers that carry the generated marker are removed au
 
 ## Finish
 
-Re-read `squad/team.md`. Report the final `@<name> | primary | fallback` table, the regenerated file paths, and for each catalog change the role ID, final member name, and whether the charter was newly generated, rewritten by rename, or preserved. Never report the change as done until the materializer exited successfully.
+Call `muse-squad:member_status` again to confirm the final roster and charters. Report the final `@<name> | primary | fallback` table, the regenerated file paths, and for each catalog change the role ID, final member name, and whether the charter was newly generated, rewritten by rename, or preserved. Never report the change as done until the materializer exited successfully.

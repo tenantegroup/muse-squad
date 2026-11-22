@@ -747,5 +747,18 @@ for file in "$ROOT/payload/AGENTS.md" "$ROOT/README.md" "$ROOT/payload/skills"/*
     fi
   done
 done
+for file in "$ROOT/payload/AGENTS.md" "$ROOT/payload/skills/squad-plan/SKILL.md" \
+  "$ROOT/payload/skills/squad-execute/SKILL.md" "$ROOT/payload/skills/squad-team/SKILL.md"; do
+  grep -qF 'outside the workspace' "$file" || \
+    fail "$file does not explain the workspace file-tool restriction"
+  grep -qF 'muse-squad:member_status' "$file" || \
+    fail "$file does not use member_status for squad inspection"
+done
+for file in "$ROOT/payload/skills/squad-plan/SKILL.md" \
+  "$ROOT/payload/skills/squad-execute/SKILL.md"; do
+  if grep -qF 'At startup, read `~/.config/muse/muse-squad.toml`' "$file"; then
+    fail "$file still tells agents to Read the config outside the workspace"
+  fi
+done
 
 echo "ALL INSTALL TESTS PASSED"
