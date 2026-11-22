@@ -12,7 +12,20 @@ export MUSE_SQUAD_SKIP_MUSE_CHECK=1
 
 fail() { printf 'FAIL: %s\n' "$*" >&2; exit 1; }
 latest_backup() { ls -1dt "$1".backup.* 2>/dev/null | head -n 1 || true; }
-permissions() { stat -f %Lp "$1" 2>/dev/null || stat -c %a "$1" 2>/dev/null || true; }
+permissions() {
+  # GNU stat accepts -f but reports filesystem data, so validate the result
+  # before falling back to BSD stat.
+  local mode
+  mode="$(stat -c %a "$1" 2>/dev/null || true)"
+  if [[ "$mode" =~ ^[0-7]+$ ]]; then
+    printf '%s' "$mode"
+    return
+  fi
+  mode="$(stat -f %Lp "$1" 2>/dev/null || true)"
+  if [[ "$mode" =~ ^[0-7]+$ ]]; then
+    printf '%s' "$mode"
+  fi
+}
 
 PAYLOAD_PATHS=(
   "skills/squad-team/SKILL.md"
