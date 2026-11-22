@@ -436,6 +436,17 @@ PIPED_CONFIG="$PIPED_DIR/muse-squad.toml" node -e '
   if (text.includes("Home-Ornith") || text.includes("DeepSeek-Flash")) {
     throw new Error("piped config still contains legacy custom providers");
   }
+  const squadBanner = text.search(/^#\s*=+\s*Squad\s*=+\s*$/m);
+  const squadTable = text.search(/^\[squad\]\s*$/m);
+  if (squadBanner < 0 || squadTable < 0) {
+    throw new Error("piped config is missing the Squad section markers");
+  }
+  for (const name of ["DeepSeek", "Anthropic"]) {
+    const at = text.indexOf(`[providers.${name}]`);
+    if (at < 0 || at > squadBanner || at > squadTable) {
+      throw new Error(`provider stub ${name} was rendered in the Squad section`);
+    }
+  }
 '
 for provider in DeepSeek Anthropic; do
   grep -qF "[providers.$provider]" "$PIPED_DIR/muse-squad.toml" || \

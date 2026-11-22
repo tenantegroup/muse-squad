@@ -4501,11 +4501,26 @@ function renderProviderStubs(names) {
   ].join('\n');
 }
 
+function insertProviderBlock(prefix, providerNames) {
+  const providerBlock = renderProviderStubs(providerNames);
+  if (!providerBlock) return prefix;
+  const block = providerBlock.replace(/^\s+/, '').replace(/\s+$/, '');
+  // Keep generated provider tables in the AI Providers section, ahead of the
+  // Squad banner and its [squad] tables.
+  const squadBanner = prefix.match(/^#[ \t]*=+[ \t]*Squad[ \t]*=+[ \t]*$/mi);
+  if (!squadBanner) return `${prefix}\n\n${block}`;
+  const before = prefix.slice(0, squadBanner.index).replace(/\s+$/, '');
+  const squad = prefix.slice(squadBanner.index).replace(/^\s+/, '');
+  return `${before}\n\n${block}\n\n${squad}`;
+}
+
 function renderConfig(state, members) {
   const marker = state.raw.match(/^\[squad\][ \t]*$/m);
   if (!marker) throw new Error('muse-squad.toml has no [squad] table');
-  const prefix = state.raw.slice(0, marker.index).replace(/\s+$/, '');
-  const providerBlock = renderProviderStubs(state.generatedProviders);
+  const prefix = insertProviderBlock(
+    state.raw.slice(0, marker.index).replace(/\s+$/, ''),
+    state.generatedProviders
+  );
   const lines = [
     '[squad]',
     `name = ${quote(state.squadName)}`,
@@ -4521,7 +4536,7 @@ function renderConfig(state, members) {
       ''
     );
   }
-  return `${prefix}${providerBlock}\n\n${lines.join('\n')}`;
+  return `${prefix}\n\n${lines.join('\n')}`;
 }
 
 function validateMemberRecord(record) {
