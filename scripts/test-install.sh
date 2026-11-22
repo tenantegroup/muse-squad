@@ -504,6 +504,35 @@ wait "$FIFO_WRITER" 2>/dev/null || true
 grep -qF 'prepared    7 JSONL member records' "$HANG_OUTPUT_FILE" || \
   fail "TTY wizard did not finish preparing members"
 
+echo "== installer exits with a live terminal input stream =="
+if command -v script >/dev/null 2>&1; then
+  LIVE_TTY_DIR="$TMP/live-tty-config"
+  LIVE_TTY_OUTPUT="$TMP/live-tty-output"
+  (
+    printf 'y\nn\n1\nY\n'
+    # Keep the pseudo-terminal open after the answers. An async TTY reader
+    # would hang here even though every prompt has been answered.
+    sleep 5
+  ) | MUSE_CONFIG_DIR="$LIVE_TTY_DIR" script -q /dev/null \
+    bash -c "bash -s < \"$ROOT/install\"" > "$LIVE_TTY_OUTPUT" 2>&1 &
+  LIVE_TTY_SCRIPT=$!
+  LIVE_TTY_DONE=0
+  for _ in $(seq 1 30); do
+    if grep -qF 'done.' "$LIVE_TTY_OUTPUT"; then
+      LIVE_TTY_DONE=1
+      break
+    fi
+    sleep 0.1
+  done
+  kill "$LIVE_TTY_SCRIPT" 2>/dev/null || true
+  wait "$LIVE_TTY_SCRIPT" 2>/dev/null || true
+  (( LIVE_TTY_DONE )) || fail "installer hung with a live terminal input stream"
+  grep -qF 'prepared    7 JSONL member records' "$LIVE_TTY_OUTPUT" || \
+    fail "live terminal wizard did not finish preparing members"
+else
+  echo "  skipped    script(1) is unavailable"
+fi
+
 echo "== bash installer: legacy config migration offer =="
 LEGACY_DIR="$TMP/legacy-config"
 make_legacy_config "$LEGACY_DIR"

@@ -8,7 +8,6 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
-const readline = require('readline');
 const config = require('./config.js');
 const roles = require('./roles.js');
 
@@ -131,49 +130,58 @@ function loadState(configFile, fresh = false, providersFile = null) {
 function createPrompt() {
   const inputPath = process.env.MUSE_SQUAD_WIZARD_INPUT;
   const startLine = Math.max(1, Number(process.env.MUSE_SQUAD_WIZARD_LINE || 1) || 1);
-  const queue = [];
-  let waiting = null;
-  let ended = false;
-  let lineNumber = 0;
+  let lines = null;
+  let lineIndex = 0;
+  let fd = null;
 
-  const input = inputPath
-    ? fs.createReadStream(inputPath, { encoding: 'utf8' })
-    : process.stdin;
-  const rl = readline.createInterface({ input, terminal: false });
+  if (inputPath && fs.existsSync(inputPath) && fs.statSync(inputPath).isFile()) {
+    // A scripted answer file can be consumed up front, skipping the lines the
+    // installer already read. Terminals and FIFOs must stay open and be read on
+    // demand; readSync also leaves no background reader behind at exit.
+    lines = fs.readFileSync(inputPath, 'utf8').split(/\r?\n/);
+    if (lines.length > 0 && lines[lines.length - 1] === '') lines.pop();
+    lineIndex = startLine - 1;
+  } else if (inputPath) {
+    fd = fs.openSync(inputPath, 'r');
+  }
 
-  rl.on('line', (line) => {
-    lineNumber++;
-    if (lineNumber < startLine) return;
-    if (waiting) {
-      const resolve = waiting.resolve;
-      waiting = null;
-      resolve(line);
-    } else {
-      queue.push(line);
+  const byte = Buffer.alloc(1);
+  const current = [];
+
+  function nextLine() {
+    if (lines) {
+      if (lineIndex >= lines.length) die('no more wizard input');
+      return lines[lineIndex++];
     }
-  });
-  rl.on('close', () => {
-    ended = true;
-    if (waiting) {
-      const reject = waiting.reject;
-      waiting = null;
-      reject(new Error('no more wizard input'));
+
+    const source = fd == null ? 0 : fd;
+    current.length = 0;
+    while (true) {
+      let count;
+      try {
+        count = fs.readSync(source, byte, 0, 1, null);
+      } catch (error) {
+        if (error.code === 'EAGAIN') continue;
+        die(`cannot read wizard input: ${error.message}`);
+      }
+      if (count === 0) die('no more wizard input');
+      if (byte[0] === 0x0a) break;
+      current.push(byte[0]);
     }
-  });
+    if (current.length > 0 && current[current.length - 1] === 0x0d) current.pop();
+    return Buffer.from(current).toString('utf8');
+  }
 
   return {
-    ask: (question) => new Promise((resolve, reject) => {
+    ask: (question) => {
       process.stderr.write(question);
-      if (queue.length > 0) return resolve(queue.shift());
-      if (ended) return reject(new Error('no more wizard input'));
-      waiting = { resolve, reject };
-    }),
+      return nextLine();
+    },
     close: () => {
-      rl.close();
-      // readline.close() leaves the underlying stream open. With /dev/tty that
-      // keeps Node alive forever after the wizard prints "prepared ...".
-      if (typeof input.destroy === 'function') input.destroy();
-      else if (typeof input.pause === 'function') input.pause();
+      if (fd != null) {
+        fs.closeSync(fd);
+        fd = null;
+      }
     }
   };
 }
