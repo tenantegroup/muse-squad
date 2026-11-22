@@ -13,7 +13,7 @@ You are in SQUAD-TEAM mode. Change the squad configuration and its generated out
 
 ## What you may edit
 
-Edit only `muse-squad.toml`. Do not hand-edit `squad/team.md`, `agents/<name>.md`, `AGENTS.md` / `MUSE.md`, or anything under `mcp/`. This is the only config file; there are no per-repo settings and no helper agents to edit.
+Edit only `muse-squad.toml`. Do not hand-edit `squad/team.md`, `agents/<name>.md`, `AGENTS.md` / `MUSE.md`, anything under `mcp/`, or the installer-managed `.muse-squad-state.json` beside the TOML. This is the only squad config file; there are no per-repo settings and no helper agents to edit.
 
 The file uses `schema = 1` and these tables:
 

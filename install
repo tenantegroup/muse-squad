@@ -13,6 +13,8 @@ SKIP_MUSE_CHECK=0
 BACKUP_CHOICE="auto"
 RECONFIGURE_TEAM=0
 USE_DEFAULTS=0
+LEGACY_CONFIG=0
+MIGRATE_TEAM=0
 REPO_RAW_BASE="https://raw.githubusercontent.com/tenantegroup/muse-squad/main"
 MUSE_SQUAD_STATE_FILE="${HOME}/.config/muse-squad/config-dir"
 
@@ -182,6 +184,91 @@ save_config_dir() {
   mkdir -p "$(dirname "$dest")" || fail "cannot create directory for $dest"
   printf '%s\n' "$1" > "$dest" || fail "cannot write $dest"
   chmod 600 "$dest" || fail "cannot set permissions on $dest"
+}
+
+migration_state_file() {
+  printf '%s' "$CONFIG_DIR/.muse-squad-state.json"
+}
+
+state_json_value() {
+  local key="$1" file value=""
+  file="$(migration_state_file)"
+  [[ -f "$file" ]] || { printf '%s' "$value"; return 0; }
+  value="$(awk -v key="\"$key\"" '
+    index($0, key) {
+      line = $0
+      sub(/^[^:]*:[[:space:]]*"/, "", line)
+      sub(/".*$/, "", line)
+      print line
+      exit
+    }
+  ' "$file" 2>/dev/null)" || true
+  printf '%s' "$value"
+}
+
+write_migration_state() {
+  local status="$1" file tmp
+  file="$(migration_state_file)"
+  mkdir -p "$(dirname "$file")" || fail "cannot create directory for $file"
+  tmp="$(mktemp "${TMPDIR:-/tmp}/muse-squad-state.XXXXXX")" || fail "mktemp failed"
+  cat > "$tmp" <<EOF
+{
+  "version": "$VERSION",
+  "migrationStatus": "$status"
+}
+EOF
+  chmod 600 "$tmp" || fail "cannot set permissions on $file"
+  mv "$tmp" "$file" || fail "cannot write $file"
+  log "  state       $file ($status)"
+}
+
+state_handled_for_current() {
+  local state_version status
+  state_version="$(state_json_value version)"
+  status="$(state_json_value migrationStatus)"
+  [[ "$state_version" == "$VERSION" ]] || return 1
+  [[ "$status" == "applied" || "$status" == "declined" ]]
+}
+
+config_has_version_marker() {
+  local dest="$CONFIG_DIR/muse-squad.toml"
+  [[ -f "$dest" ]] && grep -qF "# muse-squad-version: $VERSION" "$dest"
+}
+
+offer_migration() {
+  (( LEGACY_CONFIG )) || return 0
+  [[ "$MODE" == "install" ]] || return 0
+
+  if state_handled_for_current; then
+    log "  skipped    migration (state: $(state_json_value migrationStatus))"
+    return 0
+  fi
+  if (( USE_DEFAULTS )); then
+    write_migration_state declined
+    log "  skipped    migration (--defaults)"
+    return 0
+  fi
+  if ! interactive_input; then
+    log "  available  role-catalog migration; re-run with --reconfigure-team"
+    return 0
+  fi
+
+  write_migration_state offered
+  local answer="N"
+  printf 'Older squad config detected. Migrate to the role-catalog templates now? [y/N]: ' >&2
+  read_default answer "N"
+  case "$answer" in
+    [Yy]|[Yy][Ee][Ss])
+      MIGRATE_TEAM=1
+      log "  migration  starting role-catalog wizard"
+      ;;
+    ''|[Nn]|[Nn][Oo])
+      write_migration_state declined
+      log "  kept       $CONFIG_DIR/muse-squad.toml (migration declined)"
+      ;;
+    *)
+      fail "expected y or n for migration prompt" ;;
+  esac
 }
 
 valid_muse_config_dir() {
@@ -434,46 +521,50 @@ wizard_interactive() {
 }
 
 configure_team() {
-  local dest="$CONFIG_DIR/muse-squad.toml" seeded=0
+  local dest="$CONFIG_DIR/muse-squad.toml" seeded=0 config_before=""
+
   if (( FIRST_INSTALL )); then
     # Seed first so the shared role wizard has providers to assign.
     if [[ ! -f "$dest" ]]; then
       install_default_config
       seeded=1
     fi
-    if ! wizard_interactive || ! command -v node >/dev/null 2>&1; then
-      return 0
-    fi
-  else
-    if (( ! RECONFIGURE_TEAM )); then
-      log "  unchanged  $dest"
-      return 0
-    fi
-    if ! wizard_interactive; then
-      log "  unchanged  $dest (team wizard skipped)"
-      return 0
-    fi
-    if ! command -v node >/dev/null 2>&1; then
-      log "  warning    node not found; keeping existing team config"
-      return 0
-    fi
+  elif (( ! MIGRATE_TEAM && ! RECONFIGURE_TEAM )); then
+    log "  unchanged  $dest"
+    return 0
   fi
 
-  local customize_answer="Y"
-  printf 'Customize Squad team members & models now? [Y/n]: ' >&2
-  read_default customize_answer "Y"
-  case "$customize_answer" in
-    [Yy]|[Yy][Ee][Ss]) ;;
-    [Nn]|[Nn][Oo])
-      if (( seeded )); then
-        log "  kept defaults  $dest"
-      else
-        log "  unchanged  $dest"
-      fi
-      return 0 ;;
-    *)
-      fail "expected Y or n for team customization prompt" ;;
-  esac
+  if ! wizard_interactive; then
+    if (( MIGRATE_TEAM || RECONFIGURE_TEAM )); then
+      log "  unchanged  $dest (team wizard skipped)"
+    fi
+    return 0
+  fi
+  if ! command -v node >/dev/null 2>&1; then
+    log "  warning    node not found; keeping existing team config"
+    return 0
+  fi
+
+  if (( ! MIGRATE_TEAM )); then
+    local customize_answer="Y"
+    printf 'Customize Squad team members & models now? [Y/n]: ' >&2
+    read_default customize_answer "Y"
+    case "$customize_answer" in
+      [Yy]|[Yy][Ee][Ss]) ;;
+      [Nn]|[Nn][Oo])
+        if (( seeded )); then
+          log "  kept defaults  $dest"
+        else
+          log "  unchanged  $dest"
+        fi
+        return 0 ;;
+      *)
+        fail "expected Y or n for team customization prompt" ;;
+    esac
+  fi
+
+  config_before="$(mktemp "${TMPDIR:-/tmp}/muse-squad-config-before.XXXXXX")" || fail "mktemp failed"
+  cp "$dest" "$config_before" 2>/dev/null || true
 
   local wizard="$CONFIG_DIR/mcp/team-wizard.js" members_file config_tmp
   members_file="$(mktemp "${TMPDIR:-/tmp}/muse-squad-members.XXXXXX")" || fail "mktemp failed"
@@ -490,21 +581,31 @@ configure_team() {
   fi
 
   if ! node "$wizard" --config "$dest" --members-file "$members_file"; then
-    rm -f "$members_file" "$config_tmp"
+    rm -f "$members_file" "$config_tmp" "$config_before"
     fail "team configuration failed"
   fi
   if ! node "$wizard" --render "$dest" --members-file "$members_file" > "$config_tmp"; then
-    rm -f "$members_file" "$config_tmp"
+    rm -f "$members_file" "$config_tmp" "$config_before"
     fail "team config generation failed"
   fi
   if ! node "$CONFIG_DIR/mcp/config.js" --file "$config_tmp" --json >/dev/null 2>&1; then
-    rm -f "$members_file" "$config_tmp"
+    rm -f "$members_file" "$config_tmp" "$config_before"
     fail "team config failed validation; no changes were written"
   fi
   mv "$config_tmp" "$dest" || fail "cannot install $dest"
   chmod 600 "$dest" 2>/dev/null || true
   rm -f "$members_file"
   log "  updated    $dest"
+
+  if (( LEGACY_CONFIG )); then
+    if cmp -s "$config_before" "$dest"; then
+      write_migration_state declined
+      log "  unchanged  $dest (migration kept current squad)"
+    else
+      write_migration_state applied
+    fi
+  fi
+  rm -f "$config_before"
 }
 
 run_sync_team() {
@@ -565,12 +666,13 @@ self_update() {
     fail "--update requires curl or wget"
   fi
   chmod +x "$tmp" || true
-  local -a args=(--dir "$CONFIG_DIR" --defaults)
+  local -a args=(--dir "$CONFIG_DIR")
   (( SKIP_MCP )) && args+=(--no-mcp)
   (( SKIP_MUSE_CHECK )) && args+=(--skip-muse-check)
   [[ "$BACKUP_CHOICE" == "yes" ]] && args+=(--backup)
   [[ "$BACKUP_CHOICE" == "no" ]] && args+=(--no-backup)
-  # --update must never trigger a reconfigure on the downloaded installer.
+  # --update skips generic reconfiguration, but a legacy config still gets the
+  # one-time migration offer from the downloaded installer.
   log "  running    latest installer"
   bash "$tmp" "${args[@]}"
   rc=$?
@@ -599,6 +701,11 @@ fi
 
 if [[ "$MODE" != "updated" ]]; then
   backup_config
+fi
+
+if [[ "$MODE" == "install" && "$FIRST_INSTALL" == "0" ]] && ! config_has_version_marker; then
+  LEGACY_CONFIG=1
+  offer_migration
 fi
 
 if [[ "$MODE" == "uninstall" ]]; then
@@ -647,7 +754,7 @@ You are in SQUAD-TEAM mode. Change the squad configuration and its generated out
 
 ## What you may edit
 
-Edit only `muse-squad.toml`. Do not hand-edit `squad/team.md`, `agents/<name>.md`, `AGENTS.md` / `MUSE.md`, or anything under `mcp/`. This is the only config file; there are no per-repo settings and no helper agents to edit.
+Edit only `muse-squad.toml`. Do not hand-edit `squad/team.md`, `agents/<name>.md`, `AGENTS.md` / `MUSE.md`, anything under `mcp/`, or the installer-managed `.muse-squad-state.json` beside the TOML. This is the only squad config file; there are no per-repo settings and no helper agents to edit.
 
 The file uses `schema = 1` and these tables:
 
@@ -4709,8 +4816,10 @@ MSQ_PAYLOAD_011
 install_default_config() {
   install_config <<'MSQ_CONFIG_DEFAULT'
 # muse-squad configuration - schema = 1
+# muse-squad-version: 0.3.0
 # Single source of truth. Edit by hand or with /squad-team.
-# There is no second config file and no migration step.
+# The installer keeps migration state in .muse-squad-state.json beside this
+# file; it never adds settings here.
 
 schema = 1
 
@@ -5198,7 +5307,7 @@ This block is managed by muse-squad. Put durable changes in the muse-squad repo 
 
 ### One config, one roster
 
-`~/.config/muse/muse-squad.toml` is the single source of truth (`schema = 1`). It holds the AI providers and the squad in one TOML file. There is no second config file and no migration step; edit the TOML directly or use `/squad-team`.
+`~/.config/muse/muse-squad.toml` is the single source of truth (`schema = 1`). It holds the AI providers and the squad in one TOML file. The installer keeps its own version state in `.muse-squad-state.json` beside it and never adds settings here; edit the TOML directly or use `/squad-team`.
 
 - Providers live under `[providers.<Name>]`. `type = "native"` providers are built into Muse; `type = "http"` providers point at an OpenAI-compatible server. Every provider has `enabled = true` by default; set `enabled = false` to disable one without removing it from member chains.
 - Members live under `[squad.<name>]` and define only `primary`, an ordered `fallback` array, and a `charter`. At least one member is required. Default names are role IDs from the pinned `mcp/roles.js` catalog (`@lead`, `@backend`, `@reviewer`, ...); renamed members keep their TOML name, and installers never rewrite existing charters.
@@ -5246,6 +5355,9 @@ uninstall_file agents/plan-reviewer.md
 uninstall_file agents/general-purpose.md
 uninstall_file agents/worker.md
 configure_team
+if [[ "$MODE" == "install" ]] && (( ! LEGACY_CONFIG )); then
+  write_migration_state applied
+fi
 run_sync_team install
 register_mcp install
 if [[ "$MODE" == "install" && "$FIRST_INSTALL" == "1" ]]; then

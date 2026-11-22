@@ -4,7 +4,7 @@ This block is managed by muse-squad. Put durable changes in the muse-squad repo 
 
 ### One config, one roster
 
-`~/.config/muse/muse-squad.toml` is the single source of truth (`schema = 1`). It holds the AI providers and the squad in one TOML file. There is no second config file and no migration step; edit the TOML directly or use `/squad-team`.
+`~/.config/muse/muse-squad.toml` is the single source of truth (`schema = 1`). It holds the AI providers and the squad in one TOML file. The installer keeps its own version state in `.muse-squad-state.json` beside it and never adds settings here; edit the TOML directly or use `/squad-team`.
 
 - Providers live under `[providers.<Name>]`. `type = "native"` providers are built into Muse; `type = "http"` providers point at an OpenAI-compatible server. Every provider has `enabled = true` by default; set `enabled = false` to disable one without removing it from member chains.
 - Members live under `[squad.<name>]` and define only `primary`, an ordered `fallback` array, and a `charter`. At least one member is required. Default names are role IDs from the pinned `mcp/roles.js` catalog (`@lead`, `@backend`, `@reviewer`, ...); renamed members keep their TOML name, and installers never rewrite existing charters.

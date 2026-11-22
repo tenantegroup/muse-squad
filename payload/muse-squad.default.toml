@@ -1,6 +1,8 @@
 # muse-squad configuration - schema = 1
+# muse-squad-version: 0.3.0
 # Single source of truth. Edit by hand or with /squad-team.
-# There is no second config file and no migration step.
+# The installer keeps migration state in .muse-squad-state.json beside this
+# file; it never adds settings here.
 
 schema = 1
 

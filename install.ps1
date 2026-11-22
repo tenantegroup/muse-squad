@@ -14,6 +14,8 @@ $skipMuseCheck = $false
 $backupChoice = 'auto'
 $reconfigureTeam = $false
 $useDefaults = $false
+$legacyConfig = $false
+$migrateTeam = $false
 $repoRawBase = 'https://raw.githubusercontent.com/tenantegroup/muse-squad/main'
 $stateFile = Join-Path $HOME '.config/muse-squad/config-dir'
 if ($null -eq $args) { $args = @() }
@@ -188,6 +190,82 @@ function Save-Config-Dir([string]$dir) {
   }
   [IO.File]::WriteAllText($stateFile, "$dir`n", [System.Text.UTF8Encoding]::new($false))
   Write-Host "  saved      $stateFile"
+}
+
+function Get-Migration-State-File {
+  return Join-Path $configDir '.muse-squad-state.json'
+}
+
+function Get-Migration-State-Value([string]$key) {
+  $file = Get-Migration-State-File
+  if (-not (Test-Path -LiteralPath $file -PathType Leaf)) { return '' }
+  try {
+    $state = Get-Content -LiteralPath $file -Raw | ConvertFrom-Json
+    $property = $state.PSObject.Properties[$key]
+    if ($null -ne $property) { return [string]$property.Value }
+  } catch {
+    return ''
+  }
+  return ''
+}
+
+function Write-Migration-State([string]$status) {
+  $file = Get-Migration-State-File
+  $state = [ordered]@{
+    version = $Version
+    migrationStatus = $status
+  }
+  $json = $state | ConvertTo-Json -Compress
+  [IO.File]::WriteAllText($file, $json + "`n", [System.Text.UTF8Encoding]::new($false))
+  Write-Host "  state       $file ($status)"
+}
+
+function Test-Migration-Handled {
+  $stateVersion = Get-Migration-State-Value 'version'
+  $status = Get-Migration-State-Value 'migrationStatus'
+  if ($stateVersion -ne $Version) { return $false }
+  return ($status -eq 'applied' -or $status -eq 'declined')
+}
+
+function Test-Legacy-Config {
+  $dest = Get-Dest 'muse-squad.toml'
+  if (-not (Test-Path -LiteralPath $dest -PathType Leaf)) { return $false }
+  $marker = '# muse-squad-version: ' + $Version
+  foreach ($line in [IO.File]::ReadAllLines($dest)) {
+    if ($line -eq $marker) { return $false }
+  }
+  return $true
+}
+
+function Invoke-Migration-Prompt {
+  if (-not $legacyConfig -or $mode -ne 'install') { return }
+  if (Test-Migration-Handled) {
+    Write-Host "  skipped    migration (state: $(Get-Migration-State-Value 'migrationStatus'))"
+    return
+  }
+  if ($useDefaults) {
+    Write-Migration-State 'declined'
+    Write-Host '  skipped    migration (--defaults)'
+    return
+  }
+  if (-not (Test-Interactive-Input)) {
+    Write-Host '  available  role-catalog migration; re-run with --reconfigure-team'
+    return
+  }
+  Write-Migration-State 'offered'
+  $answer = Read-Interactive 'Older squad config detected. Migrate to the role-catalog templates now? [y/N]'
+  if ([string]::IsNullOrWhiteSpace($answer)) { $answer = 'N' }
+  if ($answer -match '^[Yy]([Ee][Ss])?$') {
+    $script:migrateTeam = $true
+    Write-Host '  migration  starting role-catalog wizard'
+    return
+  }
+  if ($answer -match '^[Nn]([Oo])?$') {
+    Write-Migration-State 'declined'
+    Write-Host "  kept       $(Get-Dest 'muse-squad.toml') (migration declined)"
+    return
+  }
+  throw 'Expected y or n for migration prompt'
 }
 
 function Test-Muse-Config-Dir([string]$dir) {
@@ -475,44 +553,48 @@ function Test-Interactive-Input {
 function Configure-Team {
   $dest = Get-Dest 'muse-squad.toml'
   $seeded = $false
+  $configBefore = $null
+
   if ($firstInstall) {
     # Seed first so the shared role wizard has providers to assign.
     if (-not (Test-Path -LiteralPath $dest)) {
       Install-Config (Get-Config-Defaults)
       $seeded = $true
     }
-    if ($useDefaults -or -not (Test-Interactive-Input) -or
-        -not (Get-Command node -ErrorAction SilentlyContinue)) {
-      return
-    }
-  } else {
-    if (-not $reconfigureTeam) {
-      Write-Host "  unchanged  $dest"
-      return
-    }
-    if ($useDefaults -or -not (Test-Interactive-Input)) {
-      Write-Host "  unchanged  $dest (team wizard skipped)"
-      return
-    }
-    if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
-      Write-Host '  warning    node not found; keeping existing team config'
-      return
-    }
+  } elseif (-not $migrateTeam -and -not $reconfigureTeam) {
+    Write-Host "  unchanged  $dest"
+    return
   }
 
-  $customize = Read-Interactive 'Customize Squad team members & models now? [Y/n]'
-  if ([string]::IsNullOrWhiteSpace($customize)) { $customize = 'Y' }
-  if ($customize -match '^[Nn]([Oo])?$') {
-    if ($seeded) {
-      Write-Host "  kept defaults  $dest"
-    } else {
-      Write-Host "  unchanged  $dest"
+  if ($useDefaults -or -not (Test-Interactive-Input)) {
+    if ($migrateTeam -or $reconfigureTeam) {
+      Write-Host "  unchanged  $dest (team wizard skipped)"
     }
     return
   }
-  if ($customize -notmatch '^[Yy]([Ee][Ss])?$') {
-    throw 'Expected Y or n for team customization prompt'
+  if (-not (Get-Command node -ErrorAction SilentlyContinue)) {
+    Write-Host '  warning    node not found; keeping existing team config'
+    return
   }
+
+  if (-not $migrateTeam) {
+    $customize = Read-Interactive 'Customize Squad team members & models now? [Y/n]'
+    if ([string]::IsNullOrWhiteSpace($customize)) { $customize = 'Y' }
+    if ($customize -match '^[Nn]([Oo])?$') {
+      if ($seeded) {
+        Write-Host "  kept defaults  $dest"
+      } else {
+        Write-Host "  unchanged  $dest"
+      }
+      return
+    }
+    if ($customize -notmatch '^[Yy]([Ee][Ss])?$') {
+      throw 'Expected Y or n for team customization prompt'
+    }
+  }
+
+  $configBefore = Join-Path ([IO.Path]::GetTempPath()) ('muse-squad-config-before-' + [Guid]::NewGuid().ToString('N') + '.toml')
+  Copy-Item -LiteralPath $dest -Destination $configBefore -Force
 
   $wizard = Get-Dest 'mcp/team-wizard.js'
   $membersFile = Join-Path ([IO.Path]::GetTempPath()) ('muse-squad-members-' + [Guid]::NewGuid().ToString('N') + '.jsonl')
@@ -556,6 +638,17 @@ process.stdout.write(wizard.renderFromMembersFile(configFile, membersFile));
     }
     Move-Item -LiteralPath $configTmp -Destination $dest -Force
     Write-Host "  updated    $dest"
+
+    if ($legacyConfig) {
+      $beforeText = [IO.File]::ReadAllText($configBefore)
+      $afterText = [IO.File]::ReadAllText($dest)
+      if ($beforeText -ceq $afterText) {
+        Write-Migration-State 'declined'
+        Write-Host "  unchanged  $dest (migration kept current squad)"
+      } else {
+        Write-Migration-State 'applied'
+      }
+    }
   } finally {
     Remove-Item Env:\MUSE_SQUAD_WIZARD_INPUT -ErrorAction SilentlyContinue
     Remove-Item Env:\MUSE_SQUAD_WIZARD_LINE -ErrorAction SilentlyContinue
@@ -564,6 +657,9 @@ process.stdout.write(wizard.renderFromMembersFile(configFile, membersFile));
     }
     if (Test-Path -LiteralPath $configTmp) {
       Remove-Item -LiteralPath $configTmp -Force -ErrorAction SilentlyContinue
+    }
+    if ($null -ne $configBefore -and (Test-Path -LiteralPath $configBefore)) {
+      Remove-Item -LiteralPath $configBefore -Force -ErrorAction SilentlyContinue
     }
   }
 }
@@ -638,12 +734,13 @@ function Invoke-SelfUpdate {
     if (Test-Path -LiteralPath $tmp) { Remove-Item -LiteralPath $tmp -Force -ErrorAction SilentlyContinue }
     throw "cannot download latest installer: $($_.Exception.Message)"
   }
-  $updateArgs = @('--dir', $configDir, '--defaults')
+  $updateArgs = @('--dir', $configDir)
   if ($skipMcp -or $env:MUSE_SQUAD_SKIP_MCP -eq '1') { $updateArgs += '--no-mcp' }
   if ($skipMuseCheck) { $updateArgs += '--skip-muse-check' }
   if ($backupChoice -eq 'yes') { $updateArgs += '--backup' }
   if ($backupChoice -eq 'no') { $updateArgs += '--no-backup' }
-  # --update must never trigger a reconfigure on the downloaded installer.
+  # --update skips generic reconfiguration, but a legacy config still gets the
+  # one-time migration offer from the downloaded installer.
   Write-Host '  running    latest installer'
   try {
     $shell = if (Get-Command pwsh -ErrorAction SilentlyContinue) { 'pwsh' } elseif (Get-Command powershell -ErrorAction SilentlyContinue) { 'powershell' } else { $null }
@@ -675,6 +772,11 @@ if ($mode -eq 'update') {
 $firstInstall = -not (Test-Path -LiteralPath (Get-Dest 'muse-squad.toml'))
 
 Backup-Config
+
+if ($mode -eq 'install' -and -not $firstInstall -and (Test-Legacy-Config)) {
+  $legacyConfig = $true
+  Invoke-Migration-Prompt
+}
 
 if ($mode -eq 'uninstall') {
   Register-Mcp 'unregister'
@@ -718,7 +820,7 @@ You are in SQUAD-TEAM mode. Change the squad configuration and its generated out
 
 ## What you may edit
 
-Edit only `muse-squad.toml`. Do not hand-edit `squad/team.md`, `agents/<name>.md`, `AGENTS.md` / `MUSE.md`, or anything under `mcp/`. This is the only config file; there are no per-repo settings and no helper agents to edit.
+Edit only `muse-squad.toml`. Do not hand-edit `squad/team.md`, `agents/<name>.md`, `AGENTS.md` / `MUSE.md`, anything under `mcp/`, or the installer-managed `.muse-squad-state.json` beside the TOML. This is the only squad config file; there are no per-repo settings and no helper agents to edit.
 
 The file uses `schema = 1` and these tables:
 
@@ -4783,8 +4885,10 @@ module.exports = {
 function Get-Config-Defaults {
   @'
 # muse-squad configuration - schema = 1
+# muse-squad-version: 0.3.0
 # Single source of truth. Edit by hand or with /squad-team.
-# There is no second config file and no migration step.
+# The installer keeps migration state in .muse-squad-state.json beside this
+# file; it never adds settings here.
 
 schema = 1
 
@@ -5272,7 +5376,7 @@ This block is managed by muse-squad. Put durable changes in the muse-squad repo 
 
 ### One config, one roster
 
-`~/.config/muse/muse-squad.toml` is the single source of truth (`schema = 1`). It holds the AI providers and the squad in one TOML file. There is no second config file and no migration step; edit the TOML directly or use `/squad-team`.
+`~/.config/muse/muse-squad.toml` is the single source of truth (`schema = 1`). It holds the AI providers and the squad in one TOML file. The installer keeps its own version state in `.muse-squad-state.json` beside it and never adds settings here; edit the TOML directly or use `/squad-team`.
 
 - Providers live under `[providers.<Name>]`. `type = "native"` providers are built into Muse; `type = "http"` providers point at an OpenAI-compatible server. Every provider has `enabled = true` by default; set `enabled = false` to disable one without removing it from member chains.
 - Members live under `[squad.<name>]` and define only `primary`, an ordered `fallback` array, and a `charter`. At least one member is required. Default names are role IDs from the pinned `mcp/roles.js` catalog (`@lead`, `@backend`, `@reviewer`, ...); renamed members keep their TOML name, and installers never rewrite existing charters.
@@ -5317,6 +5421,9 @@ Do not create `.muse/PLAN.md` in a normal session unless `/squad-plan` is invoke
 <!-- muse-squad:end -->
 '@
 Configure-Team
+if ($mode -eq 'install' -and -not $legacyConfig) {
+  Write-Migration-State 'applied'
+}
 Invoke-Sync-Team 'install'
 Register-Mcp 'install'
 if ($mode -eq 'install' -and $firstInstall) {

@@ -2,6 +2,7 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+VERSION="$(tr -d '[:space:]' < "$ROOT/VERSION")"
 TMP="$(mktemp -d "${TMPDIR:-/tmp}/muse-squad-test.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 
@@ -62,6 +63,36 @@ verify_config() {
   node "$ROOT/payload/mcp/config.js" --file "$1" --json > /dev/null
 }
 
+verify_migration_state() {
+  local dir="$1" expected_status="$2" file="$1/.muse-squad-state.json"
+  [[ -f "$file" ]] || fail "missing migration state file: $file"
+  [[ "$(permissions "$file")" == "600" ]] || \
+    fail "migration state file is not chmod 600: $file"
+  STATE_FILE="$file" STATE_VERSION="$VERSION" STATE_STATUS="$expected_status" node -e '
+    const fs = require("fs");
+    const state = JSON.parse(fs.readFileSync(process.env.STATE_FILE, "utf8"));
+    if (state.version !== process.env.STATE_VERSION) {
+      throw new Error(`bad state version: ${state.version}`);
+    }
+    if (state.migrationStatus !== process.env.STATE_STATUS) {
+      throw new Error(`bad migration status: ${state.migrationStatus}`);
+    }
+  '
+}
+
+make_legacy_config() {
+  local dir="$1"
+  MUSE_CONFIG_DIR="$dir" bash "$ROOT/install" --no-backup >/dev/null
+  perl -ni -e 'print unless /^# muse-squad-version: /' "$dir/muse-squad.toml"
+  perl -0pi -e 's/# \@lead — Lead \/ Architect/# \@lead — Lead \/ Architect (legacy)/' \
+    "$dir/muse-squad.toml"
+  rm -f "$dir/.muse-squad-state.json"
+  grep -qF '# @lead — Lead / Architect (legacy)' "$dir/muse-squad.toml" || \
+    fail "test setup did not create a legacy charter"
+  [[ ! -e "$dir/.muse-squad-state.json" ]] || \
+    fail "test setup did not remove migration state"
+}
+
 verify_roster() {
   local dir="$1"
   grep -qF '| @name | Primary | Fallback | Focus |' "$dir/squad/team.md" || \
@@ -110,6 +141,9 @@ diff -q --strip-trailing-cr "$ROOT/payload/muse-squad.default.toml" "$BASE/muse-
 verify_config "$BASE/muse-squad.toml"
 verify_settings "$BASE/settings.json" "$BASE/muse-squad.toml"
 verify_roster "$BASE"
+grep -qF "# muse-squad-version: $VERSION" "$BASE/muse-squad.toml" || \
+  fail "fresh config is missing the version marker"
+verify_migration_state "$BASE" applied
 
 echo "== bash installer: verify delegation policy =="
 {
@@ -375,6 +409,86 @@ grep -qF 'skipped      backup (user chose no)' <<<"$piped_rerun_output" || \
 [[ -z "$(latest_backup "$PIPED_DIR")" ]] || \
   fail "piped rerun created a backup after choosing no"
 
+echo "== bash installer: legacy config migration offer =="
+LEGACY_DIR="$TMP/legacy-config"
+make_legacy_config "$LEGACY_DIR"
+LEGACY_TTY="$TMP/legacy-tty"
+printf 'y\ny\n2\ny\nY\n' > "$LEGACY_TTY"
+legacy_status=0
+legacy_output="$(
+  MUSE_CONFIG_DIR="$LEGACY_DIR" MUSE_SQUAD_TTY="$LEGACY_TTY" \
+    bash -s < "$ROOT/install" 2>&1
+)" || legacy_status=$?
+printf '%s\n' "$legacy_output"
+[[ "$legacy_status" -eq 0 ]] || \
+  fail "legacy migration installer exited with status $legacy_status"
+for phrase in \
+  'Older squad config detected. Migrate to the role-catalog templates now? [y/N]:' \
+  'migration  starting role-catalog wizard' \
+  'Replace the current roster and regenerate charters from software? [y/N]:' \
+  'template    software' \
+  'defaults    accepted'; do
+  grep -qF "$phrase" <<<"$legacy_output" || \
+    fail "legacy migration output is missing: $phrase"
+done
+if grep -qF "# muse-squad-version: $VERSION" "$LEGACY_DIR/muse-squad.toml"; then
+  fail "migration added a version marker to an existing TOML"
+fi
+if grep -qF '# @lead — Lead / Architect (legacy)' "$LEGACY_DIR/muse-squad.toml"; then
+  fail "migration did not replace the old charter"
+fi
+verify_migration_state "$LEGACY_DIR" applied
+legacy_rerun="$(MUSE_CONFIG_DIR="$LEGACY_DIR" bash "$ROOT/install" --no-backup)"
+if grep -qF 'Older squad config detected' <<<"$legacy_rerun"; then
+  fail "applied migration was offered again"
+fi
+verify_migration_state "$LEGACY_DIR" applied
+
+echo "== bash installer: legacy migration decline =="
+DECLINE_DIR="$TMP/legacy-decline"
+make_legacy_config "$DECLINE_DIR"
+DECLINE_TTY="$TMP/legacy-decline-tty"
+printf 'y\nn\n' > "$DECLINE_TTY"
+decline_status=0
+decline_output="$(
+  MUSE_CONFIG_DIR="$DECLINE_DIR" MUSE_SQUAD_TTY="$DECLINE_TTY" \
+    bash -s < "$ROOT/install" 2>&1
+)" || decline_status=$?
+printf '%s\n' "$decline_output"
+[[ "$decline_status" -eq 0 ]] || \
+  fail "declined migration installer exited with status $decline_status"
+for phrase in \
+  'Older squad config detected. Migrate to the role-catalog templates now? [y/N]:' \
+  'migration declined'; do
+  grep -qF "$phrase" <<<"$decline_output" || \
+    fail "declined migration output is missing: $phrase"
+done
+grep -qF '# @lead — Lead / Architect (legacy)' "$DECLINE_DIR/muse-squad.toml" || \
+  fail "declined migration changed the existing charter"
+verify_config "$DECLINE_DIR/muse-squad.toml"
+verify_migration_state "$DECLINE_DIR" declined
+decline_rerun="$(
+  MUSE_CONFIG_DIR="$DECLINE_DIR" MUSE_SQUAD_FORCE_INTERACTIVE=1 \
+    bash "$ROOT/install" --no-backup
+)"
+if grep -qF 'Older squad config detected' <<<"$decline_rerun"; then
+  fail "declined migration was offered again for the same version"
+fi
+verify_migration_state "$DECLINE_DIR" declined
+
+echo "== bash installer: --defaults declines legacy migration =="
+DEFAULTS_DIR="$TMP/legacy-defaults"
+make_legacy_config "$DEFAULTS_DIR"
+defaults_output="$(
+  MUSE_CONFIG_DIR="$DEFAULTS_DIR" bash "$ROOT/install" --no-backup --defaults
+)"
+printf '%s\n' "$defaults_output"
+grep -qF 'skipped    migration (--defaults)' <<<"$defaults_output" || \
+  fail "--defaults did not record a migration decline"
+grep -qF '# @lead — Lead / Architect (legacy)' "$DEFAULTS_DIR/muse-squad.toml" || \
+  fail "--defaults changed the existing charter"
+verify_migration_state "$DEFAULTS_DIR" declined
+
 echo "== bash installer: uninstall =="
 UNINSTALL_DIR="$TMP/uninstall-config"
 mkdir -p "$UNINSTALL_DIR/agents"
@@ -409,6 +523,7 @@ fi
 [[ -f "$UNINSTALL_DIR/muse-squad.toml" ]] || fail "uninstall removed muse-squad.toml"
 grep -q 'kept.*muse-squad.toml' <<<"$uninstall_output" || \
   fail "uninstall did not report that the config was kept"
+verify_migration_state "$UNINSTALL_DIR" applied
 for name in "${MEMBERS[@]}"; do
   [[ ! -e "$UNINSTALL_DIR/agents/$name.md" ]] || \
     fail "uninstall left generated wrapper @$name behind"
@@ -434,6 +549,11 @@ for phrase in \
   "function Test-Console-Input" \
   "function Read-Interactive" \
   "function Configure-Team" \
+  "function Write-Migration-State" \
+  "function Invoke-Migration-Prompt" \
+  ".muse-squad-state.json" \
+  "Older squad config detected. Migrate to the role-catalog templates now? [y/N]" \
+  "\$updateArgs = @('--dir', \$configDir)" \
   "mcp/team-wizard.js" \
   "--members-file" \
   "Built-in role catalog: 20 roles" \
