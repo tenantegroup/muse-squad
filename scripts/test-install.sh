@@ -518,7 +518,15 @@ grep -qF 'prepared    7 JSONL member records' "$HANG_OUTPUT_FILE" || \
   fail "TTY wizard did not finish preparing members"
 
 echo "== installer exits with a live terminal input stream =="
+LIVE_TTY_SCRIPT_CMD=()
 if command -v script >/dev/null 2>&1; then
+  if script -q -c ':' /dev/null >/dev/null 2>&1; then
+    LIVE_TTY_SCRIPT_CMD=(script -q -c "bash -s < \"$ROOT/install\"" /dev/null)
+  elif script -q /dev/null : >/dev/null 2>&1; then
+    LIVE_TTY_SCRIPT_CMD=(script -q /dev/null bash -c "bash -s < \"$ROOT/install\"")
+  fi
+fi
+if (( ${#LIVE_TTY_SCRIPT_CMD[@]} > 0 )); then
   LIVE_TTY_DIR="$TMP/live-tty-config"
   LIVE_TTY_OUTPUT="$TMP/live-tty-output"
   (
@@ -526,8 +534,8 @@ if command -v script >/dev/null 2>&1; then
     # Keep the pseudo-terminal open after the answers. An async TTY reader
     # would hang here even though every prompt has been answered.
     sleep 5
-  ) | MUSE_CONFIG_DIR="$LIVE_TTY_DIR" script -q /dev/null \
-    bash -c "bash -s < \"$ROOT/install\"" > "$LIVE_TTY_OUTPUT" 2>&1 &
+  ) | MUSE_CONFIG_DIR="$LIVE_TTY_DIR" "${LIVE_TTY_SCRIPT_CMD[@]}" \
+    > "$LIVE_TTY_OUTPUT" 2>&1 &
   LIVE_TTY_SCRIPT=$!
   LIVE_TTY_DONE=0
   for _ in $(seq 1 30); do
@@ -539,7 +547,12 @@ if command -v script >/dev/null 2>&1; then
   done
   kill "$LIVE_TTY_SCRIPT" 2>/dev/null || true
   wait "$LIVE_TTY_SCRIPT" 2>/dev/null || true
-  (( LIVE_TTY_DONE )) || fail "installer hung with a live terminal input stream"
+  if (( ! LIVE_TTY_DONE )); then
+    printf '%s\n' "--- live terminal output ---" >&2
+    cat "$LIVE_TTY_OUTPUT" >&2 || true
+    printf '%s\n' "--- end live terminal output ---" >&2
+    fail "installer hung with a live terminal input stream"
+  fi
   grep -qF 'prepared    7 JSONL member records' "$LIVE_TTY_OUTPUT" || \
     fail "live terminal wizard did not finish preparing members"
 else
