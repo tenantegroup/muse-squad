@@ -24,9 +24,9 @@ Examples:
 
 ```text
 [lead | Muse-Spark] Sequence wave dependencies
-[frontend | Home-Ornith] Build login form
-[backend | DeepSeek-Flash] Add retry queue
-[tester | Home-Ornith] Run regression suite
+[frontend | Muse-Spark] Build login form
+[backend | Muse-Ember] Add retry queue
+[tester | Muse-Spark] Run regression suite
 [docs | Muse-Ember] Log wave decisions
 ```
 

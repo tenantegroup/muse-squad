@@ -940,6 +940,11 @@ const CATEGORY_ROLE_IDS = [
 const ROLE_IDS = ROLES.map((role) => role.id);
 const CATEGORIES = [...new Set(ROLES.map((role) => role.category))];
 
+// Built-in Muse providers are always available. The two HTTP names below are
+// placeholders in the role presets: setup replaces them with the third-party
+// provider names collected from the user, or drops them on a native-only team.
+const NATIVE_PROVIDER_NAMES = ['Muse-Spark', 'Muse-Ember', 'Muse-Wonder'];
+
 const PROVIDER_DEFAULTS = {
   'lead': { primary: 'Muse-Spark', fallback: ['DeepSeek-Flash'] },
   'frontend': { primary: 'Home-Ornith', fallback: ['Muse-Ember'] },
@@ -1106,6 +1111,42 @@ function templateMembers(templateId) {
   });
 }
 
+function isNativeProvider(name) {
+  return NATIVE_PROVIDER_NAMES.includes(String(name));
+}
+
+// Replaces the placeholder HTTP providers in role presets with the provider
+// names collected during a fresh setup. First use becomes the primary when the
+// preset's primary was an HTTP placeholder; later uses fill fallback slots.
+// Native Muse providers are always kept and fill any gap when no HTTP provider
+// was supplied.
+function applyProviderNames(members, providerNames) {
+  const source = (Array.isArray(providerNames) ? providerNames : [])
+    .map((name) => String(name == null ? '' : name).trim())
+    .filter((name) => name && !isNativeProvider(name));
+  return members.map((member) => {
+    const available = source.slice();
+    const chain = [member.primary, ...(Array.isArray(member.fallback) ? member.fallback : [])];
+    const used = new Set();
+    const mapped = [];
+    for (const entry of chain) {
+      let next = '';
+      if (isNativeProvider(entry)) {
+        next = entry;
+      } else if (available.length > 0) {
+        next = available.shift();
+      } else {
+        next = NATIVE_PROVIDER_NAMES.find((name) => !used.has(name)) || NATIVE_PROVIDER_NAMES[0];
+      }
+      if (!next || used.has(next)) continue;
+      used.add(next);
+      mapped.push(next);
+    }
+    if (mapped.length === 0) mapped.push(NATIVE_PROVIDER_NAMES[0]);
+    return { ...member, primary: mapped[0], fallback: mapped.slice(1) };
+  });
+}
+
 function formatRole(role) {
   return [role.id, role.title, role.category, role.vibe].join('\t');
 }
@@ -1210,6 +1251,9 @@ module.exports = {
   CATEGORIES,
   TEMPLATES,
   PROVIDER_DEFAULTS,
+  NATIVE_PROVIDER_NAMES,
+  isNativeProvider,
+  applyProviderNames,
   getRole,
   getTemplate,
   listRoles,

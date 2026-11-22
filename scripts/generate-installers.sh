@@ -631,8 +631,9 @@ configure_team() {
   config_before="$(mktemp "${TMPDIR:-/tmp}/muse-squad-config-before.XXXXXX")" || fail "mktemp failed"
   cp "$dest" "$config_before" 2>/dev/null || true
 
-  local wizard="$CONFIG_DIR/mcp/team-wizard.js" members_file config_tmp
+  local wizard="$CONFIG_DIR/mcp/team-wizard.js" members_file providers_file config_tmp
   members_file="$(mktemp "${TMPDIR:-/tmp}/muse-squad-members.XXXXXX")" || fail "mktemp failed"
+  providers_file="${members_file}.providers"
   config_tmp="$(mktemp "${TMPDIR:-/tmp}/muse-squad-config.XXXXXX")" || fail "mktemp failed"
 
   # If prompts come from a terminal device, let the Node wizard keep reading
@@ -645,21 +646,23 @@ configure_team() {
     unset MUSE_SQUAD_WIZARD_INPUT MUSE_SQUAD_WIZARD_LINE
   fi
 
-  if ! node "$wizard" --config "$dest" --members-file "$members_file"; then
-    rm -f "$members_file" "$config_tmp" "$config_before"
+  local -a wizard_args=(--config "$dest" --members-file "$members_file")
+  (( FIRST_INSTALL )) && wizard_args+=(--fresh)
+  if ! node "$wizard" "${wizard_args[@]}"; then
+    rm -f "$members_file" "$providers_file" "$config_tmp" "$config_before"
     fail "team configuration failed"
   fi
   if ! node "$wizard" --render "$dest" --members-file "$members_file" > "$config_tmp"; then
-    rm -f "$members_file" "$config_tmp" "$config_before"
+    rm -f "$members_file" "$providers_file" "$config_tmp" "$config_before"
     fail "team config generation failed"
   fi
   if ! node "$CONFIG_DIR/mcp/config.js" --file "$config_tmp" --json >/dev/null 2>&1; then
-    rm -f "$members_file" "$config_tmp" "$config_before"
+    rm -f "$members_file" "$providers_file" "$config_tmp" "$config_before"
     fail "team config failed validation; no changes were written"
   fi
   mv "$config_tmp" "$dest" || fail "cannot install $dest"
   chmod 600 "$dest" 2>/dev/null || true
-  rm -f "$members_file"
+  rm -f "$members_file" "$providers_file"
   log "  updated    $dest"
 
   if (( LEGACY_CONFIG )); then
@@ -1453,7 +1456,10 @@ function Configure-Team {
 
   $wizard = Get-Dest 'mcp/team-wizard.js'
   $membersFile = Join-Path ([IO.Path]::GetTempPath()) ('muse-squad-members-' + [Guid]::NewGuid().ToString('N') + '.jsonl')
+  $providersFile = $membersFile + '.providers'
   $configTmp = Join-Path ([IO.Path]::GetTempPath()) ('muse-squad-config-' + [Guid]::NewGuid().ToString('N') + '.toml')
+  $wizardArgs = @($wizard, '--config', $dest, '--members-file', $membersFile)
+  if ($firstInstall) { $wizardArgs += '--fresh' }
 
   # When the installer is piped in, Prompt answers come from the console reader.
   # Pass that source and the next line to the Node wizard so it continues rather
@@ -1467,7 +1473,7 @@ function Configure-Team {
   }
 
   try {
-    & node $wizard --config $dest --members-file $membersFile
+    & node @wizardArgs
     if ($LASTEXITCODE -ne 0) {
       throw 'team configuration failed'
     }
@@ -1509,6 +1515,9 @@ process.stdout.write(wizard.renderFromMembersFile(configFile, membersFile));
     Remove-Item Env:\MUSE_SQUAD_WIZARD_LINE -ErrorAction SilentlyContinue
     if (Test-Path -LiteralPath $membersFile) {
       Remove-Item -LiteralPath $membersFile -Force -ErrorAction SilentlyContinue
+    }
+    if (Test-Path -LiteralPath $providersFile) {
+      Remove-Item -LiteralPath $providersFile -Force -ErrorAction SilentlyContinue
     }
     if (Test-Path -LiteralPath $configTmp) {
       Remove-Item -LiteralPath $configTmp -Force -ErrorAction SilentlyContinue

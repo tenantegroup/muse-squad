@@ -20,32 +20,10 @@ schema = 1
 #                  generated wrappers skip disabled providers; no need to
 #                  remove it from member chains or change max_concurrency.
 #
+# Fresh setup can add HTTP provider name stubs; fill in base_url, api_key,
+# and model before routing work to them. Only built-in Muse providers are seeded.
+#
 # Use # comments in this file (TOML does not use ; comments).
-
-[providers.Home-Ornith]
-enabled = true             # set false to disable this provider
-type = "http"
-base_url = "http://127.0.0.1:8000/v1"
-api_key = "local-key"             # or "${LOCAL_MODEL_API_KEY}"
-model = "local-llama/Ornith-1.5-35B-A3B-MLX-4bit"
-temperature = 0.2
-top_p = 0.9
-max_tokens = 8192
-max_input_chars = 96000
-on_context_exceeded = "truncate"  # "truncate" or "fallback"
-max_concurrency = 1
-timeout_ms = 600000
-queue_timeout_ms = 300000
-max_retries = 2
-
-[providers.DeepSeek-Flash]
-enabled = true
-type = "http"
-base_url = "https://api.deepseek.com/v1"
-api_key = "replace-me"            # e.g. "${DEEPSEEK_API_KEY}"
-model = "deepseek-chat"
-max_concurrency = 4
-timeout_ms = 600000
 
 [providers.Muse-Spark]
 enabled = true
@@ -77,7 +55,7 @@ memory_dir = ".muse/squad"
 
 [squad.lead]
 primary = "Muse-Spark"
-fallback = ["DeepSeek-Flash"]
+fallback = ["Muse-Ember"]
 charter = """
 <!-- Adapted from agency-agents by AgentLand Contributors (MIT License) — https://github.com/msitarzewski/agency-agents -->
 
@@ -134,7 +112,7 @@ Invoke me as @lead. Keep work inside my ownership; hand work back to the main se
 """
 
 [squad.frontend]
-primary = "Home-Ornith"
+primary = "Muse-Spark"
 fallback = ["Muse-Ember"]
 charter = """
 <!-- Adapted from agency-agents by AgentLand Contributors (MIT License) — https://github.com/msitarzewski/agency-agents -->
@@ -192,8 +170,8 @@ Invoke me as @frontend. Keep work inside my ownership; hand work back to the mai
 """
 
 [squad.backend]
-primary = "Home-Ornith"
-fallback = ["DeepSeek-Flash"]
+primary = "Muse-Spark"
+fallback = ["Muse-Ember"]
 charter = """
 <!-- Adapted from agency-agents by AgentLand Contributors (MIT License) — https://github.com/msitarzewski/agency-agents -->
 
@@ -250,7 +228,7 @@ Invoke me as @backend. Keep work inside my ownership; hand work back to the main
 """
 
 [squad.reviewer]
-primary = "Home-Ornith"
+primary = "Muse-Spark"
 fallback = ["Muse-Ember"]
 charter = """
 <!-- Adapted from agency-agents by AgentLand Contributors (MIT License) — https://github.com/msitarzewski/agency-agents -->
@@ -308,7 +286,7 @@ Invoke me as @reviewer. Keep work inside my ownership; hand work back to the mai
 """
 
 [squad.tester]
-primary = "Home-Ornith"
+primary = "Muse-Spark"
 fallback = ["Muse-Ember"]
 charter = """
 <!-- Adapted from agency-agents by AgentLand Contributors (MIT License) — https://github.com/msitarzewski/agency-agents -->
@@ -366,8 +344,8 @@ Invoke me as @tester. Keep work inside my ownership; hand work back to the main 
 """
 
 [squad.devops]
-primary = "Home-Ornith"
-fallback = ["DeepSeek-Flash"]
+primary = "Muse-Spark"
+fallback = ["Muse-Ember"]
 charter = """
 <!-- Adapted from agency-agents by AgentLand Contributors (MIT License) — https://github.com/msitarzewski/agency-agents -->
 
@@ -425,7 +403,7 @@ Invoke me as @devops. Keep work inside my ownership; hand work back to the main 
 
 [squad.docs]
 primary = "Muse-Ember"
-fallback = ["Home-Ornith"]
+fallback = ["Muse-Spark"]
 charter = """
 <!-- Adapted from agency-agents by AgentLand Contributors (MIT License) — https://github.com/msitarzewski/agency-agents -->
 

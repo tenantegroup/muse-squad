@@ -13,6 +13,10 @@ const config = require('./config.js');
 const roles = require('./roles.js');
 
 const MEMBER_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
+// Dots are accepted by config.js in hand-written names, but the generated
+// table header cannot express them with this TOML parser, so setup rejects them.
+const PROVIDER_NAME_RE = /^[A-Za-z0-9_-]+$/;
+const PROVIDERS_SUFFIX = '.providers';
 
 function die(message) {
   process.stderr.write(`team-wizard: ${message}\n`);
@@ -29,6 +33,7 @@ function parseArgs(argv) {
     if (argv[i] === '--config') opts.config = argv[++i];
     else if (argv[i] === '--members-file') opts.membersFile = argv[++i];
     else if (argv[i] === '--render') opts.render = argv[++i];
+    else if (argv[i] === '--fresh') opts.fresh = true;
     else if (argv[i] === '--help' || argv[i] === '-h') opts.help = true;
     else die(`unknown option: ${argv[i]}`);
   }
@@ -39,7 +44,7 @@ function parseArgs(argv) {
 function usage() {
   return [
     'Usage:',
-    '  node team-wizard.js --config PATH [--members-file PATH]',
+    '  node team-wizard.js --config PATH [--members-file PATH] [--fresh]',
     '  node team-wizard.js --render CONFIG_PATH --members-file PATH',
     '',
     'Builds [squad] members from the built-in role catalog, or renders a JSONL',
@@ -57,7 +62,33 @@ function quoteBlock(value) {
   return `"""\n${text}\n"""`;
 }
 
-function loadState(configFile) {
+function providersFileFor(membersFile) {
+  return `${membersFile}${PROVIDERS_SUFFIX}`;
+}
+
+function readProviderNames(file) {
+  if (!file || !fs.existsSync(file)) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    die(`cannot read provider names from ${file}: ${error.message}`);
+  }
+  if (!Array.isArray(parsed)) die(`provider names file must contain a JSON array: ${file}`);
+  const names = [];
+  for (const value of parsed) {
+    const name = String(value == null ? '' : value).trim();
+    if (!PROVIDER_NAME_RE.test(name)) die(`invalid provider name in ${file}: ${name}`);
+    if (!names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
+function writeProviderNames(file, names) {
+  fs.writeFileSync(file, `${JSON.stringify(names)}\n`, { mode: 0o600 });
+}
+
+function loadState(configFile, fresh = false, providersFile = null) {
   const raw = fs.readFileSync(configFile, 'utf8');
   let parsed;
   try {
@@ -67,25 +98,30 @@ function loadState(configFile) {
   }
   const providerNames = Object.keys(parsed.providers || {});
   if (providerNames.length === 0) die(`no providers are defined in ${configFile}`);
+  const generatedProviders = providersFile ? readProviderNames(providersFile) : [];
 
   let existing = [];
-  try {
-    const loaded = config.loadConfig({ config_file: configFile });
-    existing = Object.values(loaded.squad.members).map((member) => ({
-      name: member.name,
-      primary: member.primary,
-      fallback: member.fallback.slice(),
-      charter: member.charter,
-      roleId: null
-    }));
-  } catch (error) {
-    // A broken squad section is repaired by replacing it from the catalog.
+  if (!fresh) {
+    try {
+      const loaded = config.loadConfig({ config_file: configFile });
+      existing = Object.values(loaded.squad.members).map((member) => ({
+        name: member.name,
+        primary: member.primary,
+        fallback: member.fallback.slice(),
+        charter: member.charter,
+        roleId: null
+      }));
+    } catch (error) {
+      // A broken squad section is repaired by replacing it from the catalog.
+    }
   }
 
   return {
     raw,
     parsed,
-    providerOrder: providerNames.slice(),
+    fresh,
+    generatedProviders,
+    providerOrder: [...providerNames, ...generatedProviders],
     squadName: (parsed.squad && parsed.squad.name) || 'Muse Squad',
     memoryDir: (parsed.squad && parsed.squad.memory_dir) || '.muse/squad',
     existing
@@ -132,7 +168,13 @@ function createPrompt() {
       if (ended) return reject(new Error('no more wizard input'));
       waiting = { resolve, reject };
     }),
-    close: () => rl.close()
+    close: () => {
+      rl.close();
+      // readline.close() leaves the underlying stream open. With /dev/tty that
+      // keeps Node alive forever after the wizard prints "prepared ...".
+      if (typeof input.destroy === 'function') input.destroy();
+      else if (typeof input.pause === 'function') input.pause();
+    }
   };
 }
 
@@ -210,21 +252,65 @@ function printMembers(members) {
   });
 }
 
-function membersFromTemplate(templateId) {
-  return roles.templateMembers(templateId).map((member) => ({ ...member, roleId: member.name }));
+function membersFromTemplate(templateId, state = {}) {
+  const members = roles.applyProviderNames(
+    roles.templateMembers(templateId), state.generatedProviders || []
+  );
+  return members.map((member) => ({ ...member, roleId: member.name }));
+}
+
+async function collectProviders(state, prompt) {
+  if (!state.fresh) return [];
+  process.stderr.write(
+    '\nThird-party providers are HTTP models you can add to member chains.\n' +
+    'Muse native providers are already available and stay in the defaults.\n'
+  );
+  const answer = (await prompt.ask('Create third-party model providers now? [y/N]: ')).trim();
+  if (!/^[yY]([eE][sS])?$/.test(answer)) return [];
+  process.stderr.write(
+    'Enter provider names one at a time. Use letters, numbers, underscore, or hyphen.\n'
+  );
+  const names = [];
+  while (true) {
+    const name = (await prompt.ask('Provider name (blank when done): ')).trim();
+    if (!name) break;
+    if (!PROVIDER_NAME_RE.test(name)) {
+      process.stderr.write(
+        `  invalid provider name: ${name} (letters, numbers, underscore, or hyphen only)\n`
+      );
+      continue;
+    }
+    if (state.providerOrder.includes(name)) {
+      process.stderr.write(`  provider already exists: ${name}\n`);
+      continue;
+    }
+    names.push(name);
+    state.providerOrder.push(name);
+    process.stderr.write(`  added provider ${name}\n`);
+  }
+  return names;
 }
 
 async function chooseTemplate(state, prompt) {
   const options = roles.TEMPLATES.map((template) => ({
     id: template.id,
-    label: `${template.id} - ${template.title} (${template.roleIds.length} roles)`
+    label: `${template.id} - ${template.title} (${template.roleIds.length} roles)`,
+    members: roles.templateMembers(template.id).map((member) => `@${member.name}`)
   }));
   if (state.existing.length > 0) {
-    options.unshift({ id: 'keep', label: 'keep - Keep current squad' });
+    options.unshift({
+      id: 'keep',
+      label: 'keep - Keep current squad',
+      members: state.existing.map((member) => `@${member.name}`)
+    });
   }
   process.stderr.write('\nBuilt-in role catalog: 20 roles. Choose a starting team:\n');
   options.forEach((option, index) => {
     process.stderr.write(`  ${index + 1}: ${option.label}\n`);
+    const roster = option.members.length > 0
+      ? option.members.join(', ')
+      : 'no members; add roles one at a time';
+    process.stderr.write(`     ${roster}\n`);
   });
   const defaultOption = state.existing.length > 0
     ? '1'
@@ -277,13 +363,14 @@ async function editMembers(members, state, prompt) {
         const name = validateMemberName(role.id, members);
         const defaults = roles.PROVIDER_DEFAULTS[role.id] ||
           { primary: 'Muse-Ember', fallback: ['Home-Ornith'] };
-        members.push({
+        const [added] = roles.applyProviderNames([{
           name,
           primary: defaults.primary,
           fallback: defaults.fallback.slice(),
           charter: roles.buildCharter(role.id, name),
           roleId: role.id
-        });
+        }], state.generatedProviders);
+        members.push(added);
         process.stderr.write(`  added @${name}\n`);
       } else if (command === 'remove' || command === 'r') {
         const index = Number(args[0]) - 1;
@@ -349,10 +436,31 @@ async function editMembers(members, state, prompt) {
   }
 }
 
+function renderProviderStubs(names) {
+  if (!Array.isArray(names) || names.length === 0) return '';
+  const stubs = names.map((name) => [
+    `[providers.${name}]`,
+    'enabled = true',
+    'type = "http"',
+    'base_url = "replace-me"',
+    'api_key = "replace-me"',
+    'model = "replace-me"',
+    'max_concurrency = 1',
+    ''
+  ].join('\n')).join('\n');
+  return [
+    '',
+    '# Third-party providers collected during setup.',
+    '# Fill in base_url, api_key, and model before routing work to them.',
+    stubs
+  ].join('\n');
+}
+
 function renderConfig(state, members) {
   const marker = state.raw.match(/^\[squad\][ \t]*$/m);
   if (!marker) throw new Error('muse-squad.toml has no [squad] table');
-  const prefix = state.raw.slice(0, marker.index).replace(/\r?\n+$/, '\n');
+  const prefix = state.raw.slice(0, marker.index).replace(/\s+$/, '');
+  const providerBlock = renderProviderStubs(state.generatedProviders);
   const lines = [
     '[squad]',
     `name = ${quote(state.squadName)}`,
@@ -368,7 +476,7 @@ function renderConfig(state, members) {
       ''
     );
   }
-  return `${prefix}${lines.join('\n')}`;
+  return `${prefix}${providerBlock}\n\n${lines.join('\n')}`;
 }
 
 function validateMemberRecord(record) {
@@ -434,7 +542,7 @@ function validateConfigText(text, sourceFile) {
 }
 
 function renderFromMembersFile(configFile, membersFile) {
-  const state = loadState(configFile);
+  const state = loadState(configFile, false, providersFileFor(membersFile));
   const members = readMembersFile(membersFile);
   if (members.length === 0) throw new Error('at least one squad member is required');
   const rendered = renderConfig(state, members);
@@ -467,13 +575,17 @@ async function main() {
   if (!opts.config) die('--config is required');
 
   const configFile = path.resolve(opts.config);
-  const state = loadState(configFile);
+  const providersFile = opts.membersFile ? providersFileFor(opts.membersFile) : null;
+  const state = loadState(configFile, Boolean(opts.fresh), providersFile);
   const prompt = createPrompt();
   try {
+    const generatedProviders = await collectProviders(state, prompt);
+    state.generatedProviders = generatedProviders;
+    if (opts.fresh && providersFile) writeProviderNames(providersFile, generatedProviders);
     const templateId = await chooseTemplate(state, prompt);
     let members = templateId === 'keep'
       ? state.existing.map((member) => ({ ...member, fallback: member.fallback.slice() }))
-      : membersFromTemplate(templateId);
+      : membersFromTemplate(templateId, state);
     if (members.length === 0 && templateId !== 'custom') {
       die(`template "${templateId}" produced no members`);
     }
@@ -509,6 +621,9 @@ module.exports = {
   loadState,
   renderConfig,
   renderFromMembersFile,
+  providersFileFor,
+  readProviderNames,
+  writeProviderNames,
   readMembersFile,
   validateConfigText,
   validateMemberRecord,

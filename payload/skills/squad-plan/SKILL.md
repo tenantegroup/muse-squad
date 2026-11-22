@@ -25,9 +25,9 @@ Examples:
 
 ```text
 [lead | Muse-Spark] Review architecture
-[frontend | Home-Ornith] Sketch login form changes
-[backend | DeepSeek-Flash] Map retry queue changes
-[tester | Home-Ornith] List verification commands
+[frontend | Muse-Spark] Sketch login form changes
+[backend | Muse-Ember] Map retry queue changes
+[tester | Muse-Spark] List verification commands
 [docs | Muse-Ember] Record plan decisions
 ```
 

@@ -199,7 +199,7 @@ verify_settings "$EXPLICIT_DIR/settings.json" "$EXPLICIT_DIR/muse-squad.toml"
 echo "== bash installer: interactive team wizard =="
 INTERACTIVE_DIR="$TMP/interactive-config"
 MUSE_CONFIG_DIR="$INTERACTIVE_DIR" bash "$ROOT/install" --no-backup >/dev/null
-INTERACTIVE_INPUT=(y 2 y N "add security" "provider 1" "1" "2,5" "rename 2 architect" "remove 7" "done")
+INTERACTIVE_INPUT=(y 2 y N "add security" "provider 1" "1" "2,3" "rename 2 architect" "remove 7" "done")
 interactive_status=0
 interactive_output="$(
   MUSE_CONFIG_DIR="$INTERACTIVE_DIR" MUSE_SQUAD_FORCE_INTERACTIVE=1 \
@@ -226,13 +226,13 @@ INTERACTIVE_CONFIG="$INTERACTIVE_DIR/muse-squad.toml" node -e '
     .loadConfig({ config_file: process.env.INTERACTIVE_CONFIG });
   const actual = Object.values(config.squad.members).map((m) => [m.name, m.primary, m.fallback]);
   const expected = [
-    ["lead", "Home-Ornith", ["DeepSeek-Flash", "Muse-Wonder"]],
-    ["architect", "Home-Ornith", ["Muse-Ember"]],
-    ["backend", "Home-Ornith", ["DeepSeek-Flash"]],
-    ["reviewer", "Home-Ornith", ["Muse-Ember"]],
-    ["tester", "Home-Ornith", ["Muse-Ember"]],
-    ["devops", "Home-Ornith", ["DeepSeek-Flash"]],
-    ["security", "Muse-Spark", ["DeepSeek-Flash"]]
+    ["lead", "Muse-Spark", ["Muse-Ember", "Muse-Wonder"]],
+    ["architect", "Muse-Spark", ["Muse-Ember"]],
+    ["backend", "Muse-Spark", ["Muse-Ember"]],
+    ["reviewer", "Muse-Spark", ["Muse-Ember"]],
+    ["tester", "Muse-Spark", ["Muse-Ember"]],
+    ["devops", "Muse-Spark", ["Muse-Ember"]],
+    ["security", "Muse-Spark", ["Muse-Ember"]]
   ];
   if (JSON.stringify(actual) !== JSON.stringify(expected)) {
     throw new Error(`bad interactive roster: ${JSON.stringify(actual)}`);
@@ -256,7 +256,7 @@ grep -qF '| @architect |' "$INTERACTIVE_DIR/squad/team.md" || \
   fail "team.md is missing the renamed @architect member"
 grep -qF '| @security |' "$INTERACTIVE_DIR/squad/team.md" || \
   fail "team.md is missing the added @security member"
-grep -qF '[lead | Home-Ornith] <action>' "$INTERACTIVE_DIR/agents/lead.md" || \
+grep -qF '[lead | Muse-Spark] <action>' "$INTERACTIVE_DIR/agents/lead.md" || \
   fail "@lead wrapper has the wrong TUI label"
 for name in lead architect backend reviewer tester devops security; do
   [[ -f "$INTERACTIVE_DIR/agents/$name.md" ]] || fail "missing custom agent @$name"
@@ -290,7 +290,7 @@ grep -qF '# @lead — Lead / Architect (kept)' "$KEEP_DIR/muse-squad.toml" || \
 echo "== bash installer: wizard retries invalid input =="
 RETRY_DIR="$TMP/retry-config"
 MUSE_CONFIG_DIR="$RETRY_DIR" bash "$ROOT/install" --no-backup >/dev/null
-RETRY_INPUT=(y 2 y N "add nope" "security" "provider 1" "3" "3" "provider 1" "1" "2" "rename 2 3" "rename 2 architect" "done")
+RETRY_INPUT=(y 2 y N "add nope" "security" "provider 1" "1" "1" "provider 1" "1" "2" "rename 2 3" "rename 2 architect" "done")
 retry_status=0
 retry_output="$(
   MUSE_CONFIG_DIR="$RETRY_DIR" MUSE_SQUAD_FORCE_INTERACTIVE=1 \
@@ -314,8 +314,8 @@ RETRY_CONFIG="$RETRY_DIR/muse-squad.toml" node -e '
     .loadConfig({ config_file: process.env.RETRY_CONFIG });
   const member = config.squad.members["lead"];
   if (!member) throw new Error("corrected @lead member was not written");
-  if (member.primary !== "Home-Ornith") throw new Error("corrected primary was not applied");
-  if (JSON.stringify(member.fallback) !== JSON.stringify(["DeepSeek-Flash"])) {
+  if (member.primary !== "Muse-Spark") throw new Error("corrected primary was not applied");
+  if (JSON.stringify(member.fallback) !== JSON.stringify(["Muse-Ember"])) {
     throw new Error(`corrected fallback was not applied: ${JSON.stringify(member.fallback)}`);
   }
   if (!config.squad.members.architect) throw new Error("renamed member was not written");
@@ -328,7 +328,7 @@ RETRY_CONFIG="$RETRY_DIR/muse-squad.toml" node -e '
 echo "== bash installer: wizard repairs an invalid squad config =="
 BROKEN_DIR="$TMP/broken-config"
 MUSE_CONFIG_DIR="$BROKEN_DIR" bash "$ROOT/install" --no-backup >/dev/null
-perl -0pi -e 's/(\[squad\.lead\].*?fallback = \[)"DeepSeek-Flash"\]/${1}"Muse-Spark"]/s' \
+perl -0pi -e 's/(\[squad\.lead\].*?fallback = \[)"Muse-Ember"\]/${1}"Muse-Spark"]/s' \
   "$BROKEN_DIR/muse-squad.toml"
 if node "$BROKEN_DIR/mcp/config.js" --file "$BROKEN_DIR/muse-squad.toml" \
     --list-providers >/dev/null 2>&1; then
@@ -363,7 +363,7 @@ node "$BROKEN_DIR/mcp/config.js" --file "$BROKEN_DIR/muse-squad.toml" --json | n
 echo "== bash installer: prompts with piped stdin =="
 PIPED_DIR="$TMP/piped-config"
 TTY_FILE="$TMP/piped-tty"
-printf 'y\n2\ny\nY\n' > "$TTY_FILE"
+printf 'y\ny\nDeepSeek\nAnthropic\n\n1\nY\n' > "$TTY_FILE"
 piped_status=0
 piped_output="$(
   MUSE_CONFIG_DIR="$PIPED_DIR" MUSE_SQUAD_TTY="$TTY_FILE" \
@@ -374,12 +374,21 @@ printf '%s\n' "$piped_output"
   fail "piped installer exited with status $piped_status"
 for phrase in \
   'Customize Squad team members & models now?' \
-  'Replace the current roster and regenerate charters from software? [y/N]:' \
+  'Create third-party model providers now? [y/N]:' \
+  'added provider DeepSeek' \
+  'added provider Anthropic' \
+  '1: software - Software delivery (7 roles)' \
+  '@lead, @frontend, @backend, @reviewer, @tester, @devops, @docs' \
+  '2: engineering - Engineering (13 roles)' \
+  '@lead, @frontend, @backend, @fullstack, @reviewer, @tester, @devops, @security, @data, @docs, @ai, @designer, @fact-checker' \
   'template    software' \
   'defaults    accepted'; do
   grep -qF "$phrase" <<<"$piped_output" || \
     fail "piped install output is missing: $phrase"
 done
+if grep -qF 'Replace the current roster and regenerate charters' <<<"$piped_output"; then
+  fail "fresh install asked to replace a roster that did not exist"
+fi
 
 PIPED_CONFIG="$PIPED_DIR/muse-squad.toml" node -e '
   const config = require(process.env.PIPED_CONFIG.replace(/muse-squad\.toml$/, "mcp/config.js"))
@@ -391,7 +400,37 @@ PIPED_CONFIG="$PIPED_DIR/muse-squad.toml" node -e '
   if (!config.squad.members.lead.charter.includes("## Routing Cues")) {
     throw new Error("piped charter was not generated from the catalog");
   }
+  for (const name of ["DeepSeek", "Anthropic"]) {
+    const provider = config.providers[name];
+    if (!provider || provider.type !== "http" || provider.base_url !== "replace-me" ||
+        provider.model !== "replace-me") {
+      throw new Error(`missing provider stub: ${name}`);
+    }
+  }
+  const chains = {
+    lead: ["Muse-Spark", ["DeepSeek"]],
+    frontend: ["DeepSeek", ["Muse-Ember"]],
+    backend: ["DeepSeek", ["Anthropic"]],
+    docs: ["Muse-Ember", ["DeepSeek"]]
+  };
+  for (const [name, [primary, fallback]] of Object.entries(chains)) {
+    const member = config.squad.members[name];
+    if (member.primary !== primary || JSON.stringify(member.fallback) !== JSON.stringify(fallback)) {
+      throw new Error(`bad provider chain for @${name}`);
+    }
+  }
+  const text = require("fs").readFileSync(process.env.PIPED_CONFIG, "utf8");
+  if (text.includes("Home-Ornith") || text.includes("DeepSeek-Flash")) {
+    throw new Error("piped config still contains legacy custom providers");
+  }
 '
+for provider in DeepSeek Anthropic; do
+  grep -qF "[providers.$provider]" "$PIPED_DIR/muse-squad.toml" || \
+    fail "piped config is missing the $provider stub"
+done
+grep -qF '# Fill in base_url, api_key, and model before routing work to them.' \
+  "$PIPED_DIR/muse-squad.toml" || \
+  fail "piped config is missing the provider stub comment"
 grep -qF '[lead | Muse-Spark] <action>' "$PIPED_DIR/agents/lead.md" || \
   fail "@lead wrapper has the wrong TUI label"
 
@@ -408,6 +447,62 @@ grep -qF 'skipped      backup (user chose no)' <<<"$piped_rerun_output" || \
   fail "piped backup answer was not applied"
 [[ -z "$(latest_backup "$PIPED_DIR")" ]] || \
   fail "piped rerun created a backup after choosing no"
+
+echo "== team wizard retries invalid provider names =="
+PROVIDER_RETRY_DIR="$TMP/provider-retry-config"
+MUSE_CONFIG_DIR="$PROVIDER_RETRY_DIR" bash "$ROOT/install" --no-backup --defaults >/dev/null
+PROVIDER_RETRY_INPUT="$TMP/provider-retry-input"
+printf 'y\nbad name\nDeepSeek\n\n1\n\n' > "$PROVIDER_RETRY_INPUT"
+provider_retry_output="$(
+  MUSE_SQUAD_WIZARD_INPUT="$PROVIDER_RETRY_INPUT" \
+    node "$PROVIDER_RETRY_DIR/mcp/team-wizard.js" \
+      --config "$PROVIDER_RETRY_DIR/muse-squad.toml" \
+      --members-file "$TMP/provider-retry-members.jsonl" --fresh 2>&1
+)" || fail "team wizard rejected valid provider retry input"
+grep -qF 'invalid provider name: bad name' <<<"$provider_retry_output" || \
+  fail "wizard did not report the invalid provider name"
+grep -qF 'added provider DeepSeek' <<<"$provider_retry_output" || \
+  fail "wizard did not accept the corrected provider name"
+[[ "$(cat "$TMP/provider-retry-members.jsonl.providers")" == '["DeepSeek"]' ]] || \
+  fail "wizard did not persist the accepted provider name"
+
+echo "== team wizard exits with an open TTY stream =="
+HANG_DIR="$TMP/hang-config"
+MUSE_CONFIG_DIR="$HANG_DIR" bash "$ROOT/install" --no-backup --defaults >/dev/null
+WIZARD_FIFO="$TMP/wizard-tty"
+mkfifo "$WIZARD_FIFO"
+(
+  exec 3>"$WIZARD_FIFO"
+  printf 'n\n1\nY\n' >&3
+  sleep 5
+  exec 3>&-
+) &
+FIFO_WRITER=$!
+HANG_STATUS_FILE="$TMP/wizard-status"
+HANG_OUTPUT_FILE="$TMP/wizard-output"
+(
+  MUSE_SQUAD_WIZARD_INPUT="$WIZARD_FIFO" node "$HANG_DIR/mcp/team-wizard.js" \
+    --config "$HANG_DIR/muse-squad.toml" \
+    --members-file "$TMP/hang-members.jsonl" --fresh \
+    > "$HANG_OUTPUT_FILE" 2>&1
+  printf '%s' "$?" > "$HANG_STATUS_FILE"
+) &
+WIZARD_PID=$!
+for _ in $(seq 1 50); do
+  [[ -f "$HANG_STATUS_FILE" ]] && break
+  sleep 0.1
+done
+if [[ ! -f "$HANG_STATUS_FILE" ]]; then
+  kill "$WIZARD_PID" "$FIFO_WRITER" 2>/dev/null || true
+  fail "team wizard hung after prepared with an open TTY stream"
+fi
+wait "$WIZARD_PID" || true
+kill "$FIFO_WRITER" 2>/dev/null || true
+wait "$FIFO_WRITER" 2>/dev/null || true
+[[ "$(cat "$HANG_STATUS_FILE")" == "0" ]] || \
+  fail "team wizard exited with status $(cat "$HANG_STATUS_FILE")"
+grep -qF 'prepared    7 JSONL member records' "$HANG_OUTPUT_FILE" || \
+  fail "TTY wizard did not finish preparing members"
 
 echo "== bash installer: legacy config migration offer =="
 LEGACY_DIR="$TMP/legacy-config"
@@ -558,6 +653,7 @@ for phrase in \
   "--members-file" \
   "Built-in role catalog: 20 roles" \
   "MUSE_SQUAD_WIZARD_INPUT" \
+  "\$wizardArgs += '--fresh'" \
   "team config failed validation; no changes were written" \
   "MUSE_SQUAD_TTY" \
   "Get-Dest 'muse-squad.toml'" \

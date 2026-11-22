@@ -566,8 +566,9 @@ configure_team() {
   config_before="$(mktemp "${TMPDIR:-/tmp}/muse-squad-config-before.XXXXXX")" || fail "mktemp failed"
   cp "$dest" "$config_before" 2>/dev/null || true
 
-  local wizard="$CONFIG_DIR/mcp/team-wizard.js" members_file config_tmp
+  local wizard="$CONFIG_DIR/mcp/team-wizard.js" members_file providers_file config_tmp
   members_file="$(mktemp "${TMPDIR:-/tmp}/muse-squad-members.XXXXXX")" || fail "mktemp failed"
+  providers_file="${members_file}.providers"
   config_tmp="$(mktemp "${TMPDIR:-/tmp}/muse-squad-config.XXXXXX")" || fail "mktemp failed"
 
   # If prompts come from a terminal device, let the Node wizard keep reading
@@ -580,21 +581,23 @@ configure_team() {
     unset MUSE_SQUAD_WIZARD_INPUT MUSE_SQUAD_WIZARD_LINE
   fi
 
-  if ! node "$wizard" --config "$dest" --members-file "$members_file"; then
-    rm -f "$members_file" "$config_tmp" "$config_before"
+  local -a wizard_args=(--config "$dest" --members-file "$members_file")
+  (( FIRST_INSTALL )) && wizard_args+=(--fresh)
+  if ! node "$wizard" "${wizard_args[@]}"; then
+    rm -f "$members_file" "$providers_file" "$config_tmp" "$config_before"
     fail "team configuration failed"
   fi
   if ! node "$wizard" --render "$dest" --members-file "$members_file" > "$config_tmp"; then
-    rm -f "$members_file" "$config_tmp" "$config_before"
+    rm -f "$members_file" "$providers_file" "$config_tmp" "$config_before"
     fail "team config generation failed"
   fi
   if ! node "$CONFIG_DIR/mcp/config.js" --file "$config_tmp" --json >/dev/null 2>&1; then
-    rm -f "$members_file" "$config_tmp" "$config_before"
+    rm -f "$members_file" "$providers_file" "$config_tmp" "$config_before"
     fail "team config failed validation; no changes were written"
   fi
   mv "$config_tmp" "$dest" || fail "cannot install $dest"
   chmod 600 "$dest" 2>/dev/null || true
-  rm -f "$members_file"
+  rm -f "$members_file" "$providers_file"
   log "  updated    $dest"
 
   if (( LEGACY_CONFIG )); then
@@ -903,9 +906,9 @@ Examples:
 
 ```text
 [lead | Muse-Spark] Review architecture
-[frontend | Home-Ornith] Sketch login form changes
-[backend | DeepSeek-Flash] Map retry queue changes
-[tester | Home-Ornith] List verification commands
+[frontend | Muse-Spark] Sketch login form changes
+[backend | Muse-Ember] Map retry queue changes
+[tester | Muse-Spark] List verification commands
 [docs | Muse-Ember] Record plan decisions
 ```
 
@@ -972,9 +975,9 @@ Examples:
 
 ```text
 [lead | Muse-Spark] Sequence wave dependencies
-[frontend | Home-Ornith] Build login form
-[backend | DeepSeek-Flash] Add retry queue
-[tester | Home-Ornith] Run regression suite
+[frontend | Muse-Spark] Build login form
+[backend | Muse-Ember] Add retry queue
+[tester | Muse-Spark] Run regression suite
 [docs | Muse-Ember] Log wave decisions
 ```
 
@@ -3640,6 +3643,11 @@ const CATEGORY_ROLE_IDS = [
 const ROLE_IDS = ROLES.map((role) => role.id);
 const CATEGORIES = [...new Set(ROLES.map((role) => role.category))];
 
+// Built-in Muse providers are always available. The two HTTP names below are
+// placeholders in the role presets: setup replaces them with the third-party
+// provider names collected from the user, or drops them on a native-only team.
+const NATIVE_PROVIDER_NAMES = ['Muse-Spark', 'Muse-Ember', 'Muse-Wonder'];
+
 const PROVIDER_DEFAULTS = {
   'lead': { primary: 'Muse-Spark', fallback: ['DeepSeek-Flash'] },
   'frontend': { primary: 'Home-Ornith', fallback: ['Muse-Ember'] },
@@ -3806,6 +3814,42 @@ function templateMembers(templateId) {
   });
 }
 
+function isNativeProvider(name) {
+  return NATIVE_PROVIDER_NAMES.includes(String(name));
+}
+
+// Replaces the placeholder HTTP providers in role presets with the provider
+// names collected during a fresh setup. First use becomes the primary when the
+// preset's primary was an HTTP placeholder; later uses fill fallback slots.
+// Native Muse providers are always kept and fill any gap when no HTTP provider
+// was supplied.
+function applyProviderNames(members, providerNames) {
+  const source = (Array.isArray(providerNames) ? providerNames : [])
+    .map((name) => String(name == null ? '' : name).trim())
+    .filter((name) => name && !isNativeProvider(name));
+  return members.map((member) => {
+    const available = source.slice();
+    const chain = [member.primary, ...(Array.isArray(member.fallback) ? member.fallback : [])];
+    const used = new Set();
+    const mapped = [];
+    for (const entry of chain) {
+      let next = '';
+      if (isNativeProvider(entry)) {
+        next = entry;
+      } else if (available.length > 0) {
+        next = available.shift();
+      } else {
+        next = NATIVE_PROVIDER_NAMES.find((name) => !used.has(name)) || NATIVE_PROVIDER_NAMES[0];
+      }
+      if (!next || used.has(next)) continue;
+      used.add(next);
+      mapped.push(next);
+    }
+    if (mapped.length === 0) mapped.push(NATIVE_PROVIDER_NAMES[0]);
+    return { ...member, primary: mapped[0], fallback: mapped.slice(1) };
+  });
+}
+
 function formatRole(role) {
   return [role.id, role.title, role.category, role.vibe].join('\t');
 }
@@ -3910,6 +3954,9 @@ module.exports = {
   CATEGORIES,
   TEMPLATES,
   PROVIDER_DEFAULTS,
+  NATIVE_PROVIDER_NAMES,
+  isNativeProvider,
+  applyProviderNames,
   getRole,
   getTemplate,
   listRoles,
@@ -3934,6 +3981,10 @@ const config = require('./config.js');
 const roles = require('./roles.js');
 
 const MEMBER_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
+// Dots are accepted by config.js in hand-written names, but the generated
+// table header cannot express them with this TOML parser, so setup rejects them.
+const PROVIDER_NAME_RE = /^[A-Za-z0-9_-]+$/;
+const PROVIDERS_SUFFIX = '.providers';
 
 function die(message) {
   process.stderr.write(`team-wizard: ${message}\n`);
@@ -3950,6 +4001,7 @@ function parseArgs(argv) {
     if (argv[i] === '--config') opts.config = argv[++i];
     else if (argv[i] === '--members-file') opts.membersFile = argv[++i];
     else if (argv[i] === '--render') opts.render = argv[++i];
+    else if (argv[i] === '--fresh') opts.fresh = true;
     else if (argv[i] === '--help' || argv[i] === '-h') opts.help = true;
     else die(`unknown option: ${argv[i]}`);
   }
@@ -3960,7 +4012,7 @@ function parseArgs(argv) {
 function usage() {
   return [
     'Usage:',
-    '  node team-wizard.js --config PATH [--members-file PATH]',
+    '  node team-wizard.js --config PATH [--members-file PATH] [--fresh]',
     '  node team-wizard.js --render CONFIG_PATH --members-file PATH',
     '',
     'Builds [squad] members from the built-in role catalog, or renders a JSONL',
@@ -3978,7 +4030,33 @@ function quoteBlock(value) {
   return `"""\n${text}\n"""`;
 }
 
-function loadState(configFile) {
+function providersFileFor(membersFile) {
+  return `${membersFile}${PROVIDERS_SUFFIX}`;
+}
+
+function readProviderNames(file) {
+  if (!file || !fs.existsSync(file)) return [];
+  let parsed;
+  try {
+    parsed = JSON.parse(fs.readFileSync(file, 'utf8'));
+  } catch (error) {
+    die(`cannot read provider names from ${file}: ${error.message}`);
+  }
+  if (!Array.isArray(parsed)) die(`provider names file must contain a JSON array: ${file}`);
+  const names = [];
+  for (const value of parsed) {
+    const name = String(value == null ? '' : value).trim();
+    if (!PROVIDER_NAME_RE.test(name)) die(`invalid provider name in ${file}: ${name}`);
+    if (!names.includes(name)) names.push(name);
+  }
+  return names;
+}
+
+function writeProviderNames(file, names) {
+  fs.writeFileSync(file, `${JSON.stringify(names)}\n`, { mode: 0o600 });
+}
+
+function loadState(configFile, fresh = false, providersFile = null) {
   const raw = fs.readFileSync(configFile, 'utf8');
   let parsed;
   try {
@@ -3988,25 +4066,30 @@ function loadState(configFile) {
   }
   const providerNames = Object.keys(parsed.providers || {});
   if (providerNames.length === 0) die(`no providers are defined in ${configFile}`);
+  const generatedProviders = providersFile ? readProviderNames(providersFile) : [];
 
   let existing = [];
-  try {
-    const loaded = config.loadConfig({ config_file: configFile });
-    existing = Object.values(loaded.squad.members).map((member) => ({
-      name: member.name,
-      primary: member.primary,
-      fallback: member.fallback.slice(),
-      charter: member.charter,
-      roleId: null
-    }));
-  } catch (error) {
-    // A broken squad section is repaired by replacing it from the catalog.
+  if (!fresh) {
+    try {
+      const loaded = config.loadConfig({ config_file: configFile });
+      existing = Object.values(loaded.squad.members).map((member) => ({
+        name: member.name,
+        primary: member.primary,
+        fallback: member.fallback.slice(),
+        charter: member.charter,
+        roleId: null
+      }));
+    } catch (error) {
+      // A broken squad section is repaired by replacing it from the catalog.
+    }
   }
 
   return {
     raw,
     parsed,
-    providerOrder: providerNames.slice(),
+    fresh,
+    generatedProviders,
+    providerOrder: [...providerNames, ...generatedProviders],
     squadName: (parsed.squad && parsed.squad.name) || 'Muse Squad',
     memoryDir: (parsed.squad && parsed.squad.memory_dir) || '.muse/squad',
     existing
@@ -4053,7 +4136,13 @@ function createPrompt() {
       if (ended) return reject(new Error('no more wizard input'));
       waiting = { resolve, reject };
     }),
-    close: () => rl.close()
+    close: () => {
+      rl.close();
+      // readline.close() leaves the underlying stream open. With /dev/tty that
+      // keeps Node alive forever after the wizard prints "prepared ...".
+      if (typeof input.destroy === 'function') input.destroy();
+      else if (typeof input.pause === 'function') input.pause();
+    }
   };
 }
 
@@ -4131,21 +4220,65 @@ function printMembers(members) {
   });
 }
 
-function membersFromTemplate(templateId) {
-  return roles.templateMembers(templateId).map((member) => ({ ...member, roleId: member.name }));
+function membersFromTemplate(templateId, state = {}) {
+  const members = roles.applyProviderNames(
+    roles.templateMembers(templateId), state.generatedProviders || []
+  );
+  return members.map((member) => ({ ...member, roleId: member.name }));
+}
+
+async function collectProviders(state, prompt) {
+  if (!state.fresh) return [];
+  process.stderr.write(
+    '\nThird-party providers are HTTP models you can add to member chains.\n' +
+    'Muse native providers are already available and stay in the defaults.\n'
+  );
+  const answer = (await prompt.ask('Create third-party model providers now? [y/N]: ')).trim();
+  if (!/^[yY]([eE][sS])?$/.test(answer)) return [];
+  process.stderr.write(
+    'Enter provider names one at a time. Use letters, numbers, underscore, or hyphen.\n'
+  );
+  const names = [];
+  while (true) {
+    const name = (await prompt.ask('Provider name (blank when done): ')).trim();
+    if (!name) break;
+    if (!PROVIDER_NAME_RE.test(name)) {
+      process.stderr.write(
+        `  invalid provider name: ${name} (letters, numbers, underscore, or hyphen only)\n`
+      );
+      continue;
+    }
+    if (state.providerOrder.includes(name)) {
+      process.stderr.write(`  provider already exists: ${name}\n`);
+      continue;
+    }
+    names.push(name);
+    state.providerOrder.push(name);
+    process.stderr.write(`  added provider ${name}\n`);
+  }
+  return names;
 }
 
 async function chooseTemplate(state, prompt) {
   const options = roles.TEMPLATES.map((template) => ({
     id: template.id,
-    label: `${template.id} - ${template.title} (${template.roleIds.length} roles)`
+    label: `${template.id} - ${template.title} (${template.roleIds.length} roles)`,
+    members: roles.templateMembers(template.id).map((member) => `@${member.name}`)
   }));
   if (state.existing.length > 0) {
-    options.unshift({ id: 'keep', label: 'keep - Keep current squad' });
+    options.unshift({
+      id: 'keep',
+      label: 'keep - Keep current squad',
+      members: state.existing.map((member) => `@${member.name}`)
+    });
   }
   process.stderr.write('\nBuilt-in role catalog: 20 roles. Choose a starting team:\n');
   options.forEach((option, index) => {
     process.stderr.write(`  ${index + 1}: ${option.label}\n`);
+    const roster = option.members.length > 0
+      ? option.members.join(', ')
+      : 'no members; add roles one at a time';
+    process.stderr.write(`     ${roster}\n`);
   });
   const defaultOption = state.existing.length > 0
     ? '1'
@@ -4198,13 +4331,14 @@ async function editMembers(members, state, prompt) {
         const name = validateMemberName(role.id, members);
         const defaults = roles.PROVIDER_DEFAULTS[role.id] ||
           { primary: 'Muse-Ember', fallback: ['Home-Ornith'] };
-        members.push({
+        const [added] = roles.applyProviderNames([{
           name,
           primary: defaults.primary,
           fallback: defaults.fallback.slice(),
           charter: roles.buildCharter(role.id, name),
           roleId: role.id
-        });
+        }], state.generatedProviders);
+        members.push(added);
         process.stderr.write(`  added @${name}\n`);
       } else if (command === 'remove' || command === 'r') {
         const index = Number(args[0]) - 1;
@@ -4270,10 +4404,31 @@ async function editMembers(members, state, prompt) {
   }
 }
 
+function renderProviderStubs(names) {
+  if (!Array.isArray(names) || names.length === 0) return '';
+  const stubs = names.map((name) => [
+    `[providers.${name}]`,
+    'enabled = true',
+    'type = "http"',
+    'base_url = "replace-me"',
+    'api_key = "replace-me"',
+    'model = "replace-me"',
+    'max_concurrency = 1',
+    ''
+  ].join('\n')).join('\n');
+  return [
+    '',
+    '# Third-party providers collected during setup.',
+    '# Fill in base_url, api_key, and model before routing work to them.',
+    stubs
+  ].join('\n');
+}
+
 function renderConfig(state, members) {
   const marker = state.raw.match(/^\[squad\][ \t]*$/m);
   if (!marker) throw new Error('muse-squad.toml has no [squad] table');
-  const prefix = state.raw.slice(0, marker.index).replace(/\r?\n+$/, '\n');
+  const prefix = state.raw.slice(0, marker.index).replace(/\s+$/, '');
+  const providerBlock = renderProviderStubs(state.generatedProviders);
   const lines = [
     '[squad]',
     `name = ${quote(state.squadName)}`,
@@ -4289,7 +4444,7 @@ function renderConfig(state, members) {
       ''
     );
   }
-  return `${prefix}${lines.join('\n')}`;
+  return `${prefix}${providerBlock}\n\n${lines.join('\n')}`;
 }
 
 function validateMemberRecord(record) {
@@ -4355,7 +4510,7 @@ function validateConfigText(text, sourceFile) {
 }
 
 function renderFromMembersFile(configFile, membersFile) {
-  const state = loadState(configFile);
+  const state = loadState(configFile, false, providersFileFor(membersFile));
   const members = readMembersFile(membersFile);
   if (members.length === 0) throw new Error('at least one squad member is required');
   const rendered = renderConfig(state, members);
@@ -4388,13 +4543,17 @@ async function main() {
   if (!opts.config) die('--config is required');
 
   const configFile = path.resolve(opts.config);
-  const state = loadState(configFile);
+  const providersFile = opts.membersFile ? providersFileFor(opts.membersFile) : null;
+  const state = loadState(configFile, Boolean(opts.fresh), providersFile);
   const prompt = createPrompt();
   try {
+    const generatedProviders = await collectProviders(state, prompt);
+    state.generatedProviders = generatedProviders;
+    if (opts.fresh && providersFile) writeProviderNames(providersFile, generatedProviders);
     const templateId = await chooseTemplate(state, prompt);
     let members = templateId === 'keep'
       ? state.existing.map((member) => ({ ...member, fallback: member.fallback.slice() }))
-      : membersFromTemplate(templateId);
+      : membersFromTemplate(templateId, state);
     if (members.length === 0 && templateId !== 'custom') {
       die(`template "${templateId}" produced no members`);
     }
@@ -4430,6 +4589,9 @@ module.exports = {
   loadState,
   renderConfig,
   renderFromMembersFile,
+  providersFileFor,
+  readProviderNames,
+  writeProviderNames,
   readMembersFile,
   validateConfigText,
   validateMemberRecord,
@@ -4837,32 +4999,10 @@ schema = 1
 #                  generated wrappers skip disabled providers; no need to
 #                  remove it from member chains or change max_concurrency.
 #
+# Fresh setup can add HTTP provider name stubs; fill in base_url, api_key,
+# and model before routing work to them. Only built-in Muse providers are seeded.
+#
 # Use # comments in this file (TOML does not use ; comments).
-
-[providers.Home-Ornith]
-enabled = true             # set false to disable this provider
-type = "http"
-base_url = "http://127.0.0.1:8000/v1"
-api_key = "local-key"             # or "${LOCAL_MODEL_API_KEY}"
-model = "local-llama/Ornith-1.5-35B-A3B-MLX-4bit"
-temperature = 0.2
-top_p = 0.9
-max_tokens = 8192
-max_input_chars = 96000
-on_context_exceeded = "truncate"  # "truncate" or "fallback"
-max_concurrency = 1
-timeout_ms = 600000
-queue_timeout_ms = 300000
-max_retries = 2
-
-[providers.DeepSeek-Flash]
-enabled = true
-type = "http"
-base_url = "https://api.deepseek.com/v1"
-api_key = "replace-me"            # e.g. "${DEEPSEEK_API_KEY}"
-model = "deepseek-chat"
-max_concurrency = 4
-timeout_ms = 600000
 
 [providers.Muse-Spark]
 enabled = true
@@ -4894,7 +5034,7 @@ memory_dir = ".muse/squad"
 
 [squad.lead]
 primary = "Muse-Spark"
-fallback = ["DeepSeek-Flash"]
+fallback = ["Muse-Ember"]
 charter = """
 <!-- Adapted from agency-agents by AgentLand Contributors (MIT License) — https://github.com/msitarzewski/agency-agents -->
 
@@ -4951,7 +5091,7 @@ Invoke me as @lead. Keep work inside my ownership; hand work back to the main se
 """
 
 [squad.frontend]
-primary = "Home-Ornith"
+primary = "Muse-Spark"
 fallback = ["Muse-Ember"]
 charter = """
 <!-- Adapted from agency-agents by AgentLand Contributors (MIT License) — https://github.com/msitarzewski/agency-agents -->
@@ -5009,8 +5149,8 @@ Invoke me as @frontend. Keep work inside my ownership; hand work back to the mai
 """
 
 [squad.backend]
-primary = "Home-Ornith"
-fallback = ["DeepSeek-Flash"]
+primary = "Muse-Spark"
+fallback = ["Muse-Ember"]
 charter = """
 <!-- Adapted from agency-agents by AgentLand Contributors (MIT License) — https://github.com/msitarzewski/agency-agents -->
 
@@ -5067,7 +5207,7 @@ Invoke me as @backend. Keep work inside my ownership; hand work back to the main
 """
 
 [squad.reviewer]
-primary = "Home-Ornith"
+primary = "Muse-Spark"
 fallback = ["Muse-Ember"]
 charter = """
 <!-- Adapted from agency-agents by AgentLand Contributors (MIT License) — https://github.com/msitarzewski/agency-agents -->
@@ -5125,7 +5265,7 @@ Invoke me as @reviewer. Keep work inside my ownership; hand work back to the mai
 """
 
 [squad.tester]
-primary = "Home-Ornith"
+primary = "Muse-Spark"
 fallback = ["Muse-Ember"]
 charter = """
 <!-- Adapted from agency-agents by AgentLand Contributors (MIT License) — https://github.com/msitarzewski/agency-agents -->
@@ -5183,8 +5323,8 @@ Invoke me as @tester. Keep work inside my ownership; hand work back to the main 
 """
 
 [squad.devops]
-primary = "Home-Ornith"
-fallback = ["DeepSeek-Flash"]
+primary = "Muse-Spark"
+fallback = ["Muse-Ember"]
 charter = """
 <!-- Adapted from agency-agents by AgentLand Contributors (MIT License) — https://github.com/msitarzewski/agency-agents -->
 
@@ -5242,7 +5382,7 @@ Invoke me as @devops. Keep work inside my ownership; hand work back to the main 
 
 [squad.docs]
 primary = "Muse-Ember"
-fallback = ["Home-Ornith"]
+fallback = ["Muse-Spark"]
 charter = """
 <!-- Adapted from agency-agents by AgentLand Contributors (MIT License) — https://github.com/msitarzewski/agency-agents -->
 

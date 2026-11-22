@@ -36,6 +36,7 @@ function main() {
   for (const name of [
     'UPSTREAM_REF', 'ROLES', 'ROLE_IDS', 'ENGINEERING_ROLE_IDS',
     'CATEGORY_ROLE_IDS', 'CATEGORIES', 'TEMPLATES', 'PROVIDER_DEFAULTS',
+    'NATIVE_PROVIDER_NAMES', 'isNativeProvider', 'applyProviderNames',
     'getRole', 'getTemplate', 'listRoles', 'buildCharter', 'renameCharter',
     'templateMembers'
   ]) {
@@ -101,6 +102,24 @@ function main() {
       `${member.name} fallback`);
     assert(member.charter.includes(`@${member.name}`), `${member.name} generated charter name`);
   }
+
+  const nativeOnly = roles.applyProviderNames(roles.templateMembers('software'), []);
+  for (const member of nativeOnly) {
+    assert(!member.primary.includes('Ornith'), `${member.name} has no local provider`);
+    assert(!member.fallback.some((name) => name.includes('DeepSeek')),
+      `${member.name} has no DeepSeek fallback`);
+    assert(member.fallback.every((name) => roles.isNativeProvider(name)),
+      `${member.name} stays native-only`);
+  }
+  const withProviders = roles.applyProviderNames(
+    roles.templateMembers('software'), ['DeepSeek', 'Anthropic']
+  );
+  assert(withProviders[0].primary === 'Muse-Spark' &&
+    withProviders[0].fallback[0] === 'DeepSeek', 'first provider fills native primary fallback');
+  assert(withProviders[1].primary === 'DeepSeek' &&
+    withProviders[1].fallback[0] === 'Muse-Ember', 'first provider replaces implementation primary');
+  assert(withProviders[2].primary === 'DeepSeek' &&
+    withProviders[2].fallback[0] === 'Anthropic', 'later provider fills fallback slot');
 
   const renamed = roles.renameCharter(members[0].charter, 'lead', 'architect');
   assert(renamed.includes('# @architect —'), 'rename updates charter heading');
