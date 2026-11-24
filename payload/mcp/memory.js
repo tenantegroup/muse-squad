@@ -1,16 +1,18 @@
 #!/usr/bin/env node
 'use strict';
 
-// Repository-local Muse Squad memory. This module owns the canonical .muse/
-// layout so skills, wrappers, and MCP tools agree across machines. It never
-// reads or writes the global Muse config; that stays behind the MCP bridge.
+// Repository-local Muse Squad memory. This module owns the canonical
+// .muse-squad/ layout so skills, wrappers, and MCP tools agree across machines.
+// It never reads or writes the global Muse config; that stays behind the MCP
+// bridge. Existing .muse/ and .muse/squad/ memory is copied, never deleted.
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const MEMORY_DIR = '.muse';
+const MEMORY_DIR = '.muse-squad';
 const LEGACY_MEMORY_DIR = '.muse/squad';
+const LEGACY_MEMORY_DIRS = ['.muse', LEGACY_MEMORY_DIR];
 const CANONICAL_FILES = [
   `${MEMORY_DIR}/.gitignore`,
   `${MEMORY_DIR}/README.md`,
@@ -23,15 +25,14 @@ const CANONICAL_FILES = [
 const TEMPLATES = {
   [`${MEMORY_DIR}/.gitignore`]: [
     'local/',
-    'squad/',
     ''
   ].join('\n'),
 
   [`${MEMORY_DIR}/README.md`]: [
     '# Muse Squad project memory',
     '',
-    'This folder is repository-local project memory for Muse Squad. Unlike the',
-    'global squad config, these files travel with the repository.',
+    'This folder is repository-local memory for Muse Squad. Unlike the global',
+    'squad config, these files travel with the repository.',
     '',
     'Commit these canonical files so every machine starts from the same state:',
     '',
@@ -40,8 +41,8 @@ const TEMPLATES = {
     '- `decisions.md` - append-only durable decisions.',
     '- `history/<member>.md` - append-only learnings from each named member.',
     '',
-    '`local/` is for machine-only scratch and is not tracked. `squad/` is the',
-    'legacy layout and is not tracked after migration.',
+    '`local/` is for machine-only scratch and is not tracked. Older `.muse/` and',
+    '`.muse/squad/` folders are legacy and are not tracked after migration.',
     '',
     'Do not put API keys, provider credentials, absolute paths, or machine-specific',
     'provider names in these files. Keep paths relative to the repository root.',
@@ -85,7 +86,7 @@ const TEMPLATES = {
   [`${MEMORY_DIR}/TODO.md`]: [
     '# TODO',
     '',
-    '- [ ] Draft or confirm `.muse/PLAN.md`.',
+    '- [ ] Draft or confirm `.muse-squad/PLAN.md`.',
     '- [ ] Record exact verification commands and results as work lands.',
     ''
   ].join('\n'),
@@ -151,33 +152,71 @@ function listMarkdown(dir) {
     .sort();
 }
 
-function blocksMemory(line) {
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function blocksDir(line, dir) {
   const trimmed = String(line).trim();
   if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('!')) return false;
-  return /(^|\/)\.muse(?:\/|\*|$)/.test(trimmed);
+  return new RegExp(`(^|/)${escapeRegExp(dir)}(?:/|\\*|$)`).test(trimmed);
 }
 
 function gitIgnoreStatus(root) {
   const text = readIfExists(path.join(root, '.gitignore'));
   const lines = text === null ? [] : text.split(/\r?\n/);
-  const blockingLine = lines.find(blocksMemory) || null;
+  const blockingLine = lines.find((line) => blocksDir(line, MEMORY_DIR)) || null;
+  const legacyBlockingLine = lines.find(
+    (line) => blocksDir(line, '.muse') && !blocksDir(line, MEMORY_DIR)
+  ) || null;
   return {
     present: text !== null,
     blocksMemory: blockingLine !== null,
-    blockingLine
+    blockingLine,
+    legacyBlockingLine
   };
 }
 
+function legacyMappings(root) {
+  const mappings = [];
+  const push = (from, to) => {
+    if (fs.existsSync(path.join(root, from))) mappings.push({ from, to });
+  };
+
+  // The newer .muse/ layout takes precedence over the older .muse/squad/ one.
+  for (const name of ['PLAN.md', 'TODO.md', 'decisions.md']) {
+    push(`.muse/${name}`, `${MEMORY_DIR}/${name}`);
+  }
+  for (const name of listMarkdown(path.join(root, '.muse', 'history'))) {
+    push(`.muse/history/${name}`, `${MEMORY_DIR}/history/${name}`);
+  }
+  push(`${LEGACY_MEMORY_DIR}/decisions.md`, `${MEMORY_DIR}/decisions.md`);
+  for (const name of listMarkdown(path.join(root, LEGACY_MEMORY_DIR, 'history'))) {
+    push(`${LEGACY_MEMORY_DIR}/history/${name}`, `${MEMORY_DIR}/history/${name}`);
+  }
+  return mappings;
+}
+
+function migrationMarker(from) {
+  return `<!-- muse-squad migrated from ${from} -->`;
+}
+
+function isMigrated(root, item) {
+  const text = readIfExists(path.join(root, item.to));
+  return text !== null && text.includes(migrationMarker(item.from));
+}
+
 function legacyStatus(root) {
-  const decisionsRel = `${LEGACY_MEMORY_DIR}/decisions.md`;
-  const history = listMarkdown(path.join(root, LEGACY_MEMORY_DIR, 'history'))
-    .map((name) => `${LEGACY_MEMORY_DIR}/history/${name}`);
-  const decisions = fs.existsSync(path.join(root, decisionsRel)) ? decisionsRel : null;
+  const mappings = legacyMappings(root);
+  const pending = mappings.filter((item) => !isMigrated(root, item));
   return {
-    present: decisions !== null || history.length > 0,
-    decisions,
-    history,
-    files: [...(decisions ? [decisions] : []), ...history]
+    present: mappings.length > 0,
+    pending: pending.length > 0,
+    dirs: LEGACY_MEMORY_DIRS.filter((dir) => fs.existsSync(path.join(root, dir))),
+    files: mappings.map((item) => item.from),
+    mappings,
+    pendingMappings: pending,
+    migratedMappings: mappings.filter((item) => isMigrated(root, item))
   };
 }
 
@@ -195,7 +234,7 @@ function canonicalStatus(root) {
 function buildWarnings(status) {
   const warnings = [];
   if (!status.isGitRepo) {
-    warnings.push('Not a Git repository. Confirm the repo root before creating .muse/.');
+    warnings.push('Not a Git repository. Confirm the repo root before creating .muse-squad/.');
   }
   if (status.gitIgnore.blocksMemory) {
     warnings.push(
@@ -203,8 +242,8 @@ function buildWarnings(status) {
         'Canonical files will not sync until that rule is changed.'
     );
   }
-  if (status.legacy.present) {
-    warnings.push('Legacy .muse/squad files found. Run muse-squad:memory_init to copy them.');
+  if (status.legacy.pending) {
+    warnings.push('Unmigrated .muse/ or .muse/squad files found. Run muse-squad:memory_init to copy them.');
   }
   return warnings;
 }
@@ -243,7 +282,7 @@ function mergeLegacy(root, from, to, report) {
   if (!fs.existsSync(source)) return;
   const legacyText = fs.readFileSync(source, 'utf8');
   const dest = path.join(root, to);
-  const marker = `<!-- muse-squad migrated from ${from} -->`;
+  const marker = migrationMarker(from);
   const existing = readIfExists(dest);
 
   if (existing !== null && existing.includes(marker)) {
@@ -289,19 +328,8 @@ function memoryInit(rootInput, options = {}) {
 
   // Copy legacy content before templates so migrated files keep their original
   // text instead of carrying an empty template heading.
-  mergeLegacy(
-    repoRoot,
-    `${LEGACY_MEMORY_DIR}/decisions.md`,
-    `${MEMORY_DIR}/decisions.md`,
-    report
-  );
-  for (const name of listMarkdown(path.join(repoRoot, LEGACY_MEMORY_DIR, 'history'))) {
-    mergeLegacy(
-      repoRoot,
-      `${LEGACY_MEMORY_DIR}/history/${name}`,
-      `${MEMORY_DIR}/history/${name}`,
-      report
-    );
+  for (const item of legacyMappings(repoRoot)) {
+    mergeLegacy(repoRoot, item.from, item.to, report);
   }
 
   const files = options.include_plan === true
@@ -316,6 +344,7 @@ function memoryInit(rootInput, options = {}) {
 module.exports = {
   MEMORY_DIR,
   LEGACY_MEMORY_DIR,
+  LEGACY_MEMORY_DIRS,
   CANONICAL_FILES,
   TEMPLATES,
   expandHome,

@@ -340,21 +340,22 @@ async function run(port, tempDir, configFile) {
     // --- Repository memory tools -----------------------------------------
     const repoRoot = path.join(tempDir, 'memory-repo');
     fs.mkdirSync(path.join(repoRoot, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(repoRoot, '.muse', 'history'), { recursive: true });
     fs.mkdirSync(path.join(repoRoot, '.muse', 'squad', 'history'), { recursive: true });
+    fs.writeFileSync(path.join(repoRoot, '.muse', 'PLAN.md'), 'Bridge legacy plan.\n');
     fs.writeFileSync(
       path.join(repoRoot, '.muse', 'squad', 'decisions.md'),
       'Bridge legacy decision.\n'
-    );
-    fs.writeFileSync(
-      path.join(repoRoot, '.muse', 'squad', 'history', 'atlas.md'),
-      'Bridge legacy learning.\n'
     );
 
     const memoryBefore = JSON.parse(
       (await bridge.tool('memory_status', { repo_root: repoRoot })).result.content[0].text
     );
-    assert(memoryBefore.ok === true && memoryBefore.legacy.present === true,
-      'memory_status finds legacy memory');
+    assert(memoryBefore.ok === true && memoryBefore.legacy.present === true &&
+      memoryBefore.legacy.pending === true,
+    'memory_status finds unmigrated legacy memory');
+    assert(memoryBefore.legacy.dirs.join(',') === '.muse,.muse/squad',
+      'memory_status reports both legacy directories');
     const memoryInitResult = JSON.parse(
       (await bridge.tool('memory_init', {
         repo_root: repoRoot, include_plan: true
@@ -363,8 +364,19 @@ async function run(port, tempDir, configFile) {
     assert(memoryInitResult.ok === true && memoryInitResult.planIncluded === true,
       'memory_init runs through the bridge');
     assert(memoryInitResult.copied.length === 2, 'memory_init copies both legacy files');
-    assert(fs.readFileSync(path.join(repoRoot, '.muse', 'PLAN.md'), 'utf8').includes('# Plan'),
-      'bridge memory_init creates the plan when requested');
+    assert(memoryInitResult.memoryDir === '.muse-squad', 'bridge memory_init uses the canonical dir');
+    assert(fs.readFileSync(path.join(repoRoot, '.muse-squad', 'PLAN.md'), 'utf8')
+      .includes('Bridge legacy plan.'), 'bridge memory_init preserves the legacy plan');
+    assert(fs.readFileSync(path.join(repoRoot, '.muse-squad', 'decisions.md'), 'utf8')
+      .includes('Bridge legacy decision.'), 'bridge memory_init preserves legacy decisions');
+    assert(fs.existsSync(path.join(repoRoot, '.muse', 'PLAN.md')) &&
+      fs.existsSync(path.join(repoRoot, '.muse', 'squad', 'decisions.md')),
+    'bridge memory_init leaves legacy originals in place');
+    const memoryAfter = JSON.parse(
+      (await bridge.tool('memory_status', { repo_root: repoRoot })).result.content[0].text
+    );
+    assert(memoryAfter.legacy.present === true && memoryAfter.legacy.pending === false,
+      'memory_status stops asking to migrate after copying');
     const memoryAgain = JSON.parse(
       (await bridge.tool('memory_init', { repo_root: repoRoot })).result.content[0].text
     );

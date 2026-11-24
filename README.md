@@ -23,7 +23,7 @@ Nothing here is magic. It is files that the installer drops into `~/.config/muse
 | `mcp/team-wizard.js` | Shared installer wizard for template/role selection and overrides. |
 | `skills/squad-team/SKILL.md` | The `/squad-team` command: edits the TOML and regenerates outputs. |
 | `skills/squad-doctor/SKILL.md` | The `/squad-doctor` command: diagnoses registration, config, providers, and drift. |
-| `skills/squad-plan/SKILL.md` | The `/squad-plan` command: writes `.muse/PLAN.md`. |
+| `skills/squad-plan/SKILL.md` | The `/squad-plan` command: writes `.muse-squad/PLAN.md`. |
 | `skills/squad-execute/SKILL.md` | The `/squad-execute` command: runs waves and enforces the verification gate. |
 
 ---
@@ -185,8 +185,8 @@ max_concurrency = 2
 
 [squad]
 name = "Muse Squad"
-# Project memory always lives at <repo>/.muse. This field is compatibility-only.
-memory_dir = ".muse"
+# Project memory always lives at <repo>/.muse-squad. This field is compatibility-only.
+memory_dir = ".muse-squad"
 
 [squad.lead]
 primary = "Muse-Spark"
@@ -304,6 +304,8 @@ On install, `mcp/register-settings.js` adds a server named `muse-squad` to `sett
 | `critique_plan` | `critique_plan(member, plan_markdown, optional repo_context/temperature/max_tokens)` | Get an adversarial review from a named member. |
 | `member_status` | `member_status(member?)` | Inspect one member's chain, or all members when omitted. |
 | `list_providers` | `list_providers` | See providers, types, limits, and queue settings. Keys are redacted. |
+| `memory_status` | `memory_status(repo_root)` | Read-only report of repository-local `.muse-squad/` memory, legacy files, and ignore rules. |
+| `memory_init` | `memory_init(repo_root, include_plan?)` | Create `.muse-squad/` and copy legacy `.muse/` or `.muse/squad/` memory without deleting originals. |
 
 `generate_code` and `critique_plan` are **member-scoped**. The router resolves that member's `primary` first, then its `fallback` providers in order. Native providers cannot be called by the router; it skips them and tries the member's HTTP providers in chain order. Providers with `enabled = false` are skipped entirely, including in native wrappers; no chain edit is needed.
 
@@ -327,11 +329,11 @@ For role-derived changes it reads `mcp/roles.js`: list roles with `node ~/.confi
 
 ### `/squad-plan`
 
-Uses named members only to map the code and draft a decision-complete `.muse/PLAN.md` with exact files, order, and verification commands. It preserves any existing `## Execution Log & Decisions` section. Reviews use `muse-squad:critique_plan` scoped to the reviewing member; native quota failures retry through that member's HTTP chain. If a chain fails completely, planning stops with the attempts listed. It does not change product code.
+Uses named members only to map the code and draft a decision-complete `.muse-squad/PLAN.md` with exact files, order, and verification commands. It preserves any existing `## Execution Log & Decisions` section. Reviews use `muse-squad:critique_plan` scoped to the reviewing member; native quota failures retry through that member's HTTP chain. If a chain fails completely, planning stops with the attempts listed. It does not change product code.
 
 ### `/squad-execute`
 
-Reads the approved plan, groups work into waves, and delegates every implementation and review step to a named member. Generated diffs are applied surgically, incremental checks run after each patch, and the final Verification Gate blocks completion until all `.muse/TODO.md` items are checked and every verification command passes. Member errors stop the wave. A short append-only log is written to `## Execution Log & Decisions` in `.muse/PLAN.md`.
+Reads the approved plan, groups work into waves, and delegates every implementation and review step to a named member. Generated diffs are applied surgically, incremental checks run after each patch, and the final Verification Gate blocks completion until all `.muse-squad/TODO.md` items are checked and every verification command passes. Member errors stop the wave. A short append-only log is written to `## Execution Log & Decisions` in `.muse-squad/PLAN.md`.
 
 ### `/squad-doctor`
 
@@ -356,12 +358,12 @@ You do not need a slash command to get help. The installed `AGENTS.md` / `MUSE.m
 - Check `list_providers` / `member_status` first; respect each provider's `max_concurrency` and batch into waves.
 - Label each subagent `[<name> | <provider-name>] <action>`, apply surgical edits, and run incremental checks after patches.
 
-Normal sessions stay lightweight: no `.muse/PLAN.md` unless you invoke `/squad-plan` or explicitly ask for a formal multi-wave plan.
+Normal sessions stay lightweight: no `.muse-squad/PLAN.md` unless you invoke `/squad-plan` or explicitly ask for a formal multi-wave plan.
 
 Project memory lives in each repository, not in the global config:
 
 ```text
-.muse/
+.muse-squad/
   README.md          # what to commit and how to sync
   PLAN.md            # current approved implementation plan
   TODO.md            # checklist with verification commands and results
@@ -370,11 +372,11 @@ Project memory lives in each repository, not in the global config:
   local/             # machine-only scratch, ignored
 ```
 
-Active paths are `.muse/PLAN.md`, `.muse/TODO.md`, `.muse/decisions.md`, and `.muse/history/<name>.md`.
+Active paths are `.muse-squad/PLAN.md`, `.muse-squad/TODO.md`, `.muse-squad/decisions.md`, and `.muse-squad/history/<name>.md`.
 
-The first squad skill run in a repository resolves `git rev-parse --show-toplevel`, calls `muse-squad:memory_status`, then calls `muse-squad:memory_init` if anything is missing. `/squad-plan` and `/squad-execute` also pass `include_plan: true`; ordinary member runs create the minimal layout only. Legacy `.muse/squad/` decisions and history are copied into `.muse/` without deleting the originals.
+The first squad skill run in a repository resolves `git rev-parse --show-toplevel`, calls `muse-squad:memory_status`, then calls `muse-squad:memory_init` if anything is missing. `/squad-plan` and `/squad-execute` also pass `include_plan: true`; ordinary member runs create the minimal layout only. Legacy `.muse/` and `.muse/squad/` files are copied into `.muse-squad/` without deleting the originals.
 
-Commit the canonical `.muse/` files and pull them on other machines before resuming squad work. Never put API keys, absolute paths, or machine-specific provider details in them. A root `.gitignore` rule that ignores `.muse/` must be removed or narrowed, or these files will not sync.
+Commit the canonical `.muse-squad/` files and pull them on other machines before resuming squad work. Never put API keys, absolute paths, or machine-specific provider details in them. A root `.gitignore` rule that ignores `.muse-squad/` must be removed or narrowed, or these files will not sync. Legacy `.muse/` and `.muse/squad/` should stay ignored.
 
 ---
 
@@ -390,6 +392,7 @@ scripts/generate-installers.sh builds the two installers from payload/
 scripts/test-install.sh        installer test
 scripts/test-roles.js          role catalog and charter test
 scripts/test-mcp-bridge.js     router test with a fake model server
+scripts/test-memory.js         repository memory layout and migration test
 install                        generated Mac/Linux installer
 install.ps1                    generated Windows installer
 VERSION                        version number stamped into both installers

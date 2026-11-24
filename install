@@ -892,9 +892,9 @@ At startup, call `muse-squad:member_status` with no arguments to load the roster
 
 The Muse config lives in `~/.config/muse` outside the workspace. Do not use file tools to `Read` `muse-squad.toml` or `squad/team.md`; the sandbox rejects absolute paths outside the project. Use `/squad-team` when the config needs changes.
 
-Resolve the repository root with `git rev-parse --show-toplevel`. Call `muse-squad:memory_status` with that `repo_root`; if `.muse/` or any canonical file is missing, call `muse-squad:memory_init` with the same `repo_root` and `include_plan: true` before starting. Legacy `.muse/squad/` memory is copied into `.muse/decisions.md` and `.muse/history/` without deleting the originals. Every named member reads `.muse/decisions.md` and `.muse/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished. Ask the documentation charter member (default `@docs`) to append durable decisions to `.muse/decisions.md` before sign-off.
+Resolve the repository root with `git rev-parse --show-toplevel`. Call `muse-squad:memory_status` with that `repo_root`; if `.muse-squad/` or any canonical file is missing, call `muse-squad:memory_init` with the same `repo_root` and `include_plan: true` before starting. Legacy `.muse/` and `.muse/squad/` memory is copied into `.muse-squad/` without deleting the originals. Every named member reads `.muse-squad/decisions.md` and `.muse-squad/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished. Ask the documentation charter member (default `@docs`) to append durable decisions to `.muse-squad/decisions.md` before sign-off.
 
-These `.muse/` files are repository memory and should be committed with the project so other machines resume from the same plan, todo, decisions, and history. Never put API keys, absolute paths, or machine-specific provider details in them.
+These `.muse-squad/` files are repository memory and should be committed with the project so other machines resume from the same plan, todo, decisions, and history. Never put API keys, absolute paths, or machine-specific provider details in them.
 
 ## TUI labels and reporting
 
@@ -949,14 +949,14 @@ When calling `muse-squad`, keep `repo_context`, `file_context`, and `plan_markdo
 
 1. Map the relevant files, dependencies, and existing patterns using named members only.
 2. Ask the user clarifying questions only if an architectural fork cannot be resolved from the codebase.
-3. Draft a decision-complete implementation plan in `.muse/PLAN.md` with exact file paths, dependency order, and verification commands. If the file already has a `## Execution Log & Decisions` section, preserve it verbatim at the bottom.
-4. Plan grill: ask the architecture charter member (default `@lead`) to audit `.muse/PLAN.md` against the actual files, then request an independent critique through `muse-squad:critique_plan` with `member="<name>"` for that same member. Synthesize valid issues into `.muse/PLAN.md` and ask the documentation charter member (default `@docs`) to append durable choices to `.muse/decisions.md`.
+3. Draft a decision-complete implementation plan in `.muse-squad/PLAN.md` with exact file paths, dependency order, and verification commands. If the file already has a `## Execution Log & Decisions` section, preserve it verbatim at the bottom.
+4. Plan grill: ask the architecture charter member (default `@lead`) to audit `.muse-squad/PLAN.md` against the actual files, then request an independent critique through `muse-squad:critique_plan` with `member="<name>"` for that same member. Synthesize valid issues into `.muse-squad/PLAN.md` and ask the documentation charter member (default `@docs`) to append durable choices to `.muse-squad/decisions.md`.
 5. Present a summary of what was caught, including the Subagents / Providers roster, before asking the user for `/squad-execute` sign-off.
 MSQ_PAYLOAD_003
 install_file skills/squad-execute/SKILL.md <<'MSQ_PAYLOAD_004'
 ---
 name: squad-execute
-description: Executes the approved .muse/PLAN.md with named squad members and a verification gate that blocks premature completion.
+description: Executes the approved .muse-squad/PLAN.md with named squad members and a verification gate that blocks premature completion.
 ---
 
 ## Named members and project memory (read first)
@@ -965,9 +965,9 @@ At startup, call `muse-squad:member_status` with no arguments to load the roster
 
 The Muse config lives in `~/.config/muse` outside the workspace. Do not use file tools to `Read` `muse-squad.toml` or `squad/team.md`; the sandbox rejects absolute paths outside the project. Use `/squad-team` when the config needs changes.
 
-Resolve the repository root with `git rev-parse --show-toplevel`. Call `muse-squad:memory_status` with that `repo_root`; if `.muse/` or any canonical file is missing, call `muse-squad:memory_init` with the same `repo_root` and `include_plan: true` before starting. Legacy `.muse/squad/` memory is copied into `.muse/decisions.md` and `.muse/history/` without deleting the originals. Every member reads `.muse/decisions.md` and `.muse/history/<name>.md` before work and appends concise lasting learnings when finished.
+Resolve the repository root with `git rev-parse --show-toplevel`. Call `muse-squad:memory_status` with that `repo_root`; if `.muse-squad/` or any canonical file is missing, call `muse-squad:memory_init` with the same `repo_root` and `include_plan: true` before starting. Legacy `.muse/` and `.muse/squad/` memory is copied into `.muse-squad/` without deleting the originals. Every member reads `.muse-squad/decisions.md` and `.muse-squad/history/<name>.md` before work and appends concise lasting learnings when finished.
 
-These `.muse/` files are repository memory and should be committed with the project so other machines resume from the same plan, todo, decisions, and history. Never put API keys, absolute paths, or machine-specific provider details in them. Use isolated Git worktrees for bounded implementation tasks where available.
+These `.muse-squad/` files are repository memory and should be committed with the project so other machines resume from the same plan, todo, decisions, and history. Never put API keys, absolute paths, or machine-specific provider details in them. Use isolated Git worktrees for bounded implementation tasks where available.
 
 ## TUI labels and reporting
 
@@ -1022,19 +1022,19 @@ Before each `generate_code` call, check the target HTTP provider's `max_input_ch
 
 ## Verification gate (do not stop until verified)
 
-You are not done and must not return control to the user while any `.muse/TODO.md` item is unchecked or while any verification command fails.
+You are not done and must not return control to the user while any `.muse-squad/TODO.md` item is unchecked or while any verification command fails.
 
-Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` section; it is the durable handoff record when resuming a long or interrupted session. Group independent tasks into successive waves. After every wave — before advancing and before reporting completion:
+Read `.muse-squad/PLAN.md`, including any existing `## Execution Log & Decisions` section; it is the durable handoff record when resuming a long or interrupted session. Group independent tasks into successive waves. After every wave — before advancing and before reporting completion:
 
-1. Update `.muse/TODO.md` (create it from the plan if it does not exist). Check off only items whose changes are applied and verified; leave or add `- [ ]` items for remaining or newly discovered work. Record exact verification commands and results in the checklist.
-2. Run every verification command listed in `.muse/PLAN.md` from the repository root — for example `npm test`, `cargo check`, `pytest`, or `go test ./...`. If the plan lists none, detect the project's typechecker and test commands from its manifests, add them to `.muse/TODO.md`, and run them.
+1. Update `.muse-squad/TODO.md` (create it from the plan if it does not exist). Check off only items whose changes are applied and verified; leave or add `- [ ]` items for remaining or newly discovered work. Record exact verification commands and results in the checklist.
+2. Run every verification command listed in `.muse-squad/PLAN.md` from the repository root — for example `npm test`, `cargo check`, `pytest`, or `go test ./...`. If the plan lists none, detect the project's typechecker and test commands from its manifests, add them to `.muse-squad/TODO.md`, and run them.
 3. If any command fails, fix the failure in another bounded wave with the appropriate named member and repeat this gate. Never mark an item done or claim success based on a partial pass.
-4. Append a short entry to `## Execution Log & Decisions` at the bottom of `.muse/PLAN.md` (create the section if absent). Record the wave number, what landed, decisions and *why*, gotchas discovered, exact verification commands and results, and any remaining work or blockers. Append only — never rewrite or delete earlier entries. Ask the documentation charter member (default `@docs`) to append durable decisions to `.muse/decisions.md` and each member to append lasting learnings to its own `.muse/history/<name>.md`.
+4. Append a short entry to `## Execution Log & Decisions` at the bottom of `.muse-squad/PLAN.md` (create the section if absent). Record the wave number, what landed, decisions and *why*, gotchas discovered, exact verification commands and results, and any remaining work or blockers. Append only — never rewrite or delete earlier entries. Ask the documentation charter member (default `@docs`) to append durable decisions to `.muse-squad/decisions.md` and each member to append lasting learnings to its own `.muse-squad/history/<name>.md`.
 5. Only when all TODO items are checked and all verification commands pass, summarize what was verified and return control to the user, including the Subagents / Providers roster for the run.
 
 ## Session handoff notes
 
-The `## Execution Log & Decisions` section in `.muse/PLAN.md` is authoritative state, not chat history. Keep entries short (a few bullets per wave) and append-only:
+The `## Execution Log & Decisions` section in `.muse-squad/PLAN.md` is authoritative state, not chat history. Keep entries short (a few bullets per wave) and append-only:
 
 ```markdown
 ## Execution Log & Decisions
@@ -1053,16 +1053,18 @@ install_file mcp/memory.js <<'MSQ_PAYLOAD_005'
 #!/usr/bin/env node
 'use strict';
 
-// Repository-local Muse Squad memory. This module owns the canonical .muse/
-// layout so skills, wrappers, and MCP tools agree across machines. It never
-// reads or writes the global Muse config; that stays behind the MCP bridge.
+// Repository-local Muse Squad memory. This module owns the canonical
+// .muse-squad/ layout so skills, wrappers, and MCP tools agree across machines.
+// It never reads or writes the global Muse config; that stays behind the MCP
+// bridge. Existing .muse/ and .muse/squad/ memory is copied, never deleted.
 
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 
-const MEMORY_DIR = '.muse';
+const MEMORY_DIR = '.muse-squad';
 const LEGACY_MEMORY_DIR = '.muse/squad';
+const LEGACY_MEMORY_DIRS = ['.muse', LEGACY_MEMORY_DIR];
 const CANONICAL_FILES = [
   `${MEMORY_DIR}/.gitignore`,
   `${MEMORY_DIR}/README.md`,
@@ -1075,15 +1077,14 @@ const CANONICAL_FILES = [
 const TEMPLATES = {
   [`${MEMORY_DIR}/.gitignore`]: [
     'local/',
-    'squad/',
     ''
   ].join('\n'),
 
   [`${MEMORY_DIR}/README.md`]: [
     '# Muse Squad project memory',
     '',
-    'This folder is repository-local project memory for Muse Squad. Unlike the',
-    'global squad config, these files travel with the repository.',
+    'This folder is repository-local memory for Muse Squad. Unlike the global',
+    'squad config, these files travel with the repository.',
     '',
     'Commit these canonical files so every machine starts from the same state:',
     '',
@@ -1092,8 +1093,8 @@ const TEMPLATES = {
     '- `decisions.md` - append-only durable decisions.',
     '- `history/<member>.md` - append-only learnings from each named member.',
     '',
-    '`local/` is for machine-only scratch and is not tracked. `squad/` is the',
-    'legacy layout and is not tracked after migration.',
+    '`local/` is for machine-only scratch and is not tracked. Older `.muse/` and',
+    '`.muse/squad/` folders are legacy and are not tracked after migration.',
     '',
     'Do not put API keys, provider credentials, absolute paths, or machine-specific',
     'provider names in these files. Keep paths relative to the repository root.',
@@ -1137,7 +1138,7 @@ const TEMPLATES = {
   [`${MEMORY_DIR}/TODO.md`]: [
     '# TODO',
     '',
-    '- [ ] Draft or confirm `.muse/PLAN.md`.',
+    '- [ ] Draft or confirm `.muse-squad/PLAN.md`.',
     '- [ ] Record exact verification commands and results as work lands.',
     ''
   ].join('\n'),
@@ -1203,33 +1204,71 @@ function listMarkdown(dir) {
     .sort();
 }
 
-function blocksMemory(line) {
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function blocksDir(line, dir) {
   const trimmed = String(line).trim();
   if (!trimmed || trimmed.startsWith('#') || trimmed.startsWith('!')) return false;
-  return /(^|\/)\.muse(?:\/|\*|$)/.test(trimmed);
+  return new RegExp(`(^|/)${escapeRegExp(dir)}(?:/|\\*|$)`).test(trimmed);
 }
 
 function gitIgnoreStatus(root) {
   const text = readIfExists(path.join(root, '.gitignore'));
   const lines = text === null ? [] : text.split(/\r?\n/);
-  const blockingLine = lines.find(blocksMemory) || null;
+  const blockingLine = lines.find((line) => blocksDir(line, MEMORY_DIR)) || null;
+  const legacyBlockingLine = lines.find(
+    (line) => blocksDir(line, '.muse') && !blocksDir(line, MEMORY_DIR)
+  ) || null;
   return {
     present: text !== null,
     blocksMemory: blockingLine !== null,
-    blockingLine
+    blockingLine,
+    legacyBlockingLine
   };
 }
 
+function legacyMappings(root) {
+  const mappings = [];
+  const push = (from, to) => {
+    if (fs.existsSync(path.join(root, from))) mappings.push({ from, to });
+  };
+
+  // The newer .muse/ layout takes precedence over the older .muse/squad/ one.
+  for (const name of ['PLAN.md', 'TODO.md', 'decisions.md']) {
+    push(`.muse/${name}`, `${MEMORY_DIR}/${name}`);
+  }
+  for (const name of listMarkdown(path.join(root, '.muse', 'history'))) {
+    push(`.muse/history/${name}`, `${MEMORY_DIR}/history/${name}`);
+  }
+  push(`${LEGACY_MEMORY_DIR}/decisions.md`, `${MEMORY_DIR}/decisions.md`);
+  for (const name of listMarkdown(path.join(root, LEGACY_MEMORY_DIR, 'history'))) {
+    push(`${LEGACY_MEMORY_DIR}/history/${name}`, `${MEMORY_DIR}/history/${name}`);
+  }
+  return mappings;
+}
+
+function migrationMarker(from) {
+  return `<!-- muse-squad migrated from ${from} -->`;
+}
+
+function isMigrated(root, item) {
+  const text = readIfExists(path.join(root, item.to));
+  return text !== null && text.includes(migrationMarker(item.from));
+}
+
 function legacyStatus(root) {
-  const decisionsRel = `${LEGACY_MEMORY_DIR}/decisions.md`;
-  const history = listMarkdown(path.join(root, LEGACY_MEMORY_DIR, 'history'))
-    .map((name) => `${LEGACY_MEMORY_DIR}/history/${name}`);
-  const decisions = fs.existsSync(path.join(root, decisionsRel)) ? decisionsRel : null;
+  const mappings = legacyMappings(root);
+  const pending = mappings.filter((item) => !isMigrated(root, item));
   return {
-    present: decisions !== null || history.length > 0,
-    decisions,
-    history,
-    files: [...(decisions ? [decisions] : []), ...history]
+    present: mappings.length > 0,
+    pending: pending.length > 0,
+    dirs: LEGACY_MEMORY_DIRS.filter((dir) => fs.existsSync(path.join(root, dir))),
+    files: mappings.map((item) => item.from),
+    mappings,
+    pendingMappings: pending,
+    migratedMappings: mappings.filter((item) => isMigrated(root, item))
   };
 }
 
@@ -1247,7 +1286,7 @@ function canonicalStatus(root) {
 function buildWarnings(status) {
   const warnings = [];
   if (!status.isGitRepo) {
-    warnings.push('Not a Git repository. Confirm the repo root before creating .muse/.');
+    warnings.push('Not a Git repository. Confirm the repo root before creating .muse-squad/.');
   }
   if (status.gitIgnore.blocksMemory) {
     warnings.push(
@@ -1255,8 +1294,8 @@ function buildWarnings(status) {
         'Canonical files will not sync until that rule is changed.'
     );
   }
-  if (status.legacy.present) {
-    warnings.push('Legacy .muse/squad files found. Run muse-squad:memory_init to copy them.');
+  if (status.legacy.pending) {
+    warnings.push('Unmigrated .muse/ or .muse/squad files found. Run muse-squad:memory_init to copy them.');
   }
   return warnings;
 }
@@ -1295,7 +1334,7 @@ function mergeLegacy(root, from, to, report) {
   if (!fs.existsSync(source)) return;
   const legacyText = fs.readFileSync(source, 'utf8');
   const dest = path.join(root, to);
-  const marker = `<!-- muse-squad migrated from ${from} -->`;
+  const marker = migrationMarker(from);
   const existing = readIfExists(dest);
 
   if (existing !== null && existing.includes(marker)) {
@@ -1341,19 +1380,8 @@ function memoryInit(rootInput, options = {}) {
 
   // Copy legacy content before templates so migrated files keep their original
   // text instead of carrying an empty template heading.
-  mergeLegacy(
-    repoRoot,
-    `${LEGACY_MEMORY_DIR}/decisions.md`,
-    `${MEMORY_DIR}/decisions.md`,
-    report
-  );
-  for (const name of listMarkdown(path.join(repoRoot, LEGACY_MEMORY_DIR, 'history'))) {
-    mergeLegacy(
-      repoRoot,
-      `${LEGACY_MEMORY_DIR}/history/${name}`,
-      `${MEMORY_DIR}/history/${name}`,
-      report
-    );
+  for (const item of legacyMappings(repoRoot)) {
+    mergeLegacy(repoRoot, item.from, item.to, report);
   }
 
   const files = options.include_plan === true
@@ -1368,6 +1396,7 @@ function memoryInit(rootInput, options = {}) {
 module.exports = {
   MEMORY_DIR,
   LEGACY_MEMORY_DIR,
+  LEGACY_MEMORY_DIRS,
   CANONICAL_FILES,
   TEMPLATES,
   expandHome,
@@ -1441,7 +1470,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         member: MEMBER_PARAM,
-        plan_markdown: { type: 'string', description: 'Full markdown of .muse/PLAN.md to audit.' },
+        plan_markdown: { type: 'string', description: 'Full markdown of .muse-squad/PLAN.md to audit.' },
         repo_context: { type: 'string', description: 'Relevant repository files and structure the plan relies on.' },
         temperature: { type: 'number', description: 'Optional sampling temperature override.' },
         max_tokens: { type: 'integer', description: 'Optional maximum tokens to generate.' }
@@ -1470,7 +1499,7 @@ const TOOLS = [
   },
   {
     name: 'memory_status',
-    description: 'Report repository-local .muse memory files, legacy .muse/squad content, and Git ignore status. Read-only.',
+    description: 'Report repository-local .muse-squad memory files, legacy .muse/ and .muse/squad content, and Git ignore status. Read-only.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -1482,12 +1511,12 @@ const TOOLS = [
   },
   {
     name: 'memory_init',
-    description: 'Create the repository-local .muse/ layout and copy legacy .muse/squad memory without deleting the originals.',
+    description: 'Create the repository-local .muse-squad/ layout and copy legacy .muse/ and .muse/squad memory without deleting the originals.',
     inputSchema: {
       type: 'object',
       properties: {
         repo_root: { type: 'string', description: 'Absolute repository root, usually from git rev-parse --show-toplevel.' },
-        include_plan: { type: 'boolean', description: 'Also create .muse/PLAN.md. Use only for /squad-plan or /squad-execute.' }
+        include_plan: { type: 'boolean', description: 'Also create .muse-squad/PLAN.md. Use only for /squad-plan or /squad-execute.' }
       },
       required: ['repo_root'],
       additionalProperties: false
@@ -2072,8 +2101,8 @@ const path = require('path');
 const SCHEMA = 1;
 const PROVIDER_NAME_RE = /^[A-Za-z0-9._-]+$/;
 const MEMBER_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
-const MEMORY_DIR = '.muse';
-const MEMORY_DIR_RE = /^\.muse(?:\/[A-Za-z0-9._-]+)*$/;
+const MEMORY_DIR = '.muse-squad';
+const MEMORY_DIR_RE = /^\.muse(?:-squad)?(?:\/[A-Za-z0-9._-]+)*$/;
 
 const PROVIDER_KEYS = new Set([
   'type', 'enabled', 'base_url', 'api_key', 'model', 'temperature', 'top_p',
@@ -2096,7 +2125,7 @@ function normalizeMemoryDir(value, file) {
     !MEMORY_DIR_RE.test(normalized) ||
     segments.some((segment) => segment === '.' || segment === '..')
   ) {
-    throw new Error(`${file}: squad.memory_dir must be a repository-relative path under .muse`);
+    throw new Error(`${file}: squad.memory_dir must be a repository-relative path under .muse or .muse-squad`);
   }
   return normalized;
 }
@@ -4483,7 +4512,7 @@ function loadState(configFile, fresh = false, providersFile = null) {
     generatedProviders,
     providerOrder: [...providerNames, ...generatedProviders],
     squadName: (parsed.squad && parsed.squad.name) || 'Muse Squad',
-    memoryDir: (parsed.squad && parsed.squad.memory_dir) || '.muse',
+    memoryDir: (parsed.squad && parsed.squad.memory_dir) || '.muse-squad',
     existing
   };
 }
@@ -5153,7 +5182,7 @@ function buildRoster(config, configFile) {
     '',
     '## Project memory',
     '',
-    'Project memory is fixed at `<repo>/.muse/` so every machine reads the same paths.',
+    'Project memory is fixed at `<repo>/.muse-squad/` so every machine reads the same paths.',
     `- \`${memoryModule.MEMORY_DIR}/decisions.md\` - shared architectural decisions.`,
     `- \`${memoryModule.MEMORY_DIR}/history/<name>.md\` - per-member conventions, file maps, and gotchas.`,
     '',
@@ -5449,9 +5478,9 @@ max_concurrency = 2
 # primary + fallback must reference provider names above. At least one member.
 [squad]
 name = "Muse Squad"
-# Project memory always lives at <repo>/.muse. This field is kept for
+# Project memory always lives at <repo>/.muse-squad. This field is kept for
 # compatibility with older configs and no longer changes generated paths.
-memory_dir = ".muse"
+memory_dir = ".muse-squad"
 
 [squad.lead]
 primary = "Muse-Spark"
@@ -5890,8 +5919,8 @@ The MCP server is `muse-squad`. It exposes:
 - `critique_plan(member, plan_markdown, optional repo_context/temperature/max_tokens)`
 - `member_status(member?)` — omit `member` for an overview.
 - `list_providers`
-- `memory_status(repo_root)` — read-only report of repository-local `.muse/` memory.
-- `memory_init(repo_root, include_plan?)` — idempotently create `.muse/` and copy legacy `.muse/squad/` memory. `include_plan: true` is only for `/squad-plan` and `/squad-execute`.
+- `memory_status(repo_root)` — read-only report of repository-local `.muse-squad/` memory.
+- `memory_init(repo_root, include_plan?)` — idempotently create `.muse-squad/` and copy legacy `.muse/` and `.muse/squad/` memory. `include_plan: true` is only for `/squad-plan` and `/squad-execute`.
 
 `generate_code` and `critique_plan` are member-scoped. The router resolves that member's `primary` first, then its `fallback` providers in order. Native providers cannot be called by the router; they are skipped, and the router tries that member's HTTP providers in chain order. Providers with `enabled = false` are skipped entirely, even when listed as `primary`, and the next enabled provider in that member's chain serves the work. If no enabled provider in the member's chain can serve the request, the tool returns a hard error listing every attempt. There is no global fallback and no silent model switching.
 
@@ -5909,13 +5938,13 @@ The MCP server is `muse-squad`. It exposes:
 
 ### Project memory
 
-Project memory is repository-local at `<repo>/.muse/` and travels with the repository. Resolve the repo root with `git rev-parse --show-toplevel`, call `muse-squad:memory_status` with that `repo_root`, then call `muse-squad:memory_init` when the layout is missing. Ordinary member runs create the minimal layout; `/squad-plan` and `/squad-execute` pass `include_plan: true`. Legacy `.muse/squad/` memory is copied into `.muse/` without deleting the originals.
+Project memory is repository-local at `<repo>/.muse-squad/` and travels with the repository. Resolve the repo root with `git rev-parse --show-toplevel`, call `muse-squad:memory_status` with that `repo_root`, then call `muse-squad:memory_init` when the layout is missing. Ordinary member runs create the minimal layout; `/squad-plan` and `/squad-execute` pass `include_plan: true`. Legacy `.muse/` and `.muse/squad/` memory is copied into `.muse-squad/` without deleting the originals.
 
-Each named member reads `.muse/decisions.md` and `.muse/history/<name>.md` before work and appends concise lasting learnings when finished. Append durable decisions after each wave or plan sign-off. Commit the canonical `.muse/` files so other machines start from the same state; never put API keys, absolute paths, or machine-specific provider details in them.
+Each named member reads `.muse-squad/decisions.md` and `.muse-squad/history/<name>.md` before work and appends concise lasting learnings when finished. Append durable decisions after each wave or plan sign-off. Commit the canonical `.muse-squad/` files so other machines start from the same state; never put API keys, absolute paths, or machine-specific provider details in them.
 
 ### Keep normal sessions lightweight
 
-Do not create `.muse/PLAN.md` in a normal session unless `/squad-plan` is invoked or the user explicitly asks for a formal multi-wave plan. Wave batching, execution logs, and the strict verification gate are for the slash commands. In normal sessions, use the guardrails above with a brief task brief instead.
+Do not create `.muse-squad/PLAN.md` in a normal session unless `/squad-plan` is invoked or the user explicitly asks for a formal multi-wave plan. Wave batching, execution logs, and the strict verification gate are for the slash commands. In normal sessions, use the guardrails above with a brief task brief instead.
 <!-- muse-squad:end -->
 MSQ_AGENTS_POLICY
 uninstall_file agents/plan-reviewer.md
@@ -5931,8 +5960,8 @@ if [[ "$MODE" == "install" && "$FIRST_INSTALL" == "1" ]]; then
   log ""
   log "Next steps:"
   log "  1. Configure: edit $CONFIG_DIR/muse-squad.toml (providers, endpoints, and squad members)."
-  log "  2. Use in Muse Code: /squad-plan to create repo-local .muse/PLAN.md, then /squad-execute."
-  log "     Existing repos: the first squad skill run copies legacy .muse/squad memory into .muse/."
+  log "  2. Use in Muse Code: /squad-plan to create repo-local .muse-squad/PLAN.md, then /squad-execute."
+  log "     Existing repos: the first squad skill run copies legacy .muse/ and .muse/squad memory into .muse-squad/."
   log "  3. Customize: edit muse-squad.toml; generated agents in $CONFIG_DIR/agents/ are rebuilt from it."
   log "  4. Check setup any time with /squad-doctor."
   log "  5. Update later: re-run this installer with --update."

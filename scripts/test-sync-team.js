@@ -38,7 +38,7 @@ function q(value) {
   return JSON.stringify(String(value));
 }
 
-function toml({ schema = 1, squadName = 'Test Squad', memoryDir = '.muse/squad', providers, members }) {
+function toml({ schema = 1, squadName = 'Test Squad', memoryDir = '.muse-squad', providers, members }) {
   const lines = [`schema = ${schema}`, ''];
   for (const [name, provider] of Object.entries(providers)) {
     lines.push(`[providers.${name}]`, `type = ${q(provider.type)}`);
@@ -154,8 +154,9 @@ try {
     '| @solo | `Native-Primary` (native) | (none) | Record durable decisions. |',
     'roster row for solo'
   );
-  expectContains(roster, '`.muse/decisions.md`', 'roster decisions path');
-  expectContains(roster, '`.muse/history/<name>.md`', 'roster history path');
+  expectContains(roster, '`.muse-squad/decisions.md`', 'roster decisions path');
+  expectContains(roster, '`.muse-squad/history/<name>.md`', 'roster history path');
+  expectContains(roster, '<repo>/.muse-squad/', 'roster fixed repo root');
   expectContains(roster, 'muse-squad:memory_status', 'roster memory status tool');
   expectContains(roster, 'muse-squad:memory_init', 'roster memory init tool');
   assert(!roster.includes('.muse/qa'), 'roster ignores the legacy memory_dir override');
@@ -181,8 +182,8 @@ try {
   );
   expectContains(atlas.content, 'Fallback `Native-Fallback` is native model `muse-wonder-1.0`', 'atlas native fallback');
   expectContains(atlas.content, 'servedBy`, `servedProvider`, `servedModel`, `fallbackUsed`, and `attempts', 'atlas meta reporting');
-  expectContains(atlas.content, '`.muse/decisions.md`', 'atlas decisions path');
-  expectContains(atlas.content, '`.muse/history/atlas.md`', 'atlas history path');
+  expectContains(atlas.content, '`.muse-squad/decisions.md`', 'atlas decisions path');
+  expectContains(atlas.content, '`.muse-squad/history/atlas.md`', 'atlas history path');
   expectContains(atlas.content, 'muse-squad:memory_status', 'atlas memory status tool');
   expectContains(atlas.content, 'muse-squad:memory_init', 'atlas memory init tool');
   assert(!atlas.content.includes('.muse/qa'), 'wrapper ignores the legacy memory_dir override');

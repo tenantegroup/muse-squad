@@ -26,8 +26,8 @@ The MCP server is `muse-squad`. It exposes:
 - `critique_plan(member, plan_markdown, optional repo_context/temperature/max_tokens)`
 - `member_status(member?)` — omit `member` for an overview.
 - `list_providers`
-- `memory_status(repo_root)` — read-only report of repository-local `.muse/` memory.
-- `memory_init(repo_root, include_plan?)` — idempotently create `.muse/` and copy legacy `.muse/squad/` memory. `include_plan: true` is only for `/squad-plan` and `/squad-execute`.
+- `memory_status(repo_root)` — read-only report of repository-local `.muse-squad/` memory.
+- `memory_init(repo_root, include_plan?)` — idempotently create `.muse-squad/` and copy legacy `.muse/` and `.muse/squad/` memory. `include_plan: true` is only for `/squad-plan` and `/squad-execute`.
 
 `generate_code` and `critique_plan` are member-scoped. The router resolves that member's `primary` first, then its `fallback` providers in order. Native providers cannot be called by the router; they are skipped, and the router tries that member's HTTP providers in chain order. Providers with `enabled = false` are skipped entirely, even when listed as `primary`, and the next enabled provider in that member's chain serves the work. If no enabled provider in the member's chain can serve the request, the tool returns a hard error listing every attempt. There is no global fallback and no silent model switching.
 
@@ -45,10 +45,10 @@ The MCP server is `muse-squad`. It exposes:
 
 ### Project memory
 
-Project memory is repository-local at `<repo>/.muse/` and travels with the repository. Resolve the repo root with `git rev-parse --show-toplevel`, call `muse-squad:memory_status` with that `repo_root`, then call `muse-squad:memory_init` when the layout is missing. Ordinary member runs create the minimal layout; `/squad-plan` and `/squad-execute` pass `include_plan: true`. Legacy `.muse/squad/` memory is copied into `.muse/` without deleting the originals.
+Project memory is repository-local at `<repo>/.muse-squad/` and travels with the repository. Resolve the repo root with `git rev-parse --show-toplevel`, call `muse-squad:memory_status` with that `repo_root`, then call `muse-squad:memory_init` when the layout is missing. Ordinary member runs create the minimal layout; `/squad-plan` and `/squad-execute` pass `include_plan: true`. Legacy `.muse/` and `.muse/squad/` memory is copied into `.muse-squad/` without deleting the originals.
 
-Each named member reads `.muse/decisions.md` and `.muse/history/<name>.md` before work and appends concise lasting learnings when finished. Append durable decisions after each wave or plan sign-off. Commit the canonical `.muse/` files so other machines start from the same state; never put API keys, absolute paths, or machine-specific provider details in them.
+Each named member reads `.muse-squad/decisions.md` and `.muse-squad/history/<name>.md` before work and appends concise lasting learnings when finished. Append durable decisions after each wave or plan sign-off. Commit the canonical `.muse-squad/` files so other machines start from the same state; never put API keys, absolute paths, or machine-specific provider details in them.
 
 ### Keep normal sessions lightweight
 
-Do not create `.muse/PLAN.md` in a normal session unless `/squad-plan` is invoked or the user explicitly asks for a formal multi-wave plan. Wave batching, execution logs, and the strict verification gate are for the slash commands. In normal sessions, use the guardrails above with a brief task brief instead.
+Do not create `.muse-squad/PLAN.md` in a normal session unless `/squad-plan` is invoked or the user explicitly asks for a formal multi-wave plan. Wave batching, execution logs, and the strict verification gate are for the slash commands. In normal sessions, use the guardrails above with a brief task brief instead.

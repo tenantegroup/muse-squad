@@ -12,8 +12,8 @@ const path = require('path');
 const SCHEMA = 1;
 const PROVIDER_NAME_RE = /^[A-Za-z0-9._-]+$/;
 const MEMBER_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
-const MEMORY_DIR = '.muse';
-const MEMORY_DIR_RE = /^\.muse(?:\/[A-Za-z0-9._-]+)*$/;
+const MEMORY_DIR = '.muse-squad';
+const MEMORY_DIR_RE = /^\.muse(?:-squad)?(?:\/[A-Za-z0-9._-]+)*$/;
 
 const PROVIDER_KEYS = new Set([
   'type', 'enabled', 'base_url', 'api_key', 'model', 'temperature', 'top_p',
@@ -36,7 +36,7 @@ function normalizeMemoryDir(value, file) {
     !MEMORY_DIR_RE.test(normalized) ||
     segments.some((segment) => segment === '.' || segment === '..')
   ) {
-    throw new Error(`${file}: squad.memory_dir must be a repository-relative path under .muse`);
+    throw new Error(`${file}: squad.memory_dir must be a repository-relative path under .muse or .muse-squad`);
   }
   return normalized;
 }

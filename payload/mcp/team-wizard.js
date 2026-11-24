@@ -122,7 +122,7 @@ function loadState(configFile, fresh = false, providersFile = null) {
     generatedProviders,
     providerOrder: [...providerNames, ...generatedProviders],
     squadName: (parsed.squad && parsed.squad.name) || 'Muse Squad',
-    memoryDir: (parsed.squad && parsed.squad.memory_dir) || '.muse',
+    memoryDir: (parsed.squad && parsed.squad.memory_dir) || '.muse-squad',
     existing
   };
 }

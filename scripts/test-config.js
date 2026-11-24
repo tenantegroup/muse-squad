@@ -220,7 +220,7 @@ async function main() {
     assert(disabledConfig.providers.Second.enabled === false, 'enabled = false is parsed');
     assert(disabledConfig.providers.Second.api_key === '', 'disabled env key is not resolved');
     assert(disabledConfig.providers.Local.enabled === true, 'other providers stay enabled');
-    assert(loaded.squad.memory_dir === '.muse', 'project memory default is .muse');
+    assert(loaded.squad.memory_dir === '.muse-squad', 'project memory default is .muse-squad');
     assert(loaded.squad.members.alpha.primary === 'Local', 'member primary');
     assert(JSON.stringify(loaded.squad.members.alpha.fallback) === '["Second","Third"]',
       'ordered fallback');
@@ -259,15 +259,18 @@ async function main() {
     for (const [name, provider] of Object.entries(bundledDefault.providers)) {
       assert(provider.enabled === true, `bundled default provider ${name} is explicitly enabled`);
     }
-    assert(bundledDefault.squad.memory_dir === '.muse', 'bundled default uses repo-local .muse');
+    assert(bundledDefault.squad.memory_dir === '.muse-squad',
+      'bundled default uses repo-local .muse-squad');
 
-    const legacyMemoryFile = path.join(tempDir, 'legacy-memory.toml');
-    write(legacyMemoryFile, validConfigText().replace(
-      'schema = 1',
-      'schema = 1\n[squad]\nmemory_dir = ".muse/squad"'
-    ));
-    assert(config.loadConfig({ config_file: legacyMemoryFile }).squad.memory_dir === '.muse/squad',
-      'legacy .muse/squad memory_dir is still accepted');
+    for (const [value, label] of [['.muse', 'legacy .muse'], ['.muse/squad', 'legacy .muse/squad']]) {
+      const legacyMemoryFile = path.join(tempDir, `legacy-memory-${value.replace(/\W/g, '-')}.toml`);
+      write(legacyMemoryFile, validConfigText().replace(
+        'schema = 1',
+        `schema = 1\n[squad]\nmemory_dir = ${JSON.stringify(value)}`
+      ));
+      assert(config.loadConfig({ config_file: legacyMemoryFile }).squad.memory_dir === value,
+        `${label} memory_dir is still accepted`);
+    }
 
     delete process.env[ENV_KEY];
     expectThrows(() => config.loadConfig({ config_file: validFile }),
@@ -346,7 +349,8 @@ async function main() {
       ['/tmp/muse', 'absolute memory_dir'],
       ['~/.muse', 'home-relative memory_dir'],
       ['../.muse', 'parent-escaping memory_dir'],
-      ['memory', 'memory_dir outside .muse']
+      ['memory', 'memory_dir outside .muse'],
+      ['.muse-squad-elsewhere', 'lookalike memory_dir']
     ]) {
       expectInvalid(
         base.replace('schema = 1', `schema = 1\n[squad]\nmemory_dir = ${JSON.stringify(value)}`),

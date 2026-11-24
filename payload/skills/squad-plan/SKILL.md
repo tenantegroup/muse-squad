@@ -10,9 +10,9 @@ At startup, call `muse-squad:member_status` with no arguments to load the roster
 
 The Muse config lives in `~/.config/muse` outside the workspace. Do not use file tools to `Read` `muse-squad.toml` or `squad/team.md`; the sandbox rejects absolute paths outside the project. Use `/squad-team` when the config needs changes.
 
-Resolve the repository root with `git rev-parse --show-toplevel`. Call `muse-squad:memory_status` with that `repo_root`; if `.muse/` or any canonical file is missing, call `muse-squad:memory_init` with the same `repo_root` and `include_plan: true` before starting. Legacy `.muse/squad/` memory is copied into `.muse/decisions.md` and `.muse/history/` without deleting the originals. Every named member reads `.muse/decisions.md` and `.muse/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished. Ask the documentation charter member (default `@docs`) to append durable decisions to `.muse/decisions.md` before sign-off.
+Resolve the repository root with `git rev-parse --show-toplevel`. Call `muse-squad:memory_status` with that `repo_root`; if `.muse-squad/` or any canonical file is missing, call `muse-squad:memory_init` with the same `repo_root` and `include_plan: true` before starting. Legacy `.muse/` and `.muse/squad/` memory is copied into `.muse-squad/` without deleting the originals. Every named member reads `.muse-squad/decisions.md` and `.muse-squad/history/<name>.md` before starting, and appends concise lasting learnings to its own history file when finished. Ask the documentation charter member (default `@docs`) to append durable decisions to `.muse-squad/decisions.md` before sign-off.
 
-These `.muse/` files are repository memory and should be committed with the project so other machines resume from the same plan, todo, decisions, and history. Never put API keys, absolute paths, or machine-specific provider details in them.
+These `.muse-squad/` files are repository memory and should be committed with the project so other machines resume from the same plan, todo, decisions, and history. Never put API keys, absolute paths, or machine-specific provider details in them.
 
 ## TUI labels and reporting
 
@@ -67,6 +67,6 @@ When calling `muse-squad`, keep `repo_context`, `file_context`, and `plan_markdo
 
 1. Map the relevant files, dependencies, and existing patterns using named members only.
 2. Ask the user clarifying questions only if an architectural fork cannot be resolved from the codebase.
-3. Draft a decision-complete implementation plan in `.muse/PLAN.md` with exact file paths, dependency order, and verification commands. If the file already has a `## Execution Log & Decisions` section, preserve it verbatim at the bottom.
-4. Plan grill: ask the architecture charter member (default `@lead`) to audit `.muse/PLAN.md` against the actual files, then request an independent critique through `muse-squad:critique_plan` with `member="<name>"` for that same member. Synthesize valid issues into `.muse/PLAN.md` and ask the documentation charter member (default `@docs`) to append durable choices to `.muse/decisions.md`.
+3. Draft a decision-complete implementation plan in `.muse-squad/PLAN.md` with exact file paths, dependency order, and verification commands. If the file already has a `## Execution Log & Decisions` section, preserve it verbatim at the bottom.
+4. Plan grill: ask the architecture charter member (default `@lead`) to audit `.muse-squad/PLAN.md` against the actual files, then request an independent critique through `muse-squad:critique_plan` with `member="<name>"` for that same member. Synthesize valid issues into `.muse-squad/PLAN.md` and ask the documentation charter member (default `@docs`) to append durable choices to `.muse-squad/decisions.md`.
 5. Present a summary of what was caught, including the Subagents / Providers roster, before asking the user for `/squad-execute` sign-off.

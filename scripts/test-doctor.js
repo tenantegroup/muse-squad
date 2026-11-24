@@ -63,7 +63,7 @@ function q(value) {
   return JSON.stringify(String(value));
 }
 
-function toml({ schema = 1, squadName = 'Doctor Squad', memoryDir = '.muse/squad', providers, members }) {
+function toml({ schema = 1, squadName = 'Doctor Squad', memoryDir = '.muse-squad', providers, members }) {
   const lines = [`schema = ${schema}`, ''];
   for (const [name, provider] of Object.entries(providers)) {
     lines.push(`[providers.${name}]`, `type = ${q(provider.type)}`);

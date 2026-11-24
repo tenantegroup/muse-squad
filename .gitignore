@@ -1,4 +1,5 @@
 .DS_Store
-.muse/local/
+.muse-squad/local/
+.muse/
 .muse/squad/
 *.bak.*

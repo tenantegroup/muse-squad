@@ -62,7 +62,7 @@ const TOOLS = [
       type: 'object',
       properties: {
         member: MEMBER_PARAM,
-        plan_markdown: { type: 'string', description: 'Full markdown of .muse/PLAN.md to audit.' },
+        plan_markdown: { type: 'string', description: 'Full markdown of .muse-squad/PLAN.md to audit.' },
         repo_context: { type: 'string', description: 'Relevant repository files and structure the plan relies on.' },
         temperature: { type: 'number', description: 'Optional sampling temperature override.' },
         max_tokens: { type: 'integer', description: 'Optional maximum tokens to generate.' }
@@ -91,7 +91,7 @@ const TOOLS = [
   },
   {
     name: 'memory_status',
-    description: 'Report repository-local .muse memory files, legacy .muse/squad content, and Git ignore status. Read-only.',
+    description: 'Report repository-local .muse-squad memory files, legacy .muse/ and .muse/squad content, and Git ignore status. Read-only.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -103,12 +103,12 @@ const TOOLS = [
   },
   {
     name: 'memory_init',
-    description: 'Create the repository-local .muse/ layout and copy legacy .muse/squad memory without deleting the originals.',
+    description: 'Create the repository-local .muse-squad/ layout and copy legacy .muse/ and .muse/squad memory without deleting the originals.',
     inputSchema: {
       type: 'object',
       properties: {
         repo_root: { type: 'string', description: 'Absolute repository root, usually from git rev-parse --show-toplevel.' },
-        include_plan: { type: 'boolean', description: 'Also create .muse/PLAN.md. Use only for /squad-plan or /squad-execute.' }
+        include_plan: { type: 'boolean', description: 'Also create .muse-squad/PLAN.md. Use only for /squad-plan or /squad-execute.' }
       },
       required: ['repo_root'],
       additionalProperties: false

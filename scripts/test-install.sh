@@ -725,7 +725,7 @@ for phrase in \
   "team config failed validation; no changes were written" \
   "MUSE_SQUAD_TTY" \
   "Get-Dest 'muse-squad.toml'" \
-  "repo-local .muse/PLAN.md" \
+  "repo-local .muse-squad/PLAN.md" \
   "--uninstall         Remove managed files and unregister muse-squad" \
   '& node -e $nodeScript - $dest $membersFile'; do
   grep -qF -- "$phrase" "$ROOT/install.ps1" || fail "install.ps1 is missing: $phrase"
@@ -765,20 +765,30 @@ for file in "$ROOT/payload/skills/squad-plan/SKILL.md" \
 done
 for file in "$ROOT/payload/AGENTS.md" "$ROOT/README.md" \
   "$ROOT/payload/skills/squad-plan/SKILL.md" "$ROOT/payload/skills/squad-execute/SKILL.md"; do
-  for phrase in '.muse/decisions.md' '.muse/history/' \
+  for phrase in '.muse-squad/decisions.md' '.muse-squad/history/' \
     'muse-squad:memory_status' 'muse-squad:memory_init'; do
     grep -qF "$phrase" "$file" || fail "$file is missing project memory phrase: $phrase"
   done
+  if grep -qF '`.muse/decisions.md`' "$file"; then
+    fail "$file still uses .muse/decisions.md as the active memory path"
+  fi
   if grep -qF '`.muse/squad/decisions.md`' "$file"; then
     fail "$file still uses .muse/squad/decisions.md as the active memory path"
   fi
 done
 for file in "$ROOT/README.md" "$ROOT/payload/skills/squad-plan/SKILL.md" \
   "$ROOT/payload/skills/squad-execute/SKILL.md"; do
-  grep -qF '.muse/PLAN.md' "$file" || fail "$file is missing project memory phrase: .muse/PLAN.md"
+  grep -qF '.muse-squad/PLAN.md' "$file" || \
+    fail "$file is missing project memory phrase: .muse-squad/PLAN.md"
 done
 for file in "$ROOT/README.md" "$ROOT/payload/skills/squad-execute/SKILL.md"; do
-  grep -qF '.muse/TODO.md' "$file" || fail "$file is missing project memory phrase: .muse/TODO.md"
+  grep -qF '.muse-squad/TODO.md' "$file" || \
+    fail "$file is missing project memory phrase: .muse-squad/TODO.md"
+done
+for file in "$ROOT/README.md" "$ROOT/payload/AGENTS.md" \
+  "$ROOT/payload/skills/squad-plan/SKILL.md" \
+  "$ROOT/payload/skills/squad-execute/SKILL.md"; do
+  grep -qF '.muse/squad/' "$file" || fail "$file does not document legacy .muse/squad migration"
 done
 
 echo "ALL INSTALL TESTS PASSED"

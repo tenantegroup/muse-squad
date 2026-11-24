@@ -51,9 +51,9 @@ max_concurrency = 2
 # primary + fallback must reference provider names above. At least one member.
 [squad]
 name = "Muse Squad"
-# Project memory always lives at <repo>/.muse. This field is kept for
+# Project memory always lives at <repo>/.muse-squad. This field is kept for
 # compatibility with older configs and no longer changes generated paths.
-memory_dir = ".muse"
+memory_dir = ".muse-squad"
 
 [squad.lead]
 primary = "Muse-Spark"

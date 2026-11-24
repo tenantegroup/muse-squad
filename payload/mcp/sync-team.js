@@ -133,7 +133,7 @@ function buildRoster(config, configFile) {
     '',
     '## Project memory',
     '',
-    'Project memory is fixed at `<repo>/.muse/` so every machine reads the same paths.',
+    'Project memory is fixed at `<repo>/.muse-squad/` so every machine reads the same paths.',
     `- \`${memoryModule.MEMORY_DIR}/decisions.md\` - shared architectural decisions.`,
     `- \`${memoryModule.MEMORY_DIR}/history/<name>.md\` - per-member conventions, file maps, and gotchas.`,
     '',
