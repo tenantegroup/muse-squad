@@ -223,7 +223,7 @@ printf '%s\n' "$interactive_output"
   fail "interactive installer exited with status $interactive_status"
 for phrase in \
   'Customize Squad team members & models now?' \
-  'Built-in role catalog: 20 roles' \
+  'Built-in role catalog: 22 roles' \
   'Replace the current roster and regenerate charters from software? [y/N]:' \
   'template    software' \
   'members     7' \
@@ -392,8 +392,8 @@ for phrase in \
   'added provider Anthropic' \
   '1: software - Software delivery (7 roles)' \
   '@lead, @frontend, @backend, @reviewer, @tester, @devops, @docs' \
-  '2: engineering - Engineering (13 roles)' \
-  '@lead, @frontend, @backend, @fullstack, @reviewer, @tester, @devops, @security, @data, @docs, @ai, @designer, @fact-checker' \
+  '2: engineering - Engineering (15 roles)' \
+  '@lead, @frontend, @backend, @android, @ios, @fullstack, @reviewer, @tester, @devops, @security, @data, @docs, @ai, @designer, @fact-checker' \
   'template    software' \
   'defaults    accepted'; do
   grep -qF "$phrase" <<<"$piped_output" || \
@@ -720,7 +720,7 @@ for phrase in \
   "muse-squad:memory_status" \
   "Do NOT author code, diffs, or review findings natively" \
   "--members-file" \
-  "Built-in role catalog: 20 roles" \
+  "Built-in role catalog: 22 roles" \
   "MUSE_SQUAD_WIZARD_INPUT" \
   "\$wizardArgs += '--fresh'" \
   "team config failed validation; no changes were written" \

@@ -312,7 +312,7 @@ async function chooseTemplate(state, prompt) {
       members: state.existing.map((member) => `@${member.name}`)
     });
   }
-  process.stderr.write('\nBuilt-in role catalog: 20 roles. Choose a starting team:\n');
+  process.stderr.write('\nBuilt-in role catalog: 22 roles. Choose a starting team:\n');
   options.forEach((option, index) => {
     process.stderr.write(`  ${index + 1}: ${option.label}\n`);
     const roster = option.members.length > 0

@@ -43,11 +43,19 @@ function main() {
     assert(roles[name] !== undefined, `exports ${name}`);
   }
 
-  assert(roles.ROLES.length === 20, 'exactly 20 roles');
-  assert(new Set(roles.ROLE_IDS).size === 20, 'role IDs are unique');
-  assert(roles.ENGINEERING_ROLE_IDS.length === 13, '13 engineering roles');
+  assert(roles.ROLES.length === 22, 'exactly 22 roles');
+  assert(new Set(roles.ROLE_IDS).size === 22, 'role IDs are unique');
+  assert(roles.ENGINEERING_ROLE_IDS.length === 15, '15 engineering roles');
   assert(roles.CATEGORY_ROLE_IDS.length === 7, '7 category roles');
   assert(roles.ROLE_IDS.includes('fact-checker'), 'fact-checker is included');
+  assert(roles.ROLE_IDS.includes('android') && roles.ROLE_IDS.includes('ios'),
+    'native mobile roles are included');
+  assert(roles.ROLE_IDS.slice(0, 20).join(',') === [
+    'lead', 'frontend', 'backend', 'fullstack', 'reviewer', 'tester', 'devops',
+    'security', 'data', 'docs', 'ai', 'designer', 'fact-checker',
+    'marketing-strategist', 'sales-strategist', 'project-manager',
+    'support-specialist', 'game-developer', 'media-buyer', 'compliance-legal'
+  ].join(','), 'all 20 upstream roles remain in order');
   assert(!roles.ROLE_IDS.includes('product-manager'), 'product-manager is out of agreed scope');
   assert(/^[0-9a-f]{40}$/.test(roles.UPSTREAM_REF), 'upstream ref is a pinned commit');
 
@@ -80,11 +88,21 @@ function main() {
   assert(roles.listRoles({ category: 'quality' }).length === 3, 'quality category filter');
   assert(roles.listRoles({ search: 'architecture' }).some((role) => role.id === 'lead'),
     'keyword search finds lead');
+  assert(roles.listRoles({ search: 'kotlin' }).some((role) => role.id === 'android'),
+    'keyword search finds android');
+  assert(roles.listRoles({ search: 'swiftui' }).some((role) => role.id === 'ios'),
+    'keyword search finds ios');
+  assert(roles.buildCharter('android', 'android').includes('Jetpack Compose'),
+    'android charter covers Jetpack Compose');
+  assert(roles.buildCharter('ios', 'ios').includes('Human Interface Guidelines'),
+    'ios charter covers the HIG');
 
   const templates = Object.fromEntries(roles.TEMPLATES.map((template) => [template.id, template]));
   assert(templates.software.roleIds.join(',') === SOFTWARE_IDS.join(','), 'software template roster');
-  assert(templates.engineering.roleIds.length === 13, 'engineering template size');
-  assert(templates.full.roleIds.length === 20, 'full template size');
+  assert(templates.engineering.roleIds.length === 15, 'engineering template size');
+  assert(templates.engineering.roleIds.includes('android') &&
+    templates.engineering.roleIds.includes('ios'), 'engineering template includes mobile roles');
+  assert(templates.full.roleIds.length === 22, 'full template size');
   assert(templates.custom.roleIds.length === 0, 'custom template starts empty');
   for (const template of roles.TEMPLATES) {
     for (const id of template.roleIds) {
@@ -101,6 +119,13 @@ function main() {
     assert(Array.isArray(member.fallback) && !member.fallback.includes(member.primary),
       `${member.name} fallback`);
     assert(member.charter.includes(`@${member.name}`), `${member.name} generated charter name`);
+  }
+
+  const engineeringMembers = roles.templateMembers('engineering');
+  for (const name of ['android', 'ios']) {
+    const member = engineeringMembers.find((entry) => entry.name === name);
+    assert(member && member.primary === 'Home-Ornith' &&
+      member.fallback[0] === 'Muse-Ember', `${name} provider preset`);
   }
 
   const nativeOnly = roles.applyProviderNames(roles.templateMembers('software'), []);
@@ -129,10 +154,10 @@ function main() {
   assert(prefixRename === '@architect and @lead-2', 'rename does not rewrite longer names');
 
   const stats = runCli(['--stats']);
-  assert(stats.includes('roles: 20'), 'CLI stats role count');
+  assert(stats.includes('roles: 22'), 'CLI stats role count');
   assert(stats.includes('templates: 4'), 'CLI stats template count');
   const list = JSON.parse(runCli(['--list', '--json']));
-  assert(list.length === 20, 'CLI list JSON count');
+  assert(list.length === 22, 'CLI list JSON count');
   const cliMembers = runCli(['--template', 'software']).trim().split('\n').map(JSON.parse);
   assert(cliMembers.length === 7, 'CLI template JSONL count');
   assert(cliMembers[0].name === 'lead', 'CLI template first member');
