@@ -17,7 +17,7 @@ Nothing here is magic. It is files that the installer drops into `~/.config/muse
 | `mcp/bridge.js` | The `muse-squad` MCP server: member-scoped routing over each member's provider chain. |
 | `mcp/config.js` | Reads and validates the TOML, expands `${ENV_VAR}` secrets, and redacts keys. |
 | `mcp/doctor.js` | Read-only health-check CLI used by `/squad-doctor`. |
-| `mcp/roles.js` | The 22-role catalog (20 pinned upstream roles plus local Android/iOS roles), templates, and charter generator. |
+| `mcp/roles.js` | The 23-role catalog (20 pinned upstream roles plus local Android/iOS/Flutter roles), templates, and charter generator. |
 | `mcp/register-settings.js` | Adds `muse-squad` to Muse's settings without breaking your other settings. |
 | `mcp/sync-team.js` | Regenerates the roster page and member wrappers from the TOML. |
 | `mcp/team-wizard.js` | Shared installer wizard for template/role selection and overrides. |
@@ -71,7 +71,7 @@ These URLs point straight at the files in this public repo. The installers are s
 
 Prompts work even when the installer is piped in (`curl ... | bash` or `irm ... | iex`). The script never reads user answers from stdin in that case, because stdin carries the installer itself. It reads from the controlling terminal instead: `/dev/tty` on macOS/Linux and `CONIN$` on Windows. If there is no controlling terminal—CI, cron, a detached SSH session without `-t`, or a service manager—prompts are skipped and the safe defaults are used.
 
-On a first install, the interactive flow asks `Customize Squad team members & models now? [Y/n]`, then asks `Create third-party model providers now? [y/N]`. Answer `n` to stay native-only, or `y` and enter provider names one at a time (blank line when done); setup creates minimal HTTP provider stubs from those names and fills them into the role-aware chains. No third-party provider is shipped by default. The next screen is a template picker backed by a catalog of 22 roles. The picker lists the member IDs in each template, for example `@lead, @frontend, @backend, @reviewer, @tester, @devops, @docs` for the default `software` team. Press Enter to accept the suggested team, or answer `N` to enter override mode. Overrides support `add <role>`, `remove <number>`, `rename <number> <name>`, `provider <number>`, `charter <number>`, `list`, `members`, and `done`. Invalid answers are reported immediately and re-asked, so a bad member name or a fallback that repeats the primary provider never gets written to `muse-squad.toml`.
+On a first install, the interactive flow asks `Customize Squad team members & models now? [Y/n]`, then asks `Create third-party model providers now? [y/N]`. Answer `n` to stay native-only, or `y` and enter provider names one at a time (blank line when done); setup creates minimal HTTP provider stubs from those names and fills them into the role-aware chains. No third-party provider is shipped by default. The next screen is a template picker backed by a catalog of 23 roles. The picker lists the member IDs in each template, for example `@lead, @frontend, @backend, @reviewer, @tester, @devops, @docs` for the default `software` team. Press Enter to accept the suggested team, or answer `N` to enter override mode. Overrides support `add <role>`, `remove <number>`, `rename <number> <name>`, `provider <number>`, `charter <number>`, `list`, `members`, and `done`. Invalid answers are reported immediately and re-asked, so a bad member name or a fallback that repeats the primary provider never gets written to `muse-squad.toml`.
 
 A fresh install seeds a native-only roster only to give the wizard providers to assign; it is not treated as an existing user team, so there is no `keep` / replace prompt. Re-run with `--reconfigure-team` to edit an existing squad, or accept the legacy migration offer; selecting a different template then asks for explicit confirmation before replacing the roster and regenerating charters. Declining keeps the existing TOML roster and charters. Use `--defaults` to skip the wizard entirely.
 
@@ -262,16 +262,16 @@ Each `[squad.<name>]` table has exactly three keys:
 
 At least one member is required. There are no extra keys such as role IDs, display names, responsibilities, or labels, and no per-repository settings. `schema = 1` is unchanged.
 
-`mcp/roles.js` carries 20 pinned roles adapted from GitHub Squad and agency-agents (MIT), plus two locally maintained native mobile roles (`android` and `ios`) grounded in official platform documentation. Four templates are available:
+`mcp/roles.js` carries 20 pinned roles adapted from GitHub Squad and agency-agents (MIT), plus three locally maintained roles (`android`, `ios`, and `flutter`) grounded in official platform/Flutter documentation. Four templates are available:
 
 | Template | Roles |
 | --- | --- |
 | `software` | Default: `lead`, `frontend`, `backend`, `reviewer`, `tester`, `devops`, `docs`. |
-| `engineering` | All 15 engineering, quality, operations, product, and design roles, including `android` and `ios`. |
-| `full` | All 22 roles, including business and category roles. |
+| `engineering` | All 16 engineering, quality, operations, product, and design roles, including `android`, `ios`, and `flutter`. |
+| `full` | All 23 roles, including business and category roles. |
 | `custom` | No preselected roles; add roles one at a time. |
 
-The full catalog includes `lead`, `frontend`, `backend`, `android`, `ios`, `fullstack`, `reviewer`, `tester`, `devops`, `security`, `data`, `docs`, `ai`, `designer`, `fact-checker`, `marketing-strategist`, `sales-strategist`, `project-manager`, `support-specialist`, `game-developer`, `media-buyer`, and `compliance-legal`. Default member names are the role IDs, so `@lead`, `@backend`, and `@reviewer` work out of the box. You can rename a member; the generated wrapper follows the TOML name, and the charter's explicit `@name` tokens are rewritten with it. After generation, the TOML is the source of truth: installers never rewrite existing member charters. Reapplying a template can replace them only after explicit confirmation.
+The full catalog includes `lead`, `frontend`, `backend`, `android`, `ios`, `flutter`, `fullstack`, `reviewer`, `tester`, `devops`, `security`, `data`, `docs`, `ai`, `designer`, `fact-checker`, `marketing-strategist`, `sales-strategist`, `project-manager`, `support-specialist`, `game-developer`, `media-buyer`, and `compliance-legal`. Default member names are the role IDs, so `@lead`, `@backend`, and `@reviewer` work out of the box. You can rename a member; the generated wrapper follows the TOML name, and the charter's explicit `@name` tokens are rewritten with it. After generation, the TOML is the source of truth: installers never rewrite existing member charters. Reapplying a template can replace them only after explicit confirmation.
 
 Role-aware `primary`/`fallback` defaults are suggestions, not locks. Every chain remains editable in the TOML or with `/squad-team`. Add, remove, or edit members with `/squad-team`, which validates every provider reference and regenerates the roster and wrappers.
 

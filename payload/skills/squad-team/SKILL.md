@@ -24,7 +24,7 @@ Every member needs at least one provider in its chain: `primary` and every `fall
 
 ## Built-in role catalog
 
-`mcp/roles.js` carries 20 pinned roles adapted from GitHub Squad and agency-agents (MIT), plus two locally maintained roles (`android` and `ios`) grounded in official platform documentation. Use it to generate names, charters, and templates; the TOML remains the source of truth after generation.
+`mcp/roles.js` carries 20 pinned roles adapted from GitHub Squad and agency-agents (MIT), plus three locally maintained roles (`android`, `ios`, and `flutter`) grounded in official platform/Flutter documentation. Use it to generate names, charters, and templates; the TOML remains the source of truth after generation.
 
 ```bash
 ROLES="$MUSE_CONFIG_DIR/mcp/roles.js"
@@ -41,11 +41,11 @@ On Windows without `MUSE_CONFIG_DIR`, use `node "$HOME\.config\muse\mcp\roles.js
 Templates:
 
 - `software` — default; `lead`, `frontend`, `backend`, `reviewer`, `tester`, `devops`, `docs`.
-- `engineering` — all 15 engineering, quality, operations, product, and design roles, including `android` and `ios`.
-- `full` — all 22 roles.
+- `engineering` — all 16 engineering, quality, operations, product, and design roles, including `android`, `ios`, and `flutter`.
+- `full` — all 23 roles.
 - `custom` — no preselected roles; add roles one at a time.
 
-Every role ID is a valid member slug. Use the role ID as the default member name (`@lead`, `@backend`, `@reviewer`) unless the user asks for a rename. `--template ... --json` also includes role-aware `primary`/`fallback` suggestions; treat them as defaults and apply the user's provider choices when overriding. Generated charters include an attribution comment and the sections Identity, Ownership, How I Work, Boundaries, Routing Cues, Voice, and Delegation. Pinned roles cite the MIT-licensed upstream; the local `android` and `ios` roles cite official platform documentation. Preserve them unless the user explicitly asks for a different charter.
+Every role ID is a valid member slug. Use the role ID as the default member name (`@lead`, `@backend`, `@reviewer`) unless the user asks for a rename. `--template ... --json` also includes role-aware `primary`/`fallback` suggestions; treat them as defaults and apply the user's provider choices when overriding. Generated charters include an attribution comment and the sections Identity, Ownership, How I Work, Boundaries, Routing Cues, Voice, and Delegation. Pinned roles cite the MIT-licensed upstream; the local `android`, `ios`, and `flutter` roles cite official platform/Flutter documentation. Preserve them unless the user explicitly asks for a different charter.
 
 ## Apply the change
 
