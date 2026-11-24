@@ -12,6 +12,8 @@ const path = require('path');
 const SCHEMA = 1;
 const PROVIDER_NAME_RE = /^[A-Za-z0-9._-]+$/;
 const MEMBER_NAME_RE = /^[a-z0-9][a-z0-9-]*$/;
+const MEMORY_DIR = '.muse';
+const MEMORY_DIR_RE = /^\.muse(?:\/[A-Za-z0-9._-]+)*$/;
 
 const PROVIDER_KEYS = new Set([
   'type', 'enabled', 'base_url', 'api_key', 'model', 'temperature', 'top_p',
@@ -23,6 +25,20 @@ const MEMBER_KEYS = new Set(['primary', 'fallback', 'charter']);
 
 function expandHome(value) {
   return String(value).replace(/^~(?=$|[\\/])/, os.homedir());
+}
+
+function normalizeMemoryDir(value, file) {
+  const raw = typeof value === 'string' && value ? value : MEMORY_DIR;
+  const normalized = raw.replace(/\\/g, '/');
+  const segments = normalized.split('/');
+  if (
+    path.isAbsolute(raw) || raw.startsWith('~') ||
+    !MEMORY_DIR_RE.test(normalized) ||
+    segments.some((segment) => segment === '.' || segment === '..')
+  ) {
+    throw new Error(`${file}: squad.memory_dir must be a repository-relative path under .muse`);
+  }
+  return normalized;
 }
 
 function configPath(options = {}) {
@@ -433,9 +449,7 @@ function validateConfig(raw, file) {
     file,
     squad: {
       name: typeof squadTable.name === 'string' && squadTable.name ? squadTable.name : 'Muse Squad',
-      memory_dir: typeof squadTable.memory_dir === 'string' && squadTable.memory_dir
-        ? squadTable.memory_dir
-        : '.muse/squad',
+      memory_dir: normalizeMemoryDir(squadTable.memory_dir, file),
       members
     },
     providers
@@ -538,6 +552,7 @@ module.exports = {
   SCHEMA,
   configPath,
   expandHome,
+  normalizeMemoryDir,
   loadConfig,
   parseToml,
   redactConfig,

@@ -6,6 +6,7 @@
 // muse-squad.toml. Zero npm dependencies, Node 18+ (global fetch).
 
 const configModule = require('./config.js');
+const memoryModule = require('./memory.js');
 
 const SERVER_NAME = 'muse-squad';
 const SERVER_VERSION = '0.3.0';
@@ -85,6 +86,31 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {},
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'memory_status',
+    description: 'Report repository-local .muse memory files, legacy .muse/squad content, and Git ignore status. Read-only.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_root: { type: 'string', description: 'Absolute repository root, usually from git rev-parse --show-toplevel.' }
+      },
+      required: ['repo_root'],
+      additionalProperties: false
+    }
+  },
+  {
+    name: 'memory_init',
+    description: 'Create the repository-local .muse/ layout and copy legacy .muse/squad memory without deleting the originals.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        repo_root: { type: 'string', description: 'Absolute repository root, usually from git rev-parse --show-toplevel.' },
+        include_plan: { type: 'boolean', description: 'Also create .muse/PLAN.md. Use only for /squad-plan or /squad-execute.' }
+      },
+      required: ['repo_root'],
       additionalProperties: false
     }
   }
@@ -471,8 +497,24 @@ function providerSummary(config, name) {
   };
 }
 
+function requiredRepoRoot(params) {
+  if (typeof params.repo_root !== 'string' || params.repo_root.trim() === '') {
+    throw new Error(`${params && params.__tool} requires a non-empty "repo_root"`);
+  }
+  return memoryModule.resolveRepoRoot(params.repo_root);
+}
+
 async function callTool(name, args) {
   const params = args || {};
+
+  if (name === 'memory_status' || name === 'memory_init') {
+    const repoRoot = requiredRepoRoot({ ...params, __tool: name });
+    const report = name === 'memory_status'
+      ? memoryModule.memoryStatus(repoRoot)
+      : memoryModule.memoryInit(repoRoot, { include_plan: params.include_plan === true });
+    return { content: [{ type: 'text', text: JSON.stringify(report, null, 2) }] };
+  }
+
   const config = loadConfigOrThrow();
 
   if (name === 'member_status') {

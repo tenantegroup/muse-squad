@@ -716,6 +716,8 @@ for phrase in \
   "Older squad config detected. Migrate to the role-catalog templates now? [y/N]" \
   "\$updateArgs = @('--dir', \$configDir)" \
   "mcp/team-wizard.js" \
+  "mcp/memory.js" \
+  "muse-squad:memory_status" \
   "--members-file" \
   "Built-in role catalog: 20 roles" \
   "MUSE_SQUAD_WIZARD_INPUT" \
@@ -723,6 +725,7 @@ for phrase in \
   "team config failed validation; no changes were written" \
   "MUSE_SQUAD_TTY" \
   "Get-Dest 'muse-squad.toml'" \
+  "repo-local .muse/PLAN.md" \
   "--uninstall         Remove managed files and unregister muse-squad" \
   '& node -e $nodeScript - $dest $membersFile'; do
   grep -qF -- "$phrase" "$ROOT/install.ps1" || fail "install.ps1 is missing: $phrase"
@@ -759,6 +762,23 @@ for file in "$ROOT/payload/skills/squad-plan/SKILL.md" \
   if grep -qF 'At startup, read `~/.config/muse/muse-squad.toml`' "$file"; then
     fail "$file still tells agents to Read the config outside the workspace"
   fi
+done
+for file in "$ROOT/payload/AGENTS.md" "$ROOT/README.md" \
+  "$ROOT/payload/skills/squad-plan/SKILL.md" "$ROOT/payload/skills/squad-execute/SKILL.md"; do
+  for phrase in '.muse/decisions.md' '.muse/history/' \
+    'muse-squad:memory_status' 'muse-squad:memory_init'; do
+    grep -qF "$phrase" "$file" || fail "$file is missing project memory phrase: $phrase"
+  done
+  if grep -qF '`.muse/squad/decisions.md`' "$file"; then
+    fail "$file still uses .muse/squad/decisions.md as the active memory path"
+  fi
+done
+for file in "$ROOT/README.md" "$ROOT/payload/skills/squad-plan/SKILL.md" \
+  "$ROOT/payload/skills/squad-execute/SKILL.md"; do
+  grep -qF '.muse/PLAN.md' "$file" || fail "$file is missing project memory phrase: .muse/PLAN.md"
+done
+for file in "$ROOT/README.md" "$ROOT/payload/skills/squad-execute/SKILL.md"; do
+  grep -qF '.muse/TODO.md' "$file" || fail "$file is missing project memory phrase: .muse/TODO.md"
 done
 
 echo "ALL INSTALL TESTS PASSED"

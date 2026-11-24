@@ -20,6 +20,7 @@ MANAGED_PATHS=(
   "skills/squad-doctor/SKILL.md"
   "skills/squad-plan/SKILL.md"
   "skills/squad-execute/SKILL.md"
+  "mcp/memory.js"
   "mcp/bridge.js"
   "mcp/config.js"
   "mcp/doctor.js"
@@ -837,7 +838,8 @@ if [[ "$MODE" == "install" && "$FIRST_INSTALL" == "1" ]]; then
   log ""
   log "Next steps:"
   log "  1. Configure: edit $CONFIG_DIR/muse-squad.toml (providers, endpoints, and squad members)."
-  log "  2. Use in Muse Code: /squad-plan to create .muse/PLAN.md, then /squad-execute."
+  log "  2. Use in Muse Code: /squad-plan to create repo-local .muse/PLAN.md, then /squad-execute."
+  log "     Existing repos: the first squad skill run copies legacy .muse/squad memory into .muse/."
   log "  3. Customize: edit muse-squad.toml; generated agents in $CONFIG_DIR/agents/ are rebuilt from it."
   log "  4. Check setup any time with /squad-doctor."
   log "  5. Update later: re-run this installer with --update."
@@ -1695,7 +1697,8 @@ if ($mode -eq 'install' -and $firstInstall) {
   Write-Host ''
   Write-Host 'Next steps:'
   Write-Host "  1. Configure: edit $(Join-Path $configDir 'muse-squad.toml') (providers, endpoints, and squad members)."
-  Write-Host '  2. Use in Muse Code: /squad-plan to create .muse/PLAN.md, then /squad-execute.'
+  Write-Host '  2. Use in Muse Code: /squad-plan to create repo-local .muse/PLAN.md, then /squad-execute.'
+  Write-Host '     Existing repos: the first squad skill run copies legacy .muse/squad memory into .muse/.'
   Write-Host "  3. Customize: edit muse-squad.toml; generated agents in $(Join-Path $configDir 'agents') are rebuilt from it."
   Write-Host '  4. Check setup any time with /squad-doctor.'
   Write-Host '  5. Update later: re-run this installer with --update.'

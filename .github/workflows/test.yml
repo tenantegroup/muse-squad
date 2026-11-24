@@ -22,3 +22,5 @@ jobs:
         run: bash scripts/test-install.sh
       - name: MCP bridge tests
         run: node scripts/test-mcp-bridge.js
+      - name: Project memory tests
+        run: node scripts/test-memory.js

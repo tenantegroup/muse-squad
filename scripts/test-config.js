@@ -127,7 +127,7 @@ async function main() {
   try {
     // --- Public surface ---------------------------------------------------
     for (const name of [
-      'SCHEMA', 'configPath', 'expandHome', 'loadConfig',
+      'SCHEMA', 'configPath', 'expandHome', 'normalizeMemoryDir', 'loadConfig',
       'parseToml', 'redactConfig', 'validateConfig'
     ]) {
       assert(typeof config[name] !== 'undefined', `exports ${name}`);
@@ -220,6 +220,7 @@ async function main() {
     assert(disabledConfig.providers.Second.enabled === false, 'enabled = false is parsed');
     assert(disabledConfig.providers.Second.api_key === '', 'disabled env key is not resolved');
     assert(disabledConfig.providers.Local.enabled === true, 'other providers stay enabled');
+    assert(loaded.squad.memory_dir === '.muse', 'project memory default is .muse');
     assert(loaded.squad.members.alpha.primary === 'Local', 'member primary');
     assert(JSON.stringify(loaded.squad.members.alpha.fallback) === '["Second","Third"]',
       'ordered fallback');
@@ -258,6 +259,15 @@ async function main() {
     for (const [name, provider] of Object.entries(bundledDefault.providers)) {
       assert(provider.enabled === true, `bundled default provider ${name} is explicitly enabled`);
     }
+    assert(bundledDefault.squad.memory_dir === '.muse', 'bundled default uses repo-local .muse');
+
+    const legacyMemoryFile = path.join(tempDir, 'legacy-memory.toml');
+    write(legacyMemoryFile, validConfigText().replace(
+      'schema = 1',
+      'schema = 1\n[squad]\nmemory_dir = ".muse/squad"'
+    ));
+    assert(config.loadConfig({ config_file: legacyMemoryFile }).squad.memory_dir === '.muse/squad',
+      'legacy .muse/squad memory_dir is still accepted');
 
     delete process.env[ENV_KEY];
     expectThrows(() => config.loadConfig({ config_file: validFile }),
@@ -332,6 +342,18 @@ async function main() {
     expectInvalid(base.replace('base_url = "http://127.0.0.1:1/v1"\n', ''),
       /base_url/, 'http provider requires base_url');
     expectInvalid(base.replace("model = 'local-model'", ''), /model/, 'provider requires model');
+    for (const [value, label] of [
+      ['/tmp/muse', 'absolute memory_dir'],
+      ['~/.muse', 'home-relative memory_dir'],
+      ['../.muse', 'parent-escaping memory_dir'],
+      ['memory', 'memory_dir outside .muse']
+    ]) {
+      expectInvalid(
+        base.replace('schema = 1', `schema = 1\n[squad]\nmemory_dir = ${JSON.stringify(value)}`),
+        /memory_dir/,
+        `${label} is rejected`
+      );
+    }
 
     // --- CLI --------------------------------------------------------------
     const cliDir = path.join(tempDir, 'cli-config');

@@ -301,8 +301,11 @@ async function run(port, tempDir, configFile) {
     const toolNames = list.result.tools.map((item) => item.name).sort();
     assert(
       JSON.stringify(toolNames) ===
-        JSON.stringify(['critique_plan', 'generate_code', 'list_providers', 'member_status']),
-      `tools are exactly the four expected names (got ${toolNames.join(',')})`
+        JSON.stringify([
+          'critique_plan', 'generate_code', 'list_providers', 'member_status',
+          'memory_init', 'memory_status'
+        ]),
+      `tools are exactly the six expected names (got ${toolNames.join(',')})`
     );
     const generateSchema = list.result.tools.find((item) => item.name === 'generate_code').inputSchema;
     const critiqueSchema = list.result.tools.find((item) => item.name === 'critique_plan').inputSchema;
@@ -328,6 +331,45 @@ async function run(port, tempDir, configFile) {
     }
     assert(!statusSchema.required || !statusSchema.required.includes('member'),
       'member_status member is optional');
+    const memoryStatusSchema = list.result.tools.find((item) => item.name === 'memory_status').inputSchema;
+    const memoryInitSchema = list.result.tools.find((item) => item.name === 'memory_init').inputSchema;
+    assert(memoryStatusSchema.required.includes('repo_root'), 'memory_status requires repo_root');
+    assert(memoryInitSchema.required.includes('repo_root'), 'memory_init requires repo_root');
+    assert(memoryInitSchema.properties.include_plan, 'memory_init accepts include_plan');
+
+    // --- Repository memory tools -----------------------------------------
+    const repoRoot = path.join(tempDir, 'memory-repo');
+    fs.mkdirSync(path.join(repoRoot, '.git'), { recursive: true });
+    fs.mkdirSync(path.join(repoRoot, '.muse', 'squad', 'history'), { recursive: true });
+    fs.writeFileSync(
+      path.join(repoRoot, '.muse', 'squad', 'decisions.md'),
+      'Bridge legacy decision.\n'
+    );
+    fs.writeFileSync(
+      path.join(repoRoot, '.muse', 'squad', 'history', 'atlas.md'),
+      'Bridge legacy learning.\n'
+    );
+
+    const memoryBefore = JSON.parse(
+      (await bridge.tool('memory_status', { repo_root: repoRoot })).result.content[0].text
+    );
+    assert(memoryBefore.ok === true && memoryBefore.legacy.present === true,
+      'memory_status finds legacy memory');
+    const memoryInitResult = JSON.parse(
+      (await bridge.tool('memory_init', {
+        repo_root: repoRoot, include_plan: true
+      })).result.content[0].text
+    );
+    assert(memoryInitResult.ok === true && memoryInitResult.planIncluded === true,
+      'memory_init runs through the bridge');
+    assert(memoryInitResult.copied.length === 2, 'memory_init copies both legacy files');
+    assert(fs.readFileSync(path.join(repoRoot, '.muse', 'PLAN.md'), 'utf8').includes('# Plan'),
+      'bridge memory_init creates the plan when requested');
+    const memoryAgain = JSON.parse(
+      (await bridge.tool('memory_init', { repo_root: repoRoot })).result.content[0].text
+    );
+    assert(memoryAgain.copied.length === 0 && memoryAgain.appended.length === 0,
+      'repeated bridge memory_init is idempotent');
 
     // --- Status tools -----------------------------------------------------
     const statusText = (await bridge.tool('member_status', {})).result.content[0].text;

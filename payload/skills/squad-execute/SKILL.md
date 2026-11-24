@@ -9,7 +9,9 @@ At startup, call `muse-squad:member_status` with no arguments to load the roster
 
 The Muse config lives in `~/.config/muse` outside the workspace. Do not use file tools to `Read` `muse-squad.toml` or `squad/team.md`; the sandbox rejects absolute paths outside the project. Use `/squad-team` when the config needs changes.
 
-If `.muse/squad/` does not exist yet, create `.muse/squad/decisions.md` and `.muse/squad/history/`. Every member reads both files before starting and appends concise lasting learnings when finished. Use isolated Git worktrees for bounded implementation tasks where available.
+Resolve the repository root with `git rev-parse --show-toplevel`. Call `muse-squad:memory_status` with that `repo_root`; if `.muse/` or any canonical file is missing, call `muse-squad:memory_init` with the same `repo_root` and `include_plan: true` before starting. Legacy `.muse/squad/` memory is copied into `.muse/decisions.md` and `.muse/history/` without deleting the originals. Every member reads `.muse/decisions.md` and `.muse/history/<name>.md` before work and appends concise lasting learnings when finished.
+
+These `.muse/` files are repository memory and should be committed with the project so other machines resume from the same plan, todo, decisions, and history. Never put API keys, absolute paths, or machine-specific provider details in them. Use isolated Git worktrees for bounded implementation tasks where available.
 
 ## TUI labels and reporting
 
@@ -71,7 +73,7 @@ Read `.muse/PLAN.md`, including any existing `## Execution Log & Decisions` sect
 1. Update `.muse/TODO.md` (create it from the plan if it does not exist). Check off only items whose changes are applied and verified; leave or add `- [ ]` items for remaining or newly discovered work. Record exact verification commands and results in the checklist.
 2. Run every verification command listed in `.muse/PLAN.md` from the repository root — for example `npm test`, `cargo check`, `pytest`, or `go test ./...`. If the plan lists none, detect the project's typechecker and test commands from its manifests, add them to `.muse/TODO.md`, and run them.
 3. If any command fails, fix the failure in another bounded wave with the appropriate named member and repeat this gate. Never mark an item done or claim success based on a partial pass.
-4. Append a short entry to `## Execution Log & Decisions` at the bottom of `.muse/PLAN.md` (create the section if absent). Record the wave number, what landed, decisions and *why*, gotchas discovered, exact verification commands and results, and any remaining work or blockers. Append only — never rewrite or delete earlier entries. Ask the documentation charter member (default `@docs`) to append durable decisions to `.muse/squad/decisions.md` and each member to append lasting learnings to its own `.muse/squad/history/<name>.md`.
+4. Append a short entry to `## Execution Log & Decisions` at the bottom of `.muse/PLAN.md` (create the section if absent). Record the wave number, what landed, decisions and *why*, gotchas discovered, exact verification commands and results, and any remaining work or blockers. Append only — never rewrite or delete earlier entries. Ask the documentation charter member (default `@docs`) to append durable decisions to `.muse/decisions.md` and each member to append lasting learnings to its own `.muse/history/<name>.md`.
 5. Only when all TODO items are checked and all verification commands pass, summarize what was verified and return control to the user, including the Subagents / Providers roster for the run.
 
 ## Session handoff notes

@@ -185,7 +185,8 @@ max_concurrency = 2
 
 [squad]
 name = "Muse Squad"
-memory_dir = ".muse/squad"
+# Project memory always lives at <repo>/.muse. This field is compatibility-only.
+memory_dir = ".muse"
 
 [squad.lead]
 primary = "Muse-Spark"
@@ -357,12 +358,23 @@ You do not need a slash command to get help. The installed `AGENTS.md` / `MUSE.m
 
 Normal sessions stay lightweight: no `.muse/PLAN.md` unless you invoke `/squad-plan` or explicitly ask for a formal multi-wave plan.
 
-Project memory lives in the repository, not in the global config:
+Project memory lives in each repository, not in the global config:
 
-- `.muse/squad/decisions.md` — shared decisions, appended after plans and waves.
-- `.muse/squad/history/<name>.md` — per-member conventions, file maps, and gotchas.
+```text
+.muse/
+  README.md          # what to commit and how to sync
+  PLAN.md            # current approved implementation plan
+  TODO.md            # checklist with verification commands and results
+  decisions.md       # append-only durable decisions
+  history/<name>.md  # append-only per-member learnings
+  local/             # machine-only scratch, ignored
+```
 
-The first named-member session creates these paths if missing. Members read them before work and append concise learnings when finished.
+Active paths are `.muse/PLAN.md`, `.muse/TODO.md`, `.muse/decisions.md`, and `.muse/history/<name>.md`.
+
+The first squad skill run in a repository resolves `git rev-parse --show-toplevel`, calls `muse-squad:memory_status`, then calls `muse-squad:memory_init` if anything is missing. `/squad-plan` and `/squad-execute` also pass `include_plan: true`; ordinary member runs create the minimal layout only. Legacy `.muse/squad/` decisions and history are copied into `.muse/` without deleting the originals.
+
+Commit the canonical `.muse/` files and pull them on other machines before resuming squad work. Never put API keys, absolute paths, or machine-specific provider details in them. A root `.gitignore` rule that ignores `.muse/` must be removed or narrowed, or these files will not sync.
 
 ---
 
