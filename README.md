@@ -275,7 +275,7 @@ The full catalog includes `lead`, `frontend`, `backend`, `fullstack`, `reviewer`
 
 Role-aware `primary`/`fallback` defaults are suggestions, not locks. Every chain remains editable in the TOML or with `/squad-team`. Add, remove, or edit members with `/squad-team`, which validates every provider reference and regenerates the roster and wrappers.
 
-The generated `squad/team.md` is the human-readable roster; `agents/<name>.md` wrappers are generated from the same TOML and should not be hand-edited. A member whose primary is native runs that native model directly. A member whose primary is HTTP gets a wrapper that pins a lightweight native runner and delegates heavy work to the `muse-squad` tools.
+The generated `squad/team.md` is the human-readable roster; `agents/<name>.md` wrappers are generated from the same TOML and should not be hand-edited. A member whose primary is native runs that native model directly; its HTTP providers are fallbacks for native failures. A member whose primary is HTTP gets a wrapper that pins a native tool-runner only: the runner inspects files, runs checks, and applies returned diffs, while all implementation and review content comes from the member-scoped `muse-squad` tools.
 
 ### Secrets and environment variables
 
@@ -310,7 +310,7 @@ On install, `mcp/register-settings.js` adds a server named `muse-squad` to `sett
 `generate_code` and `critique_plan` are **member-scoped**. The router resolves that member's `primary` first, then its `fallback` providers in order. Native providers cannot be called by the router; it skips them and tries the member's HTTP providers in chain order. Providers with `enabled = false` are skipped entirely, including in native wrappers; no chain edit is needed.
 
 - For a native-primary member, run the native subagent first. If it fails on quota, rate limits, or subscription limits, retry the same step through `muse-squad:generate_code` or `muse-squad:critique_plan` with `member="<name>"`; the router uses that member's HTTP fallbacks.
-- For an HTTP-primary member, the generated wrapper pins a lightweight native runner and delegates heavy work to `muse-squad` with `member="<name>"`.
+- For an HTTP-primary member, the generated wrapper pins a native tool-runner only. Every implementation or review step must first call `muse-squad:generate_code` or `muse-squad:critique_plan` with `member="<name>"`. Do NOT author code, diffs, or review findings natively. The runner may inspect files, run checks, and apply returned diffs; if no tool meta is returned, that HTTP chain did not serve the step.
 - There is no global fallback and no silent model switching. Every request stays inside the named member's chain.
 
 **Error behavior:** if no provider in the member chain can serve the request, the tool returns a hard error listing each attempted provider and why it failed. Skills stop the current wave or planning step, report the attempts, and ask you to fix that member's chain with `/squad-team`. They do not try another member, another provider, or inline work.
@@ -358,7 +358,7 @@ You do not need a slash command to get help. The installed `AGENTS.md` / `MUSE.m
 - Check `list_providers` / `member_status` first; respect each provider's `max_concurrency` and batch into waves.
 - Label each subagent `[<name> | <provider-name>] <action>`, apply surgical edits, and run incremental checks after patches.
 
-Normal sessions stay lightweight: no `.muse-squad/PLAN.md` unless you invoke `/squad-plan` or explicitly ask for a formal multi-wave plan.
+Normal sessions stay lightweight: no `.muse-squad/PLAN.md` unless you invoke `/squad-plan` or explicitly ask for a formal multi-wave plan. Delegation still applies — implementation and review are not done inline in the main session.
 
 Project memory lives in each repository, not in the global config:
 

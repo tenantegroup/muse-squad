@@ -175,6 +175,8 @@ try {
   expectContains(atlas.content, 'muse-squad:critique_plan', 'atlas member-scoped plan tool');
   expectContains(atlas.content, 'member="atlas"', 'atlas tool scoping');
   expectContains(atlas.content, 'quota, rate limits, or subscription limits', 'atlas native quota retry');
+  expectContains(atlas.content, 'Running this native subagent directly is expected',
+    'atlas native primary is explicit');
   expectContains(
     atlas.content,
     'Provider chain: `Native-Primary` (native) -> `Http-Fallback` (http) -> `Native-Fallback` (native).',
@@ -194,6 +196,13 @@ try {
   const runner = frontmatter(path.join(agentsDir, 'runner.md'));
   assert(runner.fields.model === RUNNER_MODEL, 'http-primary wrapper pins the lightweight runner');
   expectContains(runner.content, `\`model: ${RUNNER_MODEL}\` frontmatter`, 'runner tool-runner note');
+  expectContains(runner.content,
+    'Every implementation or review step must first call `muse-squad:generate_code`',
+    'runner mandatory generate_code routing');
+  expectContains(runner.content, 'Do NOT author code, diffs, or review findings natively',
+    'runner forbids native authoring');
+  expectContains(runner.content, 'If no tool meta is returned',
+    'runner requires provider meta');
   expectContains(runner.content, 'member="runner"', 'runner tool scoping');
   expectContains(runner.content, 'This member has no fallback.', 'runner no-fallback instruction');
   expectContains(runner.content, '[runner | Http-Primary] <action>', 'runner TUI label');

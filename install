@@ -937,7 +937,7 @@ At the start, use `muse-squad:list_providers` to learn each provider's `enabled`
 The router resolves the named member's `primary` first, then its `fallback` providers in order. Native providers are skipped by the router; HTTP providers are tried in chain order. Disabled providers are skipped entirely, even when listed as `primary`. There is no global fallback and no silent model switching.
 
 - **Native-primary member:** run the native subagent first. If the configured primary is disabled, skip the native turn and follow the generated wrapper's pinned provider. If it fails because of quota, rate limits, or subscription limits, retry that exact step through `muse-squad:critique_plan` (plan and review steps) or `muse-squad:generate_code` (code and diff steps) with `member="<name>"`. The router uses that member's HTTP fallbacks. Do not treat the failed native turn as the member's result.
-- **HTTP-primary member:** the generated wrapper pins a lightweight native runner and delegates heavy work to `muse-squad` with `member="<name>"`.
+- **HTTP-primary member:** the generated wrapper pins a native tool-runner only; it may inspect files, run checks, and apply returned diffs. Every implementation or review step must first call `muse-squad:critique_plan` (plan and review steps) or `muse-squad:generate_code` (code and diff steps) with `member="<name>"`. Do NOT author code, diffs, or review findings natively. If no tool meta is returned, the member's HTTP chain did not serve the step.
 
 If the member chain cannot serve the request, the tool returns a hard error listing every attempt. Stop planning, report the error and its attempts verbatim, and ask the user to fix that member's chain with `/squad-team`. Do not retry with a different member, a different provider, or inline work.
 
@@ -1004,7 +1004,7 @@ At the start, use `muse-squad:list_providers` to learn each provider's `enabled`
 The router resolves the named member's `primary` first, then its `fallback` providers in order. Disabled providers are skipped entirely, even when listed as `primary`. There is no global fallback and no silent model switching.
 
 - **Native-primary member:** run the native subagent first. If the configured primary is disabled, skip the native turn and follow the generated wrapper's pinned provider. If it fails because of quota, rate limits, or subscription limits, retry that exact step through `muse-squad:generate_code` (implementation steps) or `muse-squad:critique_plan` (reviews) with `member="<name>"`. The router uses that member's HTTP fallbacks. Do not treat the failed native turn as the member's result.
-- **HTTP-primary member:** the generated wrapper pins a lightweight native runner and delegates heavy work to `muse-squad` with `member="<name>"`.
+- **HTTP-primary member:** the generated wrapper pins a native tool-runner only; it may inspect files, run checks, and apply returned diffs. Every implementation or review step must first call `muse-squad:generate_code` (implementation) or `muse-squad:critique_plan` (reviews) with `member="<name>"`. Do NOT author code, diffs, or review findings natively. If no tool meta is returned, the member's HTTP chain did not serve the step.
 - Parallel calls to `muse-squad` are safe: the router queues requests and serializes them per HTTP provider's `max_concurrency`. Do not add separate locking in members.
 
 **Errors stop the wave.** If any member chain returns a hard error, stop the current wave immediately, report the error and every attempted provider verbatim, and ask the user to fix that member's chain with `/squad-team`. Do not retry with a different member, a different provider, or inline work, and do not advance to the next wave.
@@ -1016,7 +1016,7 @@ Before each `generate_code` call, check the target HTTP provider's `max_input_ch
 ## Patch discipline (diffs, not full rewrites)
 
 - Ask `generate_code` for a targeted unified diff (`git apply` format) for existing files. A single targeted function or block with its path and line range is acceptable when a diff is impractical; a full-file rewrite is not.
-- The orchestrator — the native runner in the wrapper, or any model with native `Edit` tools — applies each hunk surgically, preserving the rest of the file. Do not overwrite whole files with generated output.
+- The orchestrator applies each hunk surgically with native edit tools, preserving the rest of the file. For an HTTP-primary member, the orchestrator is only the tool-runner: the hunk must come from `generate_code` with `member="<name>"`; it may not author the hunk itself. Do not overwrite whole files with generated output.
 - Reject and re-prompt if the result is a full file, truncated content, `...`/placeholders, or an unapplyable diff. Never repair omitted code by guessing.
 - Run the fastest incremental check on changed files, then the Verification Gate after applying patches.
 
@@ -5227,13 +5227,15 @@ function buildWrapper(config, memberName, configFile) {
 
   if (pinnedProvider.type === 'native') {
     routing.push(
-      `- ${primaryLabel} \`${pinnedName}\` is a native Muse model and is pinned in frontmatter.`,
-      `- If this native turn fails because of quota, rate limits, or subscription limits, retry the SAME STEP through \`muse-squad:generate_code\` (or \`muse-squad:critique_plan\` for plans) with \`member="${member.name}"\`.`,
+      `- ${primaryLabel} \`${pinnedName}\` is a native Muse model and is pinned in frontmatter. Running this native subagent directly is expected for a native-primary member.`,
+      `- If this native turn fails because of quota, rate limits, or subscription limits, retry the SAME STEP through \`muse-squad:generate_code\` (or \`muse-squad:critique_plan\` for plans) with \`member="${member.name}"\`. Do not treat the failed native turn as this member's result.`,
       '- The router skips native providers it cannot call and tries the first HTTP provider in this member\'s chain.'
     );
   } else {
     routing.push(
-      `- ${primaryLabel} \`${pinnedName}\` is an HTTP provider. The \`model: ${RUNNER_MODEL}\` frontmatter makes this a lightweight tool-runner; delegate heavy code generation to \`muse-squad:generate_code\` or plan critique to \`muse-squad:critique_plan\` with \`member="${member.name}"\`.`
+      `- ${primaryLabel} \`${pinnedName}\` is an HTTP provider. The \`model: ${RUNNER_MODEL}\` frontmatter pins a native tool-runner only: it may inspect files, run checks, and apply the returned diff.`,
+      `- Every implementation or review step must first call \`muse-squad:generate_code\` (or \`muse-squad:critique_plan\` for plans) with \`member="${member.name}"\`. Do NOT author code, diffs, or review findings natively.`,
+      '- If no tool meta is returned, the HTTP chain did not serve the step; report that instead of claiming this provider answered.'
     );
   }
 
@@ -5924,8 +5926,8 @@ The MCP server is `muse-squad`. It exposes:
 
 `generate_code` and `critique_plan` are member-scoped. The router resolves that member's `primary` first, then its `fallback` providers in order. Native providers cannot be called by the router; they are skipped, and the router tries that member's HTTP providers in chain order. Providers with `enabled = false` are skipped entirely, even when listed as `primary`, and the next enabled provider in that member's chain serves the work. If no enabled provider in the member's chain can serve the request, the tool returns a hard error listing every attempt. There is no global fallback and no silent model switching.
 
-- For a native-primary member, run the native subagent first. If the configured primary is disabled, skip that native turn and follow the generated wrapper's pinned provider. If the native turn fails because of quota, rate limits, or subscription limits, retry that same step through `muse-squad:generate_code` or `muse-squad:critique_plan` with `member="<name>"`. The router uses that member's HTTP fallbacks. Do not treat the failed native turn as the member's result.
-- For an HTTP-primary member, the generated wrapper pins a lightweight native runner and delegates heavy work to `muse-squad:generate_code` or `muse-squad:critique_plan` with `member="<name>"`.
+- For a native-primary member, run the native subagent first; that is the member's configured primary. If the configured primary is disabled, skip that native turn and follow the generated wrapper's pinned provider. If the native turn fails because of quota, rate limits, or subscription limits, retry that same step through `muse-squad:generate_code` or `muse-squad:critique_plan` with `member="<name>"`. The router uses that member's HTTP fallbacks. Do not treat the failed native turn as the member's result.
+- For an HTTP-primary member, the generated wrapper pins a native tool-runner only. Every implementation or review step must first call `muse-squad:generate_code` or `muse-squad:critique_plan` with `member="<name>"`. Do NOT author code, diffs, or review findings natively. The runner may inspect files, run checks, and apply returned diffs. If no tool meta is returned, the member's HTTP chain did not serve the step — report that instead of claiming the configured provider answered.
 - Use `member_status` and `list_providers` to inspect limits and health before batching work. API keys are redacted.
 
 ### Global guardrails
@@ -5944,7 +5946,7 @@ Each named member reads `.muse-squad/decisions.md` and `.muse-squad/history/<nam
 
 ### Keep normal sessions lightweight
 
-Do not create `.muse-squad/PLAN.md` in a normal session unless `/squad-plan` is invoked or the user explicitly asks for a formal multi-wave plan. Wave batching, execution logs, and the strict verification gate are for the slash commands. In normal sessions, use the guardrails above with a brief task brief instead.
+Do not create `.muse-squad/PLAN.md` in a normal session unless `/squad-plan` is invoked or the user explicitly asks for a formal multi-wave plan. Wave batching, execution logs, and the strict verification gate are for the slash commands. Delegation still applies: in normal sessions, match every implementation and review step to a named member and never do that work inline in the main session. Keep the brief short; do not skip the member turn or the HTTP-primary tool call.
 <!-- muse-squad:end -->
 MSQ_AGENTS_POLICY
 uninstall_file agents/plan-reviewer.md

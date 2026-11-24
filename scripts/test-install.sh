@@ -718,6 +718,7 @@ for phrase in \
   "mcp/team-wizard.js" \
   "mcp/memory.js" \
   "muse-squad:memory_status" \
+  "Do NOT author code, diffs, or review findings natively" \
   "--members-file" \
   "Built-in role catalog: 20 roles" \
   "MUSE_SQUAD_WIZARD_INPUT" \
@@ -789,6 +790,10 @@ for file in "$ROOT/README.md" "$ROOT/payload/AGENTS.md" \
   "$ROOT/payload/skills/squad-plan/SKILL.md" \
   "$ROOT/payload/skills/squad-execute/SKILL.md"; do
   grep -qF '.muse/squad/' "$file" || fail "$file does not document legacy .muse/squad migration"
+  grep -qF 'Every implementation or review step' "$file" || \
+    fail "$file does not require member-scoped routing for every step"
+  grep -qF 'Do NOT author code, diffs, or review findings natively' "$file" || \
+    fail "$file does not forbid native authoring for HTTP-primary members"
 done
 
 echo "ALL INSTALL TESTS PASSED"

@@ -48,7 +48,7 @@ At the start, use `muse-squad:list_providers` to learn each provider's `enabled`
 The router resolves the named member's `primary` first, then its `fallback` providers in order. Disabled providers are skipped entirely, even when listed as `primary`. There is no global fallback and no silent model switching.
 
 - **Native-primary member:** run the native subagent first. If the configured primary is disabled, skip the native turn and follow the generated wrapper's pinned provider. If it fails because of quota, rate limits, or subscription limits, retry that exact step through `muse-squad:generate_code` (implementation steps) or `muse-squad:critique_plan` (reviews) with `member="<name>"`. The router uses that member's HTTP fallbacks. Do not treat the failed native turn as the member's result.
-- **HTTP-primary member:** the generated wrapper pins a lightweight native runner and delegates heavy work to `muse-squad` with `member="<name>"`.
+- **HTTP-primary member:** the generated wrapper pins a native tool-runner only; it may inspect files, run checks, and apply returned diffs. Every implementation or review step must first call `muse-squad:generate_code` (implementation) or `muse-squad:critique_plan` (reviews) with `member="<name>"`. Do NOT author code, diffs, or review findings natively. If no tool meta is returned, the member's HTTP chain did not serve the step.
 - Parallel calls to `muse-squad` are safe: the router queues requests and serializes them per HTTP provider's `max_concurrency`. Do not add separate locking in members.
 
 **Errors stop the wave.** If any member chain returns a hard error, stop the current wave immediately, report the error and every attempted provider verbatim, and ask the user to fix that member's chain with `/squad-team`. Do not retry with a different member, a different provider, or inline work, and do not advance to the next wave.
@@ -60,7 +60,7 @@ Before each `generate_code` call, check the target HTTP provider's `max_input_ch
 ## Patch discipline (diffs, not full rewrites)
 
 - Ask `generate_code` for a targeted unified diff (`git apply` format) for existing files. A single targeted function or block with its path and line range is acceptable when a diff is impractical; a full-file rewrite is not.
-- The orchestrator — the native runner in the wrapper, or any model with native `Edit` tools — applies each hunk surgically, preserving the rest of the file. Do not overwrite whole files with generated output.
+- The orchestrator applies each hunk surgically with native edit tools, preserving the rest of the file. For an HTTP-primary member, the orchestrator is only the tool-runner: the hunk must come from `generate_code` with `member="<name>"`; it may not author the hunk itself. Do not overwrite whole files with generated output.
 - Reject and re-prompt if the result is a full file, truncated content, `...`/placeholders, or an unapplyable diff. Never repair omitted code by guessing.
 - Run the fastest incremental check on changed files, then the Verification Gate after applying patches.
 

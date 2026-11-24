@@ -178,13 +178,15 @@ function buildWrapper(config, memberName, configFile) {
 
   if (pinnedProvider.type === 'native') {
     routing.push(
-      `- ${primaryLabel} \`${pinnedName}\` is a native Muse model and is pinned in frontmatter.`,
-      `- If this native turn fails because of quota, rate limits, or subscription limits, retry the SAME STEP through \`muse-squad:generate_code\` (or \`muse-squad:critique_plan\` for plans) with \`member="${member.name}"\`.`,
+      `- ${primaryLabel} \`${pinnedName}\` is a native Muse model and is pinned in frontmatter. Running this native subagent directly is expected for a native-primary member.`,
+      `- If this native turn fails because of quota, rate limits, or subscription limits, retry the SAME STEP through \`muse-squad:generate_code\` (or \`muse-squad:critique_plan\` for plans) with \`member="${member.name}"\`. Do not treat the failed native turn as this member's result.`,
       '- The router skips native providers it cannot call and tries the first HTTP provider in this member\'s chain.'
     );
   } else {
     routing.push(
-      `- ${primaryLabel} \`${pinnedName}\` is an HTTP provider. The \`model: ${RUNNER_MODEL}\` frontmatter makes this a lightweight tool-runner; delegate heavy code generation to \`muse-squad:generate_code\` or plan critique to \`muse-squad:critique_plan\` with \`member="${member.name}"\`.`
+      `- ${primaryLabel} \`${pinnedName}\` is an HTTP provider. The \`model: ${RUNNER_MODEL}\` frontmatter pins a native tool-runner only: it may inspect files, run checks, and apply the returned diff.`,
+      `- Every implementation or review step must first call \`muse-squad:generate_code\` (or \`muse-squad:critique_plan\` for plans) with \`member="${member.name}"\`. Do NOT author code, diffs, or review findings natively.`,
+      '- If no tool meta is returned, the HTTP chain did not serve the step; report that instead of claiming this provider answered.'
     );
   }
 
